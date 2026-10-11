@@ -133,4 +133,49 @@ mod tests {
         assert_eq!(error_message(401, r#"{"error":{"message":"That code is wrong or has expired.","type":"invalid_code"}}"#), "That code is wrong or has expired.");
         assert!(error_message(502, "<html>Bad gateway</html>").contains("(502)"));
     }
+
+    /// Against a real server/ in dev mode (SMTP_HOST empty, so it logs each code as JSON):
+    /// ECHOTYPE_CLOUD_URL=http://127.0.0.1:8790/v1 ECHOTYPE_TEST_EMAIL=a@example.com
+    /// ECHOTYPE_TEST_SERVER_LOG=<server stdout file> [ECHOTYPE_TEST_WAV=<speech.wav>] cargo test live_sign_in -- --ignored --nocapture
+    /// It leaves the key in the keychain (for a CLI run afterwards) unless ECHOTYPE_TEST_LOGOUT=1.
+    #[test]
+    #[ignore = "needs a running dev-mode server"]
+    fn live_sign_in() {
+        let email = std::env::var("ECHOTYPE_TEST_EMAIL").unwrap();
+        let log = std::env::var("ECHOTYPE_TEST_SERVER_LOG").unwrap();
+        assert_eq!(account().unwrap_err(), SIGNED_OUT);
+        start_login(&email).unwrap();
+        let code = std::fs::read_to_string(&log).unwrap().lines().rev()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|v| v["email"] == email.as_str() && v["code"].is_string())
+            .map(|v| v["code"].as_str().unwrap().to_string())
+            .expect("no dev-mode code in the server log");
+        assert!(verify(&email, "000000").is_err() || code == "000000");
+        let who = verify(&email, &code).unwrap();
+        assert_eq!(who, json!({ "email": email, "plan": "free" }));
+        assert!(settings::secret(SECRET).unwrap().is_some_and(|k| k.starts_with("et_live_")));
+        let me = account().unwrap();
+        println!("account: {me}");
+        assert_eq!(me["plan"], "free");
+        assert_eq!(me["words_limit"], 2000);
+        assert_eq!(billing_url(None).unwrap_err(), "Billing is not set up on this server.");
+        // The dictation pipeline with both stages on the cloud provider, using the one `cloud` key.
+        if let Ok(wav) = std::env::var("ECHOTYPE_TEST_WAV") {
+            let mut s = settings::Settings::default();
+            s.stt.provider = "cloud".into();
+            s.cleanup.enabled = true;
+            s.cleanup.provider = "cloud".into();
+            let pcm = crate::audio::decode(std::fs::read(wav).unwrap(), Some("wav")).unwrap();
+            let out = crate::cleanup::run(&s, &pcm, || {}).unwrap();
+            println!("pipeline: raw {:?}, text {:?}, warning {:?}", out.raw, out.text, out.warning);
+            assert_eq!(out.raw, "hello world");
+            let after = account().unwrap();
+            println!("account after: {after}");
+            assert_eq!(after["words_used"].as_i64().unwrap(), me["words_used"].as_i64().unwrap() + 2);
+        }
+        if std::env::var("ECHOTYPE_TEST_LOGOUT").is_ok_and(|v| v == "1") {
+            logout().unwrap();
+            assert_eq!(account().unwrap_err(), SIGNED_OUT);
+        }
+    }
 }
