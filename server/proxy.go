@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
@@ -16,7 +17,8 @@ import (
 
 const (
 	maxAudioBytes  = 25 << 20
-	maxChatBytes   = 64 << 10
+	maxChatBytes   = 16 << 10 // a cleanup prompt plus transcript is a few kB
+	maxChatMsgs    = 8
 	maxChatTokens  = 2048
 	maxPromptBytes = 4 << 10
 )
@@ -26,19 +28,28 @@ func (s *server) models(w http.ResponseWriter, _ *http.Request, _ account) {
 	m := func(id string) map[string]string {
 		return map[string]string{"id": id, "object": "model", "owned_by": "echotype"}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": []any{m(s.cfg.STTModel), m(s.cfg.LLMModel)}})
+	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": []any{m(s.cfg.STTModel), m(s.cfg.TranslateModel), m(s.cfg.LLMModel)}})
 }
 
-// POST /v1/audio/transcriptions (OpenAI-compatible multipart). The server's own model and
-// upstream key are used; the client's model field is ignored.
-func (s *server) transcribe(w http.ResponseWriter, r *http.Request, a account) {
+// POST /v1/audio/transcriptions and /v1/audio/translations (OpenAI-compatible multipart;
+// task is "transcriptions" or "translations"). The server's own model and upstream key are
+// used; the client's model field is ignored. Translations go to TRANSLATE_MODEL, return
+// English and take no language. Both are metered the same way.
+func (s *server) audio(task string) func(http.ResponseWriter, *http.Request, account) {
+	model := s.cfg.STTModel
+	if task == "translations" {
+		model = s.cfg.TranslateModel
+	}
+	return func(w http.ResponseWriter, r *http.Request, a account) { s.proxyAudio(w, r, a, task, model) }
+}
+
+func (s *server) proxyAudio(w http.ResponseWriter, r *http.Request, a account, task, model string) {
 	release, ok := s.limitKey(w, a)
 	if !ok {
 		return
 	}
 	defer release()
-	// ponytail: check-then-meter, so up to maxInflight requests can finish past the limit;
-	// reserve usage up front if that overshoot ever matters.
+	// Cheap refusal before reading 25 MB; the binding check is reserve() below.
 	if s.overQuota(w, r, a) {
 		return
 	}
@@ -100,9 +111,9 @@ func (s *server) transcribe(w http.ResponseWriter, r *http.Request, a account) {
 	mw := multipart.NewWriter(&buf)
 	fw, _ := mw.CreateFormFile("file", safeFilename(filename))
 	fw.Write(audio)
-	mw.WriteField("model", s.cfg.STTModel)
+	mw.WriteField("model", model)
 	mw.WriteField("response_format", "verbose_json")
-	if language != "" {
+	if language != "" && task == "transcriptions" {
 		mw.WriteField("language", language)
 	}
 	if prompt != "" {
@@ -110,7 +121,25 @@ func (s *server) transcribe(w http.ResponseWriter, r *http.Request, a account) {
 	}
 	mw.Close()
 
-	req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, s.cfg.STTURL+"/audio/transcriptions", &buf)
+	// WAV only: its duration is exact from the header, so the reservation below is a true
+	// upper bound taken before any upstream cost.
+	secs, isWav := wavSeconds(audio)
+	if !isWav {
+		apiError(w, http.StatusBadRequest, "invalid_request_error", "Echotype Cloud accepts WAV audio. The Echotype app converts recordings and voice notes automatically.")
+		return
+	}
+	row, ok := s.reserve(w, r, a, int64(secs*1000), 0)
+	if !ok {
+		return
+	}
+	settled := false
+	defer func() {
+		if !settled {
+			s.release(row)
+		}
+	}()
+
+	req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, s.cfg.STTURL+"/audio/"+task, &buf)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	req.Header.Set("Authorization", "Bearer "+s.cfg.STTKey)
 	body, ok := s.callUpstream(w, req, "stt")
@@ -127,21 +156,12 @@ func (s *server) transcribe(w http.ResponseWriter, r *http.Request, a account) {
 		return
 	}
 
-	// Audio seconds: WAV header when it parses (raised to the upstream's figure if that is
-	// larger), else the upstream's duration, else a conservative estimate from the size.
-	secs, isWav := wavSeconds(audio)
-	switch {
-	case out.Duration != nil && (!isWav || *out.Duration > secs):
+	// Metered seconds: the WAV header, raised to the upstream's figure if that is larger.
+	if out.Duration != nil && *out.Duration > secs {
 		secs = *out.Duration
-	case !isWav:
-		secs = estimateSeconds(len(audio))
 	}
-	words := len(strings.Fields(out.Text))
-	if _, err := s.db.ExecContext(r.Context(), `INSERT INTO usage (account_id, at, words, audio_ms) VALUES (?, ?, ?, ?)`,
-		a.ID, s.now().Unix(), words, int64(secs*1000)); err != nil {
-		// The transcript exists and the upstream has billed us; still answer, but make it loud.
-		slog.Error("meter usage", "account", a.ID, "words", words, "audio_ms", int64(secs*1000), "err", err)
-	}
+	s.settle(row, int64(len(strings.Fields(out.Text))), int64(secs*1000), 0)
+	settled = true
 	if format == "text" {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		io.WriteString(w, out.Text)
@@ -157,21 +177,18 @@ var chatFields = map[string]bool{
 	"max_tokens": true, "max_completion_tokens": true, "response_format": true, "reasoning_effort": true,
 }
 
-// POST /v1/chat/completions: transcript cleanup. Not metered, but only for accounts that may
-// still transcribe.
+// POST /v1/chat/completions: transcript cleanup, metered in tokens against its own budget and
+// only for accounts that may still transcribe.
 func (s *server) chat(w http.ResponseWriter, r *http.Request, a account) {
 	release, ok := s.limitKey(w, a)
 	if !ok {
 		return
 	}
 	defer release()
-	if s.overQuota(w, r, a) {
-		return
-	}
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxChatBytes))
 	if err != nil {
 		if tooLarge(err) {
-			apiError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Chat requests are limited to 64 KB.")
+			apiError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Chat requests are limited to 16 KB.")
 		} else {
 			apiError(w, http.StatusBadRequest, "invalid_request_error", "Could not read the request body.")
 		}
@@ -183,8 +200,8 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request, a account) {
 		return
 	}
 	var msgs []json.RawMessage
-	if json.Unmarshal(in["messages"], &msgs) != nil || len(msgs) == 0 {
-		apiError(w, http.StatusBadRequest, "invalid_request_error", "messages must be a non-empty array.")
+	if json.Unmarshal(in["messages"], &msgs) != nil || len(msgs) == 0 || len(msgs) > maxChatMsgs {
+		apiError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("messages must be an array of 1 to %d messages.", maxChatMsgs))
 		return
 	}
 	out := map[string]any{}
@@ -206,6 +223,19 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request, a account) {
 	out["stream"] = false
 	payload, _ := json.Marshal(out)
 
+	// Reserve the most this call can cost: about 3 bytes per input token, plus the output cap.
+	estimate := int64(len(payload)/3 + limit)
+	row, ok := s.reserve(w, r, a, 0, estimate)
+	if !ok {
+		return
+	}
+	settled := false
+	defer func() {
+		if !settled {
+			s.release(row)
+		}
+	}()
+
 	req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, s.cfg.LLMURL+"/chat/completions", bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.cfg.LLMKey)
@@ -213,6 +243,18 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request, a account) {
 	if !ok {
 		return
 	}
+	var resp struct {
+		Usage *struct {
+			Prompt     int64 `json:"prompt_tokens"`
+			Completion int64 `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	tokens := estimate
+	if json.Unmarshal(body, &resp) == nil && resp.Usage != nil && resp.Usage.Prompt+resp.Usage.Completion > 0 {
+		tokens = resp.Usage.Prompt + resp.Usage.Completion
+	}
+	s.settle(row, 0, 0, tokens)
+	settled = true
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(body)
 }

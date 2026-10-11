@@ -14,6 +14,8 @@
 //	STT_UPSTREAM_URL       OpenAI-compatible speech-to-text base URL (default https://api.groq.com/openai/v1)
 //	STT_UPSTREAM_KEY       bearer key for the STT upstream (required)
 //	STT_MODEL              model sent upstream; the client's model is ignored (default whisper-large-v3-turbo)
+//	TRANSLATE_MODEL        model for /v1/audio/translations (default whisper-large-v3; Groq's turbo
+//	                       model cannot translate)
 //	LLM_UPSTREAM_URL       OpenAI-compatible chat base URL (default STT_UPSTREAM_URL)
 //	LLM_UPSTREAM_KEY       bearer key for the chat upstream (default STT_UPSTREAM_KEY)
 //	LLM_MODEL              model sent upstream for cleanup (default openai/gpt-oss-20b)
@@ -43,7 +45,8 @@ import (
 type config struct {
 	Port, DatabasePath, PublicURL                             string
 	TrustProxy                                                bool
-	STTURL, STTKey, STTModel, LLMURL, LLMKey, LLMModel        string
+	STTURL, STTKey, STTModel, TranslateModel                  string
+	LLMURL, LLMKey, LLMModel                                  string
 	StripeKey, StripeWebhookSecret, PriceMonthly, PriceYearly string
 	SMTPHost, SMTPPort, SMTPUser, SMTPPass, SMTPFrom          string
 }
@@ -63,6 +66,7 @@ func loadConfig() config {
 		STTURL:              strings.TrimRight(env("STT_UPSTREAM_URL", "https://api.groq.com/openai/v1"), "/"),
 		STTKey:              env("STT_UPSTREAM_KEY", ""),
 		STTModel:            env("STT_MODEL", "whisper-large-v3-turbo"),
+		TranslateModel:      env("TRANSLATE_MODEL", "whisper-large-v3"),
 		LLMModel:            env("LLM_MODEL", "openai/gpt-oss-20b"),
 		StripeKey:           env("STRIPE_SECRET_KEY", ""),
 		StripeWebhookSecret: env("STRIPE_WEBHOOK_SECRET", ""),

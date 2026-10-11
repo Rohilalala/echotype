@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -41,7 +42,7 @@ func newHarness(t *testing.T, upstream http.HandlerFunc) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	cfg := config{PublicURL: "https://cloud.test", STTModel: "whisper-large-v3-turbo", LLMModel: "openai/gpt-oss-20b",
+	cfg := config{PublicURL: "https://cloud.test", STTModel: "whisper-large-v3-turbo", TranslateModel: "whisper-large-v3", LLMModel: "openai/gpt-oss-20b",
 		STTKey: "server-stt-key", LLMKey: "server-llm-key", StripeWebhookSecret: "whsec_test"}
 	if upstream != nil {
 		up := httptest.NewServer(upstream)
@@ -202,6 +203,48 @@ func TestAuthCodeAttemptLimit(t *testing.T) {
 	}
 }
 
+func TestAuthFailuresCappedPerEmailAcrossCodes(t *testing.T) {
+	x := newHarness(t, nil)
+	wrong := func() int {
+		bad := "000000"
+		if x.codes["a@b.co"] == bad {
+			bad = "111111"
+		}
+		return x.json("POST", "/v1/auth/verify", `{"email":"a@b.co","code":"`+bad+`"}`).Code
+	}
+	start := func() int { return x.json("POST", "/v1/auth/start", `{"email":"a@b.co"}`).Code }
+	// 5 wrong on code A, 4 on code B, 1 on a fresh code C: 10 failures in 24 h.
+	for i, tries := range []int{5, 4, 1} {
+		x.now = x.now.Add(10 * time.Minute)
+		if c := start(); c != 204 {
+			t.Fatalf("code %d: start %d", i, c)
+		}
+		for j := 0; j < tries; j++ {
+			if c := wrong(); c != 401 {
+				t.Fatalf("wrong guess: %d", c)
+			}
+		}
+	}
+	// The 11th check is refused even with the right, fresh code, and no new code is issued.
+	w := x.json("POST", "/v1/auth/verify", `{"email":"a@b.co","code":"`+x.codes["a@b.co"]+`"}`)
+	if w.Code != 401 || errType(t, w) != "invalid_code" {
+		t.Fatalf("locked email verified: %d %s", w.Code, w.Body)
+	}
+	x.now = x.now.Add(2 * time.Hour) // past the per-email start rate limit, inside the 24 h window
+	if c := start(); c != 429 {
+		t.Fatalf("locked email got a new code: %d", c)
+	}
+	// Other emails are unaffected.
+	if c := x.json("POST", "/v1/auth/start", `{"email":"c@d.co"}`).Code; c != 204 {
+		t.Fatalf("other email: %d", c)
+	}
+	// Once the oldest failures are 24 h old, sign-in works again.
+	x.now = x.now.Add(22 * time.Hour)
+	if key := x.signIn(t, "a@b.co"); !strings.HasPrefix(key, "et_live_") {
+		t.Fatal("no key after the window")
+	}
+}
+
 func TestAuthStartRateLimits(t *testing.T) {
 	x := newHarness(t, nil)
 	for i := 0; i < 5; i++ {
@@ -262,8 +305,8 @@ func TestFreeQuota(t *testing.T) {
 	key := x.signIn(t, "a@b.co")
 	id := accountID(t, x, "a@b.co")
 	// Last week's usage does not count.
-	x.s.db.Exec(`INSERT INTO usage VALUES (?, ?, 5000, 1000)`, id, t0.Add(-11*time.Hour).Unix())
-	x.s.db.Exec(`INSERT INTO usage VALUES (?, ?, 1999, 1000)`, id, t0.Add(-time.Hour).Unix())
+	x.s.db.Exec(`INSERT INTO usage (account_id, at, words, audio_ms) VALUES (?, ?, 5000, 1000)`, id, t0.Add(-11*time.Hour).Unix())
+	x.s.db.Exec(`INSERT INTO usage (account_id, at, words, audio_ms) VALUES (?, ?, 1999, 1000)`, id, t0.Add(-time.Hour).Unix())
 	me := decode(t, x.do("GET", "/v1/me", nil, bearer(key)...))
 	if me["words_used"] != float64(1999) || me["resets_at"] != "2026-10-19T00:00:00Z" {
 		t.Fatalf("me: %v", me)
@@ -290,8 +333,8 @@ func TestProFairUse(t *testing.T) {
 	key := x.signIn(t, "a@b.co")
 	id := accountID(t, x, "a@b.co")
 	x.s.db.Exec(`UPDATE accounts SET plan = 'pro' WHERE id = ?`, id)
-	x.s.db.Exec(`INSERT INTO usage VALUES (?, ?, 900000, ?)`, id, t0.Add(-24*time.Hour).Unix(), int64(40*3600*1000-1))
-	x.s.db.Exec(`INSERT INTO usage VALUES (?, ?, 1, 99999999)`, id, time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC).Unix()) // last month
+	x.s.db.Exec(`INSERT INTO usage (account_id, at, words, audio_ms) VALUES (?, ?, 900000, ?)`, id, t0.Add(-24*time.Hour).Unix(), int64(40*3600*1000-1000)) // exactly 1 s left
+	x.s.db.Exec(`INSERT INTO usage (account_id, at, words, audio_ms) VALUES (?, ?, 1, 99999999)`, id, time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC).Unix())  // last month
 	me := decode(t, x.do("GET", "/v1/me", nil, bearer(key)...))
 	if me["plan"] != "pro" || me["words_limit"] != float64(0) || me["resets_at"] != "2026-11-01T00:00:00Z" {
 		t.Fatalf("me: %v", me)
@@ -299,21 +342,24 @@ func TestProFairUse(t *testing.T) {
 	if w := transcribeReq(x, key, wavFile(1), nil); w.Code != 200 {
 		t.Fatalf("pro under ceiling with 900k words: %d", w.Code)
 	}
-	if w := transcribeReq(x, key, wavFile(1), nil); w.Code != 402 || !strings.Contains(w.Body.String(), "40 audio hours") {
+	if w := transcribeReq(x, key, wavFile(1), nil); w.Code != 402 || !strings.Contains(w.Body.String(), "40 hours of audio") {
 		t.Fatalf("pro over ceiling: %d %s", w.Code, w.Body)
 	}
 }
 
 // ---------- transcription proxy ----------
 
-// wavFile builds a 16 kHz mono 16-bit WAV of the given seconds.
-func wavFile(secs int) []byte {
-	data := make([]byte, 32000*secs)
+// wavFile builds a 16 kHz mono 16-bit PCM WAV of the given seconds, as the app sends.
+func wavFile(secs int) []byte { return wavOf(1, 16000, 16, secs) }
+
+// wavOf builds a mono WAV with the given format tag, sample rate and bit depth.
+func wavOf(tag uint16, rate uint32, bits uint16, secs int) []byte {
+	data := make([]byte, int(rate)*int(bits/8)*secs)
 	var b bytes.Buffer
 	b.WriteString("RIFF")
 	binary.Write(&b, binary.LittleEndian, uint32(36+len(data)))
 	b.WriteString("WAVEfmt ")
-	for _, v := range []any{uint32(16), uint16(1), uint16(1), uint32(16000), uint32(32000), uint16(2), uint16(16)} {
+	for _, v := range []any{uint32(16), tag, uint16(1), rate, rate * uint32(bits/8), bits / 8, bits} {
 		binary.Write(&b, binary.LittleEndian, v)
 	}
 	b.WriteString("data")
@@ -339,11 +385,17 @@ func TestWavSeconds(t *testing.T) {
 	if _, ok := wavSeconds([]byte("ID3\x03 not a wav")); ok {
 		t.Fatal("mp3 parsed as wav")
 	}
+	if _, ok := wavSeconds(wavOf(0x55, 16000, 16, 1)); ok {
+		t.Fatal("MP3-in-WAV (format 0x55) accepted")
+	}
+	if s, ok := wavSeconds(wavOf(3, 8000, 32, 2)); !ok || s != 2 {
+		t.Fatalf("float WAV: %v %v", s, ok)
+	}
 }
 
 type upstreamSeen struct {
-	auth, model, format, filename, language string
-	body                                    map[string]any
+	path, auth, model, format, filename, language string
+	body                                          map[string]any
 }
 
 var lastSeen upstreamSeen
@@ -352,9 +404,9 @@ var lastSeen upstreamSeen
 // with a canned reply, recording what it received.
 func fakeUpstream(t *testing.T, text string, duration float64) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		lastSeen = upstreamSeen{auth: r.Header.Get("Authorization")}
+		lastSeen = upstreamSeen{path: r.URL.Path, auth: r.Header.Get("Authorization")}
 		switch r.URL.Path {
-		case "/audio/transcriptions":
+		case "/audio/transcriptions", "/audio/translations":
 			if err := r.ParseMultipartForm(32 << 20); err != nil {
 				t.Errorf("upstream multipart: %v", err)
 			}
@@ -373,6 +425,10 @@ func fakeUpstream(t *testing.T, text string, duration float64) http.HandlerFunc 
 }
 
 func transcribeReq(x *harness, key string, audio []byte, fields map[string]string) *httptest.ResponseRecorder {
+	return audioReq(x, "/v1/audio/transcriptions", key, audio, fields)
+}
+
+func audioReq(x *harness, path, key string, audio []byte, fields map[string]string) *httptest.ResponseRecorder {
 	var b bytes.Buffer
 	mw := multipart.NewWriter(&b)
 	fw, _ := mw.CreateFormFile("file", "clip.wav")
@@ -381,7 +437,7 @@ func transcribeReq(x *harness, key string, audio []byte, fields map[string]strin
 		mw.WriteField(k, v)
 	}
 	mw.Close()
-	return x.do("POST", "/v1/audio/transcriptions", &b, append(bearer(key), "Content-Type", mw.FormDataContentType())...)
+	return x.do("POST", path, &b, append(bearer(key), "Content-Type", mw.FormDataContentType())...)
 }
 
 func TestTranscribeProxy(t *testing.T) {
@@ -406,10 +462,10 @@ func TestTranscribeProxy(t *testing.T) {
 		t.Fatalf("metered %d words, %d ms", words, ms)
 	}
 
-	// response_format=text returns plain text; a non-WAV file is metered by the upstream duration.
+	// response_format=text returns plain text; an upstream duration above the header's wins.
 	y := newHarness(t, fakeUpstream(t, "plain words", 7.25))
 	key = y.signIn(t, "a@b.co")
-	w = transcribeReq(y, key, []byte("ID3 fake mp3 bytes"), map[string]string{"response_format": "text"})
+	w = transcribeReq(y, key, wavFile(1), map[string]string{"response_format": "text"})
 	if w.Code != 200 || w.Body.String() != "plain words" || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/plain") {
 		t.Fatalf("text format: %d %q", w.Code, w.Body)
 	}
@@ -419,6 +475,28 @@ func TestTranscribeProxy(t *testing.T) {
 	}
 	if me := decode(t, y.do("GET", "/v1/me", nil, bearer(key)...)); me["words_used"] != float64(2) || me["audio_seconds_used"] != float64(7) {
 		t.Fatalf("me: %v", me)
+	}
+}
+
+func TestTranslateProxy(t *testing.T) {
+	x := newHarness(t, fakeUpstream(t, "Where are you going tomorrow", 2.5))
+	key := x.signIn(t, "a@b.co")
+	w := audioReq(x, "/v1/audio/translations", key, wavFile(2), map[string]string{"model": "whisper-1", "language": "hi"})
+	if w.Code != 200 || decode(t, w)["text"] != "Where are you going tomorrow" {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if lastSeen.path != "/audio/translations" || lastSeen.model != "whisper-large-v3" || lastSeen.auth != "Bearer server-stt-key" || lastSeen.language != "" {
+		t.Fatalf("upstream saw %+v", lastSeen)
+	}
+	var words, ms int64
+	x.s.db.QueryRow(`SELECT words, audio_ms FROM usage`).Scan(&words, &ms)
+	if words != 5 || ms != 2500 {
+		t.Fatalf("metered %d words, %d ms", words, ms)
+	}
+	// Same quota gate as transcriptions.
+	x.s.db.Exec(`INSERT INTO usage (account_id, at, words, audio_ms) VALUES (?, ?, 2000, 0)`, accountID(t, x, "a@b.co"), t0.Unix())
+	if w := audioReq(x, "/v1/audio/translations", key, wavFile(1), nil); w.Code != 402 {
+		t.Fatalf("over quota: %d", w.Code)
 	}
 }
 
@@ -458,6 +536,88 @@ func TestUpstreamErrorsDoNotLookLikeClientAuth(t *testing.T) {
 	key := x.signIn(t, "a@b.co")
 	if w := transcribeReq(x, key, wavFile(1), nil); w.Code != 502 {
 		t.Fatalf("upstream 401 became %d", w.Code)
+	}
+	var n int
+	x.s.db.QueryRow(`SELECT COUNT(*) FROM usage`).Scan(&n)
+	if n != 0 {
+		t.Fatal("reservation kept for a request the upstream did not serve")
+	}
+}
+
+// countingUpstream counts transcription calls and, when gate is non-nil, holds each one
+// until gate is closed.
+func countingUpstream(calls *atomic.Int32, gate chan struct{}, duration float64) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if gate != nil {
+			<-gate
+		}
+		json.NewEncoder(w).Encode(map[string]any{"text": "a b", "duration": duration})
+	}
+}
+
+func TestOnlyWAVAndBoundCheckedBeforeUpstream(t *testing.T) {
+	var calls atomic.Int32
+	x := newHarness(t, countingUpstream(&calls, nil, 1))
+	key := x.signIn(t, "a@b.co")
+	id := accountID(t, x, "a@b.co")
+	wantWAV := "Echotype Cloud accepts WAV audio."
+	for name, file := range map[string][]byte{
+		"compressed bytes": make([]byte, 6_000_000),
+		"mp3":              []byte("ID3\x03 fake mp3"),
+		"MP3-in-WAV":       wavOf(0x55, 16000, 16, 1),
+	} {
+		for _, path := range []string{"/v1/audio/transcriptions", "/v1/audio/translations"} {
+			w := audioReq(x, path, key, file, nil)
+			if w.Code != 400 || errType(t, w) != "invalid_request_error" || !strings.Contains(w.Body.String(), wantWAV) {
+				t.Fatalf("%s to %s: %d %s", name, path, w.Code, w.Body)
+			}
+		}
+	}
+	// 11 minutes of WAV (8 kHz, 8-bit): over Free's 10-minute request cap.
+	if w := transcribeReq(x, key, wavOf(1, 8000, 8, 11*60), nil); w.Code != 400 {
+		t.Fatalf("over the per-request cap: %d", w.Code)
+	}
+	// 6 minutes of WAV with 5 left this week: 402.
+	x.s.db.Exec(`INSERT INTO usage (account_id, at, words, audio_ms) VALUES (?, ?, 0, ?)`, id, t0.Unix(), (freeAudioSecondsPerWeek-300)*1000)
+	if w := transcribeReq(x, key, wavOf(1, 8000, 8, 6*60), nil); w.Code != 402 || errType(t, w) != "quota_exceeded" {
+		t.Fatalf("over the remaining allowance: %d %s", w.Code, w.Body)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("upstream called %d times for refused requests", calls.Load())
+	}
+	if w := transcribeReq(x, key, wavFile(3), nil); w.Code != 200 || calls.Load() != 1 {
+		t.Fatalf("short WAV: %d", w.Code)
+	}
+}
+
+func TestConcurrentRequestsCannotJointlyOvershoot(t *testing.T) {
+	var calls atomic.Int32
+	gate := make(chan struct{})
+	x := newHarness(t, countingUpstream(&calls, gate, 300))
+	key := x.signIn(t, "a@b.co")
+	id := accountID(t, x, "a@b.co")
+	// 10 minutes of audio left this week.
+	x.s.db.Exec(`INSERT INTO usage (account_id, at, words, audio_ms) VALUES (?, ?, 0, ?)`, id, t0.Unix(), (freeAudioSecondsPerWeek-600)*1000)
+
+	// Three 5-minute WAVs, all in flight at once.
+	five := wavOf(1, 8000, 8, 300)
+	codes := make(chan int, 3)
+	for i := 0; i < 3; i++ {
+		go func() { codes <- transcribeReq(x, key, five, nil).Code }()
+	}
+	refused := <-codes // only the one that does not fit can finish while the upstream is held
+	close(gate)
+	got := map[int]int{refused: 1}
+	got[<-codes]++
+	got[<-codes]++
+	if got[200] != 2 || got[402] != 1 || calls.Load() != 2 {
+		t.Fatalf("codes %v, upstream calls %d", got, calls.Load())
+	}
+	var ms int64
+	x.s.db.QueryRow(`SELECT SUM(audio_ms) FROM usage WHERE account_id = ?`, id).Scan(&ms)
+	if ms != freeAudioSecondsPerWeek*1000 {
+		t.Fatalf("audio used %d ms, allowance %d", ms, freeAudioSecondsPerWeek*1000)
 	}
 }
 
@@ -512,9 +672,9 @@ func TestChatProxyCaps(t *testing.T) {
 	if lastSeen.body["max_tokens"] != float64(300) || lastSeen.body["max_completion_tokens"] != nil {
 		t.Fatalf("smaller cap not kept: %v", lastSeen.body)
 	}
-	big := `{"messages":[{"role":"user","content":"` + strings.Repeat("a", 64<<10) + `"}]}`
+	big := `{"messages":[{"role":"user","content":"` + strings.Repeat("a", 16<<10) + `"}]}`
 	if w := x.json("POST", "/v1/chat/completions", big, bearer(key)...); w.Code != 413 {
-		t.Fatalf("64 KB+ body: %d", w.Code)
+		t.Fatalf("16 KB+ body: %d", w.Code)
 	}
 	if w := x.json("POST", "/v1/chat/completions", `{"messages":[]}`, bearer(key)...); w.Code != 400 {
 		t.Fatalf("empty messages: %d", w.Code)
@@ -523,8 +683,65 @@ func TestChatProxyCaps(t *testing.T) {
 		t.Fatalf("no key: %d", w.Code)
 	}
 	models := decode(t, x.do("GET", "/v1/models", nil, bearer(key)...))
-	if d, _ := models["data"].([]any); len(d) != 2 {
+	if d, _ := models["data"].([]any); len(d) != 3 {
 		t.Fatalf("models: %v", models)
+	}
+}
+
+func TestChatTokensMeteredAndCapped(t *testing.T) {
+	withUsage := true
+	x := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		if withUsage {
+			io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":120,"completion_tokens":30,"total_tokens":150}}`)
+		} else {
+			io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+		}
+	})
+	key := x.signIn(t, "a@b.co")
+	id := accountID(t, x, "a@b.co")
+	msg := `{"messages":[{"role":"user","content":"um so hi"}]}`
+	if w := x.json("POST", "/v1/chat/completions", msg, bearer(key)...); w.Code != 200 {
+		t.Fatalf("chat: %d", w.Code)
+	}
+	me := decode(t, x.do("GET", "/v1/me", nil, bearer(key)...))
+	if me["tokens_used"] != float64(150) || me["tokens_limit"] != float64(100_000) {
+		t.Fatalf("metered from upstream usage: %v", me)
+	}
+	// Without usage in the reply: bytes/3 of the forwarded body + the max_tokens cap.
+	withUsage = false
+	x.json("POST", "/v1/chat/completions", msg, bearer(key)...)
+	var last int64
+	x.s.db.QueryRow(`SELECT tokens FROM usage WHERE account_id = ? ORDER BY rowid DESC LIMIT 1`, id).Scan(&last)
+	if last < 2048 || last > 2048+100 {
+		t.Fatalf("estimated tokens = %d", last)
+	}
+	// Budget spent: 402, and the upstream is not called.
+	x.s.db.Exec(`INSERT INTO usage (account_id, at, words, audio_ms, tokens) VALUES (?, ?, 0, 0, 100000)`, id, t0.Unix())
+	w := x.json("POST", "/v1/chat/completions", msg, bearer(key)...)
+	if w.Code != 402 || !strings.Contains(w.Body.String(), "cleanup tokens") {
+		t.Fatalf("over token budget: %d %s", w.Code, w.Body)
+	}
+	// Transcription is still allowed: the token budget only gates cleanup.
+	if w := transcribeReq(x, key, wavFile(1), nil); w.Code != 200 {
+		t.Fatalf("transcribe with tokens spent: %d %s", w.Code, w.Body)
+	}
+	// Caps: 16 KB body, 8 messages.
+	big := `{"messages":[{"role":"user","content":"` + strings.Repeat("a", 16<<10) + `"}]}`
+	if w := x.json("POST", "/v1/chat/completions", big, bearer(key)...); w.Code != 413 {
+		t.Fatalf("16 KB+ body: %d", w.Code)
+	}
+	nine := `{"messages":[` + strings.TrimSuffix(strings.Repeat(`{"role":"user","content":"x"},`, 9), ",") + `]}`
+	if w := x.json("POST", "/v1/chat/completions", nine, bearer(key)...); w.Code != 400 {
+		t.Fatalf("9 messages: %d", w.Code)
+	}
+	// Pro: 4M a month.
+	x.s.db.Exec(`UPDATE accounts SET plan = 'pro' WHERE id = ?`, id)
+	if w := x.json("POST", "/v1/chat/completions", msg, bearer(key)...); w.Code != 200 {
+		t.Fatalf("pro chat: %d %s", w.Code, w.Body)
+	}
+	if me := decode(t, x.do("GET", "/v1/me", nil, bearer(key)...)); me["tokens_limit"] != float64(4_000_000) {
+		t.Fatalf("pro me: %v", me)
 	}
 }
 
