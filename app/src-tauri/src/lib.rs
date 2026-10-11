@@ -457,9 +457,14 @@ pub fn run() {
             if let Err(e) = swap_hotkey(app.handle(), None, &s.hotkey) {
                 eprintln!("echotype: {e}");
             }
-            if let Err(e) = apply_local_api(app.handle(), &s) {
-                eprintln!("echotype: {e}");
-            }
+            // Off the main thread: the keychain read can wait on an access prompt (an unsigned
+            // rebuild is a new identity to macOS), which must not freeze startup.
+            let (handle, api_settings) = (app.handle().clone(), s.clone());
+            std::thread::spawn(move || {
+                if let Err(e) = apply_local_api(&handle, &api_settings) {
+                    eprintln!("echotype: {e}");
+                }
+            });
             if !s.onboarded {
                 show_main(app.handle());
             }
