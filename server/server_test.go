@@ -202,6 +202,48 @@ func TestAuthCodeAttemptLimit(t *testing.T) {
 	}
 }
 
+func TestAuthFailuresCappedPerEmailAcrossCodes(t *testing.T) {
+	x := newHarness(t, nil)
+	wrong := func() int {
+		bad := "000000"
+		if x.codes["a@b.co"] == bad {
+			bad = "111111"
+		}
+		return x.json("POST", "/v1/auth/verify", `{"email":"a@b.co","code":"`+bad+`"}`).Code
+	}
+	start := func() int { return x.json("POST", "/v1/auth/start", `{"email":"a@b.co"}`).Code }
+	// 5 wrong on code A, 4 on code B, 1 on a fresh code C: 10 failures in 24 h.
+	for i, tries := range []int{5, 4, 1} {
+		x.now = x.now.Add(10 * time.Minute)
+		if c := start(); c != 204 {
+			t.Fatalf("code %d: start %d", i, c)
+		}
+		for j := 0; j < tries; j++ {
+			if c := wrong(); c != 401 {
+				t.Fatalf("wrong guess: %d", c)
+			}
+		}
+	}
+	// The 11th check is refused even with the right, fresh code, and no new code is issued.
+	w := x.json("POST", "/v1/auth/verify", `{"email":"a@b.co","code":"`+x.codes["a@b.co"]+`"}`)
+	if w.Code != 401 || errType(t, w) != "invalid_code" {
+		t.Fatalf("locked email verified: %d %s", w.Code, w.Body)
+	}
+	x.now = x.now.Add(2 * time.Hour) // past the per-email start rate limit, inside the 24 h window
+	if c := start(); c != 429 {
+		t.Fatalf("locked email got a new code: %d", c)
+	}
+	// Other emails are unaffected.
+	if c := x.json("POST", "/v1/auth/start", `{"email":"c@d.co"}`).Code; c != 204 {
+		t.Fatalf("other email: %d", c)
+	}
+	// Once the oldest failures are 24 h old, sign-in works again.
+	x.now = x.now.Add(22 * time.Hour)
+	if key := x.signIn(t, "a@b.co"); !strings.HasPrefix(key, "et_live_") {
+		t.Fatal("no key after the window")
+	}
+}
+
 func TestAuthStartRateLimits(t *testing.T) {
 	x := newHarness(t, nil)
 	for i := 0; i < 5; i++ {

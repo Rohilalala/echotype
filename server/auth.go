@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"crypto/tls"
@@ -22,6 +23,10 @@ const (
 	keyPrefix    = "et_live_"
 	codeTTL      = 10 * time.Minute
 	maxCodeTries = 5
+	// Wrong codes per email per rolling 24 h, across every code issued. A new code does not
+	// reset it, so an attacker gets 10 guesses a day at a 1-in-a-million code.
+	maxEmailFailures = 10
+	failureWindow    = 24 * time.Hour
 )
 
 // normalizeEmail lowercases and validates a bare address ("a@b.co", no display name).
@@ -60,6 +65,14 @@ func (s *server) authStart(w http.ResponseWriter, r *http.Request) {
 	now := s.now()
 	if !s.limits.allow("start-ip:"+s.clientIP(r), 20, time.Hour, now) || !s.limits.allow("start-email:"+email, 5, time.Hour, now) {
 		apiError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "Too many sign-in codes requested. Try again later.")
+		return
+	}
+	if locked, err := s.emailLocked(r, s.db, email); err != nil || locked {
+		if err != nil {
+			internalError(w, "auth failures", err)
+		} else {
+			apiError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "Too many sign-in attempts for this email. Try again tomorrow.")
+		}
 		return
 	}
 	n, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
@@ -118,6 +131,16 @@ func (s *server) authVerify(w http.ResponseWriter, r *http.Request) {
 
 var errBadCode = errors.New("bad code")
 
+// emailLocked reports whether the email has used up its wrong-code allowance for the window.
+func (s *server) emailLocked(r *http.Request, q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, email string) (bool, error) {
+	var n int
+	err := q.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM auth_failures WHERE email = ? AND at > ?`,
+		email, s.now().Add(-failureWindow).Unix()).Scan(&n)
+	return n >= maxEmailFailures, err
+}
+
 func (s *server) redeemCode(r *http.Request, email, code string) (key, plan string, err error) {
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
@@ -125,6 +148,11 @@ func (s *server) redeemCode(r *http.Request, email, code string) (key, plan stri
 	}
 	defer tx.Rollback()
 	now := s.now()
+	if locked, err := s.emailLocked(r, tx, email); err != nil {
+		return "", "", err
+	} else if locked {
+		return "", "", errBadCode
+	}
 	// Count the attempt before comparing, so a crash or a race cannot buy extra guesses.
 	var stored []byte
 	err = tx.QueryRow(`UPDATE login_codes SET attempts = attempts + 1
@@ -137,7 +165,16 @@ func (s *server) redeemCode(r *http.Request, email, code string) (key, plan stri
 		return "", "", err
 	}
 	if subtle.ConstantTimeCompare(stored, codeHash(email, code)) != 1 {
-		return "", "", errors.Join(errBadCode, tx.Commit())
+		if _, err := tx.Exec(`DELETE FROM auth_failures WHERE email = ? AND at <= ?`, email, now.Add(-failureWindow).Unix()); err != nil {
+			return "", "", err
+		}
+		if _, err := tx.Exec(`INSERT INTO auth_failures (email, at) VALUES (?, ?)`, email, now.Unix()); err != nil {
+			return "", "", err
+		}
+		if err := tx.Commit(); err != nil {
+			return "", "", err
+		}
+		return "", "", errBadCode
 	}
 	if _, err = tx.Exec(`DELETE FROM login_codes WHERE email = ?`, email); err != nil {
 		return "", "", err
