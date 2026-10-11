@@ -13,11 +13,10 @@ const settings = {
   cleanup: { enabled: true, provider: 'ollama', model: 'gemma3:4b', base_url: '', style: 'default', custom_instructions: '' },
   dictionary: ['Echotype', 'Tauri', 'Hinglish', 'Supabase'],
   replacements: [{ from: 'my email', to: 'aditya@example.com' }],
-  restore_clipboard: true, history_enabled: true, sounds: true,
+  restore_clipboard: true, history_enabled: true,
   onboarded: !q.has('onboarding'),
 };
 const presets = [
-  { id: 'local', label: 'Local', stt: true, cleanup: false, base_url: '', default_stt_model: '', default_cleanup_model: '', needs_key: false },
   { id: 'openai', label: 'OpenAI', stt: true, cleanup: true, base_url: 'https://api.openai.com/v1', default_stt_model: 'gpt-4o-mini-transcribe', default_cleanup_model: 'gpt-4.1-mini', needs_key: true },
   { id: 'groq', label: 'Groq', stt: true, cleanup: true, base_url: 'https://api.groq.com/openai/v1', default_stt_model: 'whisper-large-v3-turbo', default_cleanup_model: 'llama-3.1-8b-instant', needs_key: true },
   { id: 'openrouter', label: 'OpenRouter', stt: false, cleanup: true, base_url: 'https://openrouter.ai/api/v1', default_stt_model: '', default_cleanup_model: 'meta-llama/llama-3.1-8b-instruct', needs_key: true },

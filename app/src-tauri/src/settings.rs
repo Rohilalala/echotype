@@ -33,7 +33,6 @@ pub struct Settings {
     pub replacements: Vec<Replacement>,
     pub restore_clipboard: bool,
     pub history_enabled: bool,
-    pub sounds: bool,
     pub onboarded: bool,
 }
 
@@ -91,7 +90,6 @@ impl Default for Settings {
             replacements: vec![],
             restore_clipboard: true,
             history_enabled: true,
-            sounds: true,
             onboarded: false,
         }
     }

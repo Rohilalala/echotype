@@ -219,6 +219,7 @@ function renderHero() {
     line.replaceChildren(S.mode === 'toggle' ? 'Press' : 'Hold', ...keycaps(S.hotkey), 'to dictate');
     if (b) sub.replaceChildren(h('span', {}, b.text), h('button', { className: 'btn', type: 'button', onclick: b.act }, b.label));
     else if (st === 'error') sub.replaceChildren(h('span', {}, `${dictation.error || 'Dictation stopped.'} Try again, or check Settings.`), start);
+    else if (st === 'done' && dictation.warning) sub.replaceChildren(h('span', {}, dictation.warning), start);
     else sub.replaceChildren(h('span', {}, 'Text appears wherever your cursor is.'), start);
   }
 }
@@ -249,7 +250,8 @@ function renderDrops() {
     const secs = ((r.stt_ms || 0) + (r.cleanup_ms || 0)) / 1000;
     return h('div', { className: 'result' },
       h('div', { className: 'result-head' }, h('span', { className: 'result-name', title: r.path }, r.name), h('span', { className: 'result-meta', title: timingTitle(r) }, `${secs.toFixed(1)} s`), seg, copy, dismiss(r)),
-      h('p', { className: 'text' }, r.showRaw ? r.raw : r.text));
+      h('p', { className: 'text' }, r.showRaw ? r.raw : r.text),
+      r.warning && h('p', { className: 'hint' }, r.warning));
   }));
 }
 const timingTitle = r => `Speech ${r.stt_ms} ms` + (r.cleanup_ms ? `, cleanup ${r.cleanup_ms} ms` : '');
@@ -331,7 +333,7 @@ async function renderKey(kind) {
 // ---------- speech model ----------
 function renderStt() {
   const seg = $('#sttProvider');
-  seg.replaceChildren(...presets.filter(p => p.stt).map(p =>
+  seg.replaceChildren(...[{ id: 'local', label: 'Local' }, ...presets.filter(p => p.stt)].map(p =>
     h('label', {}, h('input', { type: 'radio', name: 'sttp', value: p.id, checked: p.id === S.stt.provider, onchange: () => setProvider('stt', p.id) }), h('span', {}, p.label))));
   const local = S.stt.provider === 'local';
   $('#sttLocal').hidden = !local;
