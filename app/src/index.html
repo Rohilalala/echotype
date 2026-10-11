@@ -65,6 +65,12 @@
           <input type="text" id="sttModel" data-bind="stt.model" spellcheck="false" /></label>
         <div class="row key-row" data-key="stt"></div>
       </div>
+
+      <div id="cloudBox" hidden>
+        <h2 class="group-title">Echotype Cloud account</h2>
+        <p class="lede small">Free includes 2,000 words a week. Pro has unlimited words for $6 a month or $60 a year. Echotype Cloud keeps word and audio-time counts, not your audio or text.</p>
+        <div class="group" id="cloudAccount"></div>
+      </div>
     </section>
 
     <!-- Cleanup -->
@@ -86,6 +92,7 @@
           <label class="row"><span class="row-text"><span class="row-title">Model</span></span>
             <input type="text" id="cleanupModel" data-bind="cleanup.model" spellcheck="false" /></label>
           <div class="row key-row" data-key="cleanup"></div>
+          <div class="row" id="cleanupCloud" hidden></div>
         </div>
 
         <h2 class="group-title">Style</h2>

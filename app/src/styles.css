@@ -488,3 +488,13 @@ body[data-state="error"] .hero-sub span:first-child { color: var(--bad); }
   .switch, .switch::before, .bar > i, .meter i, .drop { transition: none; }
   .working::after { animation: none; border-top-color: var(--line-strong); }
 }
+
+/* Echotype Cloud account: same grouped rows; fields sized for an email and a 6-digit code. */
+#cloudAccount input { width: 200px; }
+#cloudAccount input.code { width: 96px; font-variant-numeric: tabular-nums; }
+@media (max-width: 620px) {
+  #cloudAccount .actions { flex: 1 1 100%; flex-wrap: wrap; }
+  #cloudAccount .actions input { flex: 1; min-width: 0; }
+  section > .seg { flex-wrap: wrap; }
+  section > .seg span { white-space: nowrap; }
+}
