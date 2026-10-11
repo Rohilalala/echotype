@@ -309,10 +309,11 @@ async fn save_settings(app: AppHandle, settings: Settings) -> R<()> {
     let old = current_settings(&app);
     let (new, warning) = commit(&old, settings, |o, n| swap_hotkey(&app, Some(o), n), Settings::save)?;
     *state(&app).settings.lock().unwrap_or_else(|e| e.into_inner()) = new.clone();
-    apply_local_api(&app, &new)?;
     if (new.stt.local_model != old.stt.local_model || new.stt.provider != old.stt.provider) && new.stt.provider == "local" {
-        std::thread::spawn(move || stt::warm_up(&new));
+        let s = new.clone();
+        std::thread::spawn(move || stt::warm_up(&s));
     }
+    apply_local_api(&app, &new)?;
     warning.map_or(Ok(()), Err)
 }
 
@@ -668,7 +669,10 @@ mod tests {
         let mut new = old.clone();
         new.onboarded = true;
         let saved = RefCell::new(None);
-        let (kept, warning) = commit(&old, new, |_, _| panic!("swapped an unchanged hotkey"), |s| Ok(*saved.borrow_mut() = Some(s.clone()))).unwrap();
+        let (kept, warning) = commit(&old, new, |_, _| panic!("swapped an unchanged hotkey"), |s| {
+            *saved.borrow_mut() = Some(s.clone());
+            Ok(())
+        }).unwrap();
         assert!(kept.onboarded && warning.is_none());
         assert_eq!(saved.into_inner(), Some(kept));
     }
@@ -680,7 +684,10 @@ mod tests {
         new.hotkey = "Control+Alt+KeyK".into();
         new.history_enabled = false;
         let saved = RefCell::new(None);
-        let (kept, warning) = commit(&old, new, |_, n| Err(format!("Could not register hotkey '{n}'")), |s| Ok(*saved.borrow_mut() = Some(s.clone()))).unwrap();
+        let (kept, warning) = commit(&old, new, |_, n| Err(format!("Could not register hotkey '{n}'")), |s| {
+            *saved.borrow_mut() = Some(s.clone());
+            Ok(())
+        }).unwrap();
         assert_eq!(kept.hotkey, "Alt+Space");
         assert!(!kept.history_enabled);
         assert!(warning.unwrap().contains("other settings were saved"));
@@ -693,7 +700,10 @@ mod tests {
         let mut new = old.clone();
         new.hotkey = "Control+Alt+KeyK".into();
         let swaps = RefCell::new(vec![]);
-        let err = commit(&old, new, |o, n| Ok(swaps.borrow_mut().push((o.to_string(), n.to_string()))), |_| Err("disk full".into())).unwrap_err();
+        let err = commit(&old, new, |o, n| {
+            swaps.borrow_mut().push((o.to_string(), n.to_string()));
+            Ok(())
+        }, |_| Err("disk full".into())).unwrap_err();
         assert_eq!(err, "disk full");
         let k = |a: &str, b: &str| (a.to_string(), b.to_string());
         assert_eq!(swaps.into_inner(), vec![k("Alt+Space", "Control+Alt+KeyK"), k("Control+Alt+KeyK", "Alt+Space")]);
