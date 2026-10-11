@@ -1,7 +1,10 @@
 //! Settings, presets, keychain secrets and history: everything Echotype persists.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const APP_ID: &str = "app.echotype.desktop";
 const HISTORY_CAP: usize = 500;
@@ -143,13 +146,23 @@ impl Settings {
     }
 
     pub fn save(&self) -> Result<(), String> {
-        let path = Self::path();
         std::fs::create_dir_all(config_dir()).map_err(|e| e.to_string())?;
-        let tmp = path.with_extension("json.tmp");
-        let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+        write_atomic(&Self::path(), &serde_json::to_string_pretty(self).map_err(|e| e.to_string())?)
     }
+}
+
+/// Write to a uniquely named temp file, fsync, then rename over `path`: a crash leaves the
+/// old file or the new one, never a torn one, and concurrent writers never share a temp file.
+fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    let res = std::fs::File::create(&tmp)
+        .and_then(|mut f| f.write_all(contents.as_bytes()).and_then(|()| f.sync_all()))
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res.map_err(|e| e.to_string())
 }
 
 // ---------- presets ----------
@@ -245,14 +258,23 @@ fn history_path() -> PathBuf {
     data_dir().join("history.jsonl")
 }
 
+// ponytail: one process-wide lock; the CLI and local API never write history, so no cross-process lock is needed.
+static HISTORY: Mutex<()> = Mutex::new(());
+
 pub fn append_history(entry: &HistoryEntry) -> Result<(), String> {
-    let path = history_path();
-    let old = std::fs::read_to_string(&path).unwrap_or_default();
+    append_history_to(&history_path(), entry)
+}
+
+fn append_history_to(path: &Path, entry: &HistoryEntry) -> Result<(), String> {
+    let _g = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
+    let old = std::fs::read_to_string(path).unwrap_or_default();
     let mut lines: Vec<String> = old.lines().filter(|l| !l.trim().is_empty()).map(String::from).collect();
     lines.push(serde_json::to_string(entry).map_err(|e| e.to_string())?);
     let start = lines.len().saturating_sub(HISTORY_CAP);
-    std::fs::create_dir_all(data_dir()).map_err(|e| e.to_string())?;
-    std::fs::write(&path, lines[start..].join("\n") + "\n").map_err(|e| e.to_string())
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    write_atomic(path, &(lines[start..].join("\n") + "\n"))
 }
 
 pub fn get_history(limit: usize) -> Vec<HistoryEntry> {
@@ -261,6 +283,7 @@ pub fn get_history(limit: usize) -> Vec<HistoryEntry> {
 }
 
 pub fn clear_history() -> Result<(), String> {
+    let _g = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
     match std::fs::remove_file(history_path()) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
         _ => Ok(()),
@@ -316,5 +339,58 @@ mod tests {
         assert_eq!(base_url("openai", "http://box.lan:8000/v1").unwrap(), "https://api.openai.com/v1");
         assert_eq!(base_url("custom", "http://127.0.0.1:9/v1/").unwrap(), "http://127.0.0.1:9/v1");
         assert!(base_url("custom", " ").is_err());
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("echotype-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn concurrent_history_appends_keep_every_entry() {
+        let path = scratch("history").join("history.jsonl");
+        let threads: Vec<_> = (0..8u64)
+            .map(|t| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for i in 0..25u64 {
+                        let e = HistoryEntry { ts: t * 1000 + i, raw: "r".into(), text: "t".into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None };
+                        append_history_to(&path, &e).unwrap();
+                    }
+                })
+            })
+            .collect();
+        threads.into_iter().for_each(|t| t.join().unwrap());
+        let s = std::fs::read_to_string(&path).unwrap();
+        let mut ts: Vec<u64> = s.lines().map(|l| serde_json::from_str::<HistoryEntry>(l).unwrap().ts).collect();
+        ts.sort();
+        let mut want: Vec<u64> = (0..8u64).flat_map(|t| (0..25u64).map(move |i| t * 1000 + i)).collect();
+        want.sort();
+        assert_eq!(ts, want);
+        let leftovers = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
+        assert_eq!(leftovers, 1, "temp files left behind");
+    }
+
+    #[test]
+    fn concurrent_atomic_writes_never_tear_the_file() {
+        let path = scratch("atomic").join("settings.json");
+        let threads: Vec<_> = (0..8)
+            .map(|t| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let mut s = Settings::default();
+                    s.dictionary = vec![format!("w{t}"); 2000]; // big enough that a shared temp file would interleave
+                    for _ in 0..20 {
+                        write_atomic(&path, &serde_json::to_string_pretty(&s).unwrap()).unwrap();
+                    }
+                })
+            })
+            .collect();
+        threads.into_iter().for_each(|t| t.join().unwrap());
+        let s: Settings = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(s.dictionary.len(), 2000);
+        assert!(s.dictionary.iter().all(|w| w == &s.dictionary[0]));
     }
 }
