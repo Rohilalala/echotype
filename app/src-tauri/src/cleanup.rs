@@ -53,7 +53,7 @@ pub fn cleanup(s: &Settings, text: &str) -> Result<String, String> {
     let base = settings::base_url(&c.provider, &c.base_url)?;
     let model = if c.model.trim().is_empty() { settings::preset(&c.provider).map(|p| p.default_cleanup_model).unwrap_or_default() } else { c.model.trim() };
     let system = system_prompt(&s.dictionary, &c.style, &c.custom_instructions);
-    let key = settings::get_secret(&format!("llm:{}", c.provider));
+    let key = settings::provider_key("llm", &c.provider);
     let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
     let send = |off: bool| {
         let mut req = client.post(format!("{base}/chat/completions")).json(&request_body(model, &system, text, off));

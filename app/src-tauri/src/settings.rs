@@ -177,6 +177,11 @@ fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
 /// Echotype Cloud, the optional hosted tier (server/ in this repo).
 pub const CLOUD_URL: &str = "https://cloud.echotype.app/v1";
 
+/// CLOUD_URL, or ECHOTYPE_CLOUD_URL for people who run server/ themselves.
+pub fn cloud_url() -> String {
+    std::env::var("ECHOTYPE_CLOUD_URL").ok().map(|u| u.trim().to_string()).filter(|u| !u.is_empty()).unwrap_or_else(|| CLOUD_URL.into())
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct Preset {
     pub id: &'static str,
@@ -221,6 +226,8 @@ pub fn preset(id: &str) -> Option<Preset> {
 pub fn base_url(provider: &str, override_url: &str) -> Result<String, String> {
     let url = if provider == "custom" {
         override_url.trim().to_string()
+    } else if provider == "cloud" {
+        cloud_url()
     } else {
         preset(provider).map(|p| p.base_url.to_string()).unwrap_or_default()
     };
@@ -231,6 +238,16 @@ pub fn base_url(provider: &str, override_url: &str) -> Result<String, String> {
 }
 
 // ---------- secrets (OS keychain) ----------
+
+/// Keychain name of a provider's API key for one stage ("stt" or "llm"). Echotype Cloud
+/// signs in once, so both stages share the one `cloud` key.
+pub fn key_name(stage: &str, provider: &str) -> String {
+    if provider == "cloud" { "cloud".into() } else { format!("{stage}:{provider}") }
+}
+
+pub fn provider_key(stage: &str, provider: &str) -> Option<String> {
+    get_secret(&key_name(stage, provider))
+}
 
 fn entry(name: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(APP_ID, name).map_err(|e| e.to_string())
@@ -361,6 +378,14 @@ mod tests {
         assert_eq!(base_url("custom", "http://127.0.0.1:9/v1/").unwrap(), "http://127.0.0.1:9/v1");
         assert_eq!(base_url("cloud", "").unwrap(), CLOUD_URL);
         assert!(base_url("custom", " ").is_err());
+    }
+
+    #[test]
+    fn cloud_shares_one_key_across_stages() {
+        assert_eq!(key_name("stt", "cloud"), "cloud");
+        assert_eq!(key_name("llm", "cloud"), "cloud");
+        assert_eq!(key_name("stt", "groq"), "stt:groq");
+        assert_eq!(key_name("llm", "openrouter"), "llm:openrouter");
     }
 
     fn scratch(name: &str) -> PathBuf {

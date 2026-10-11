@@ -349,7 +349,7 @@ pub fn transcribe_remote(s: &Settings, pcm: &[f32], prompt: &str) -> Result<Stri
     }
     let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(120)).build().map_err(|e| e.to_string())?;
     let mut req = client.post(format!("{base}/{endpoint}")).multipart(form);
-    if let Some(key) = settings::get_secret(&format!("stt:{provider}")) {
+    if let Some(key) = settings::provider_key("stt", provider) {
         req = req.bearer_auth(key);
     }
     let resp = req.send().map_err(|e| format!("Speech-to-text request failed: {e}"))?;
