@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#14403b"/>
+      <stop offset="1" stop-color="#0a2522"/>
+    </linearGradient>
+    <linearGradient id="wave" gradientUnits="userSpaceOnUse" x1="264" y1="0" x2="628" y2="0">
+      <stop offset="0" stop-color="#3cc2b1" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#5fdcca"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+  <!-- macOS grid: 824 px body with a 100 px margin -->
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#bg)" filter="url(#shadow)"/>
+  <rect x="100.5" y="100.5" width="823" height="823" rx="185.5" fill="none" stroke="#ffffff" stroke-opacity="0.08"/>
+  <!-- a voice waveform that settles into a text caret -->
+  <g stroke-linecap="round" stroke="url(#wave)" stroke-width="44">
+    <line x1="286" y1="472" x2="286" y2="552"/>
+    <line x1="366" y1="402" x2="366" y2="622"/>
+    <line x1="446" y1="340" x2="446" y2="684"/>
+    <line x1="526" y1="424" x2="526" y2="600"/>
+    <line x1="606" y1="482" x2="606" y2="542"/>
+  </g>
+  <g stroke="#f4fbfa" stroke-linecap="round" fill="none">
+    <line x1="708" y1="304" x2="708" y2="720" stroke-width="40" stroke-linecap="butt"/>
+    <path d="M656 304h104M656 720h104" stroke-width="34"/>
+  </g>
+</svg>
