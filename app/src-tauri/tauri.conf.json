@@ -8,11 +8,15 @@
   },
   "app": {
     "withGlobalTauri": true,
+    "macOSPrivateApi": true,
     "windows": [
       {
-        "label": "main", "title": "Echotype",
+        "label": "main",
+        "title": "Echotype",
         "width": 800,
-        "height": 600
+        "height": 600,
+        "visible": false,
+        "center": true
       }
     ],
     "security": {
@@ -28,6 +32,9 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "entitlements": "Entitlements.plist"
+    }
   }
 }
