@@ -262,6 +262,9 @@ fn commit(old: &Settings, mut new: Settings, swap: impl Fn(&str, &str) -> R<()>,
 
 #[tauri::command]
 async fn save_settings(app: AppHandle, settings: Settings) -> R<()> {
+    if settings.local_api.port < settings::MIN_PORT {
+        return Err(format!("The local API port must be between {} and 65535", settings::MIN_PORT));
+    }
     // One save at a time: hotkey swap, file write, in-memory update and API restart happen together.
     static SAVE: Mutex<()> = Mutex::new(());
     let _g = SAVE.lock().unwrap_or_else(|e| e.into_inner());

@@ -98,6 +98,9 @@ impl Default for Settings {
     }
 }
 
+/// Lowest local API port: below this are privileged ports, and 0 means "any port".
+pub const MIN_PORT: u16 = 1024;
+
 impl Default for LocalApi {
     fn default() -> Self {
         Self { enabled: false, port: 7811 }
@@ -136,13 +139,17 @@ impl Settings {
     /// Missing file → defaults. Unreadable file → defaults (the file is left alone
     /// until the next save, so a hand-edit typo never silently destroys it).
     pub fn load() -> Self {
-        match std::fs::read_to_string(Self::path()) {
+        let mut s: Self = match std::fs::read_to_string(Self::path()) {
             Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
                 eprintln!("echotype: settings.json is invalid ({e}); using defaults");
                 Self::default()
             }),
             Err(_) => Self::default(),
+        };
+        if s.local_api.port < MIN_PORT {
+            s.local_api.port = LocalApi::default().port; // older builds saved 0 from a cleared field
         }
+        s
     }
 
     pub fn save(&self) -> Result<(), String> {
