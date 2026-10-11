@@ -124,6 +124,15 @@ fn finish(app: &AppHandle, rec: &mut Option<audio::Recorder>, busy: &Arc<AtomicB
     process(app, pcm, busy.clone());
 }
 
+/// Clears the busy flag when dropped, so even a panicking worker can't leave dictation stuck.
+struct Busy(Arc<AtomicBool>);
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 /// STT + cleanup + paste + history on a worker thread, so the hotkey stays responsive.
 fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>) {
     if pcm.len() < MIN_SAMPLES {
@@ -133,9 +142,12 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>) {
     busy.store(true, Ordering::SeqCst);
     let app = app.clone();
     std::thread::spawn(move || {
+        let guard = Busy(busy);
         let s = current_settings(&app);
         emit_state(&app, simple("transcribing"));
-        let result = cleanup::run(&s, &pcm, || emit_state(&app, simple("cleaning")));
+        // A panic in a decoder, whisper-rs or the HTTP stack becomes an error state, not a silent loss.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cleanup::run(&s, &pcm, || emit_state(&app, simple("cleaning")))))
+            .unwrap_or_else(|_| Err("Transcription crashed unexpectedly".into()));
         let ev = match result {
             Ok(out) if out.text.trim().is_empty() => simple("idle"),
             Ok(out) => {
@@ -147,7 +159,7 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>) {
             }
             Err(e) => DictationState { state: "error", error: Some(e), ..Default::default() },
         };
-        busy.store(false, Ordering::SeqCst);
+        drop(guard);
         emit_state(&app, ev);
     });
 }

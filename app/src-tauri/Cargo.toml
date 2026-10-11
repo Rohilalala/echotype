@@ -47,5 +47,4 @@ whisper-rs = "0.16"
 codegen-units = 1
 lto = true
 opt-level = 3
-panic = "abort"
 strip = true
