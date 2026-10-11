@@ -98,6 +98,12 @@ fn mac_available_bytes() -> Option<u64> {
     }
 }
 
+/// RAM a model needs once loaded, by catalog id; an unknown file is assumed to be large.
+fn ram_need(model: &Path) -> u64 {
+    let id = model_id(&model.to_string_lossy());
+    MODELS.iter().find(|m| m.id == id).map_or(1700, |m| m.ram_mb)
+}
+
 pub fn fits(ram_mb: u64, available_mb: u64) -> bool {
     ram_mb + HEADROOM_MB <= available_mb
 }
@@ -270,6 +276,11 @@ pub fn transcribe_local(model: &Path, pcm: &[f32], language: Option<&str>, trans
     let mut g = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
     if g.as_ref().is_none_or(|(p, _)| p != model) {
         *g = None; // free the old model before loading the next one
+        // No headroom here (that is for recommendations): refuse only what would push the machine into swap.
+        let (need, free) = (ram_need(model), ram_mb().1);
+        if need > free {
+            return Err(format!("Not enough free memory to load {}: it needs about {need} MB and {free} MB is free. Close some apps or pick a smaller model.", model_id(&model.to_string_lossy())));
+        }
         let path = model.to_str().ok_or("Model path is not valid UTF-8")?;
         let mut cp = WhisperContextParameters::default();
         cp.flash_attn(true); // whisper.cpp's own CLI default; faster on Metal
@@ -306,8 +317,7 @@ pub fn warm_up(s: &Settings) {
         return;
     }
     let Ok((path, _)) = pick_local_model(s) else { return };
-    let ram = MODELS.iter().find(|m| m.id == model_id(&path.to_string_lossy())).map_or(1700, |m| m.ram_mb);
-    if !fits(ram, ram_mb().1) {
+    if !fits(ram_need(&path), ram_mb().1) {
         eprintln!("echotype: not warming up {}: not enough free RAM", path.display());
         return;
     }
