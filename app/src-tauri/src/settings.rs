@@ -226,7 +226,17 @@ fn entry(name: &str) -> Result<keyring::Entry, String> {
 }
 
 pub fn get_secret(name: &str) -> Option<String> {
-    entry(name).ok()?.get_password().ok().filter(|s| !s.is_empty())
+    secret(name).ok().flatten()
+}
+
+/// `Ok(None)` only when the keychain has no such entry. A locked or denied keychain is an
+/// error, so a caller never mistakes it for "missing" and overwrites the secret.
+pub fn secret(name: &str) -> Result<Option<String>, String> {
+    match entry(name)?.get_password() {
+        Ok(s) => Ok(Some(s).filter(|s| !s.is_empty())),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(format!("Could not read '{name}' from the keychain: {e}")),
+    }
 }
 
 pub fn set_secret(name: &str, value: &str) -> Result<(), String> {

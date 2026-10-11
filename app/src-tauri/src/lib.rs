@@ -21,8 +21,8 @@ const MIN_SAMPLES: usize = audio::RATE as usize * 3 / 10; // recordings under 0.
 struct AppState {
     settings: Mutex<Settings>,
     dictation: mpsc::Sender<Cmd>,
-    /// Running local API: port and the sender whose drop shuts it down.
-    api: Mutex<Option<(u16, tokio::sync::oneshot::Sender<()>)>>,
+    /// Running local API: port, the token it accepts, and the sender whose drop shuts it down.
+    api: Mutex<Option<(u16, String, tokio::sync::oneshot::Sender<()>)>>,
     overlay_gen: AtomicU64,
 }
 
@@ -197,20 +197,21 @@ fn swap_hotkey(app: &AppHandle, old: Option<&str>, new: &str) -> Result<(), Stri
 fn apply_local_api(app: &AppHandle, s: &Settings) -> Result<(), String> {
     let st = state(app);
     let mut api = st.api.lock().unwrap_or_else(|e| e.into_inner());
-    let running_port = api.as_ref().map(|(p, _)| *p);
+    let running_port = api.as_ref().map(|(p, ..)| *p);
     if s.local_api.enabled && running_port == Some(s.local_api.port) {
         return Ok(());
     }
     api.take(); // dropping the sender stops the old server
     if s.local_api.enabled {
         let token = local_api_token()?;
-        *api = Some((s.local_api.port, api::start(app.clone(), s.local_api.port, token)?));
+        let stop = api::start(app.clone(), s.local_api.port, token.clone())?;
+        *api = Some((s.local_api.port, token, stop));
     }
     Ok(())
 }
 
 fn local_api_token() -> Result<String, String> {
-    if let Some(t) = settings::get_secret("local_api") {
+    if let Some(t) = settings::secret("local_api")? {
         return Ok(t);
     }
     let t = api::new_token()?;
@@ -372,8 +373,13 @@ async fn get_system_info() -> R<SystemInfo> {
 #[tauri::command]
 async fn local_api_status(app: AppHandle) -> R<serde_json::Value> {
     let s = current_settings(&app);
-    let token = if s.local_api.enabled { Some(local_api_token()?) } else { settings::get_secret("local_api") };
-    Ok(serde_json::json!({ "enabled": s.local_api.enabled, "port": s.local_api.port, "token": token }))
+    if s.local_api.enabled {
+        apply_local_api(&app, &s)?; // no-op when running; otherwise starts it or says why it can't
+    }
+    // The running server's own port and token, so the UI never shows a token the server rejects.
+    let running = state(&app).api.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|(p, t, _)| (*p, t.clone()));
+    let (port, token) = running.map_or((s.local_api.port, None), |(p, t)| (p, Some(t)));
+    Ok(serde_json::json!({ "enabled": s.local_api.enabled, "port": port, "token": token }))
 }
 
 #[tauri::command]
