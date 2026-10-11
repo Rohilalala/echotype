@@ -28,12 +28,22 @@ func (s *server) models(w http.ResponseWriter, _ *http.Request, _ account) {
 	m := func(id string) map[string]string {
 		return map[string]string{"id": id, "object": "model", "owned_by": "echotype"}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": []any{m(s.cfg.STTModel), m(s.cfg.LLMModel)}})
+	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": []any{m(s.cfg.STTModel), m(s.cfg.TranslateModel), m(s.cfg.LLMModel)}})
 }
 
-// POST /v1/audio/transcriptions (OpenAI-compatible multipart). The server's own model and
-// upstream key are used; the client's model field is ignored.
-func (s *server) transcribe(w http.ResponseWriter, r *http.Request, a account) {
+// POST /v1/audio/transcriptions and /v1/audio/translations (OpenAI-compatible multipart;
+// task is "transcriptions" or "translations"). The server's own model and upstream key are
+// used; the client's model field is ignored. Translations go to TRANSLATE_MODEL, return
+// English and take no language. Both are metered the same way.
+func (s *server) audio(task string) func(http.ResponseWriter, *http.Request, account) {
+	model := s.cfg.STTModel
+	if task == "translations" {
+		model = s.cfg.TranslateModel
+	}
+	return func(w http.ResponseWriter, r *http.Request, a account) { s.proxyAudio(w, r, a, task, model) }
+}
+
+func (s *server) proxyAudio(w http.ResponseWriter, r *http.Request, a account, task, model string) {
 	release, ok := s.limitKey(w, a)
 	if !ok {
 		return
@@ -101,9 +111,9 @@ func (s *server) transcribe(w http.ResponseWriter, r *http.Request, a account) {
 	mw := multipart.NewWriter(&buf)
 	fw, _ := mw.CreateFormFile("file", safeFilename(filename))
 	fw.Write(audio)
-	mw.WriteField("model", s.cfg.STTModel)
+	mw.WriteField("model", model)
 	mw.WriteField("response_format", "verbose_json")
-	if language != "" {
+	if language != "" && task == "transcriptions" {
 		mw.WriteField("language", language)
 	}
 	if prompt != "" {
@@ -124,7 +134,7 @@ func (s *server) transcribe(w http.ResponseWriter, r *http.Request, a account) {
 		}
 	}()
 
-	req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, s.cfg.STTURL+"/audio/transcriptions", &buf)
+	req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, s.cfg.STTURL+"/audio/"+task, &buf)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	req.Header.Set("Authorization", "Bearer "+s.cfg.STTKey)
 	body, ok := s.callUpstream(w, req, "stt")

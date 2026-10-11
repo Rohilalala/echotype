@@ -42,7 +42,7 @@ func newHarness(t *testing.T, upstream http.HandlerFunc) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	cfg := config{PublicURL: "https://cloud.test", STTModel: "whisper-large-v3-turbo", LLMModel: "openai/gpt-oss-20b",
+	cfg := config{PublicURL: "https://cloud.test", STTModel: "whisper-large-v3-turbo", TranslateModel: "whisper-large-v3", LLMModel: "openai/gpt-oss-20b",
 		STTKey: "server-stt-key", LLMKey: "server-llm-key", StripeWebhookSecret: "whsec_test"}
 	if upstream != nil {
 		up := httptest.NewServer(upstream)
@@ -385,8 +385,8 @@ func TestWavSeconds(t *testing.T) {
 }
 
 type upstreamSeen struct {
-	auth, model, format, filename, language string
-	body                                    map[string]any
+	path, auth, model, format, filename, language string
+	body                                          map[string]any
 }
 
 var lastSeen upstreamSeen
@@ -395,9 +395,9 @@ var lastSeen upstreamSeen
 // with a canned reply, recording what it received.
 func fakeUpstream(t *testing.T, text string, duration float64) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		lastSeen = upstreamSeen{auth: r.Header.Get("Authorization")}
+		lastSeen = upstreamSeen{path: r.URL.Path, auth: r.Header.Get("Authorization")}
 		switch r.URL.Path {
-		case "/audio/transcriptions":
+		case "/audio/transcriptions", "/audio/translations":
 			if err := r.ParseMultipartForm(32 << 20); err != nil {
 				t.Errorf("upstream multipart: %v", err)
 			}
@@ -416,6 +416,10 @@ func fakeUpstream(t *testing.T, text string, duration float64) http.HandlerFunc 
 }
 
 func transcribeReq(x *harness, key string, audio []byte, fields map[string]string) *httptest.ResponseRecorder {
+	return audioReq(x, "/v1/audio/transcriptions", key, audio, fields)
+}
+
+func audioReq(x *harness, path, key string, audio []byte, fields map[string]string) *httptest.ResponseRecorder {
 	var b bytes.Buffer
 	mw := multipart.NewWriter(&b)
 	fw, _ := mw.CreateFormFile("file", "clip.wav")
@@ -424,7 +428,7 @@ func transcribeReq(x *harness, key string, audio []byte, fields map[string]strin
 		mw.WriteField(k, v)
 	}
 	mw.Close()
-	return x.do("POST", "/v1/audio/transcriptions", &b, append(bearer(key), "Content-Type", mw.FormDataContentType())...)
+	return x.do("POST", path, &b, append(bearer(key), "Content-Type", mw.FormDataContentType())...)
 }
 
 func TestTranscribeProxy(t *testing.T) {
@@ -462,6 +466,28 @@ func TestTranscribeProxy(t *testing.T) {
 	}
 	if me := decode(t, y.do("GET", "/v1/me", nil, bearer(key)...)); me["words_used"] != float64(2) || me["audio_seconds_used"] != float64(7) {
 		t.Fatalf("me: %v", me)
+	}
+}
+
+func TestTranslateProxy(t *testing.T) {
+	x := newHarness(t, fakeUpstream(t, "Where are you going tomorrow", 2.5))
+	key := x.signIn(t, "a@b.co")
+	w := audioReq(x, "/v1/audio/translations", key, wavFile(2), map[string]string{"model": "whisper-1", "language": "hi"})
+	if w.Code != 200 || decode(t, w)["text"] != "Where are you going tomorrow" {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if lastSeen.path != "/audio/translations" || lastSeen.model != "whisper-large-v3" || lastSeen.auth != "Bearer server-stt-key" || lastSeen.language != "" {
+		t.Fatalf("upstream saw %+v", lastSeen)
+	}
+	var words, ms int64
+	x.s.db.QueryRow(`SELECT words, audio_ms FROM usage`).Scan(&words, &ms)
+	if words != 5 || ms != 2500 {
+		t.Fatalf("metered %d words, %d ms", words, ms)
+	}
+	// Same quota gate as transcriptions.
+	x.s.db.Exec(`INSERT INTO usage (account_id, at, words, audio_ms) VALUES (?, ?, 2000, 0)`, accountID(t, x, "a@b.co"), t0.Unix())
+	if w := audioReq(x, "/v1/audio/translations", key, wavFile(1), nil); w.Code != 402 {
+		t.Fatalf("over quota: %d", w.Code)
 	}
 }
 
@@ -639,7 +665,7 @@ func TestChatProxyCaps(t *testing.T) {
 		t.Fatalf("no key: %d", w.Code)
 	}
 	models := decode(t, x.do("GET", "/v1/models", nil, bearer(key)...))
-	if d, _ := models["data"].([]any); len(d) != 2 {
+	if d, _ := models["data"].([]any); len(d) != 3 {
 		t.Fatalf("models: %v", models)
 	}
 }
