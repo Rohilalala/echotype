@@ -98,6 +98,29 @@ curl http://127.0.0.1:7811/v1/audio/transcriptions \
 
 It speaks the OpenAI transcription format, so OpenAI client libraries work if you point their base URL at it. It only listens on 127.0.0.1.
 
+## Echotype Cloud
+
+For computers that can't spare the memory, Echotype Cloud runs transcription and cleanup on a server instead. It's optional; everything above works without it.
+
+| Plan | Price | Includes |
+|---|---|---|
+| Free | $0 | 2,000 words a week |
+| Pro | $6 a month or $60 a year | Unlimited words, 40 audio hours a month fair use |
+
+Pick **Echotype Cloud** as the speech provider and sign in with your email; there's no password. Audio is transcribed and dropped. The server keeps word and audio-second counts, nothing else.
+
+### Run your own
+
+The server is in [`server/`](server): a single Go binary in front of any OpenAI-compatible provider, with SQLite for accounts. Every setting is documented at the top of [`server/main.go`](server/main.go).
+
+```sh
+cd server
+echo "STT_UPSTREAM_KEY=<your Groq key>" > .env
+docker compose up -d
+```
+
+Without `SMTP_HOST` it runs in dev mode and prints sign-in codes to its log. Point the app at it with `ECHOTYPE_CLOUD_URL=http://localhost:8080/v1`.
+
 ## Credits
 
 Built on [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and [Tauri](https://tauri.app). Hotkey and paste handling borrow from [Handy](https://github.com/cjpais/Handy) (MIT).
