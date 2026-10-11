@@ -35,23 +35,25 @@
     max-width: calc(100vw - 24px);
   }
   .pill.on { opacity: 1; transform: none; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: #ff5a5f; flex: none; box-shadow: 0 0 0 3px rgba(255, 90, 95, 0.22); }
+  /* the dot is the real microphone-live light: solid, no halo, no pulse */
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #ff5a5f; flex: none; }
   .meter { display: flex; align-items: center; gap: 2.5px; height: 18px; flex: none; }
   .meter i { width: 3px; height: 100%; border-radius: 1.5px; background: #f4f4f5; transform: scaleY(0.14); transition: transform 0.09s linear; }
   .label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: -0.005em; }
 
-  [data-state="transcribing"] .dot, [data-state="cleaning"] .dot { background: #3cc2b1; box-shadow: 0 0 0 3px rgba(60, 194, 177, 0.22); }
+  [data-state="transcribing"] .dot, [data-state="cleaning"] .dot { background: #a3a3a9; }
   [data-state="transcribing"] .meter i, [data-state="cleaning"] .meter i { transition: none; animation: wave 1s ease-in-out infinite; opacity: 0.85; }
-  [data-state="done"] .dot { background: #4cc77a; box-shadow: 0 0 0 3px rgba(76, 199, 122, 0.22); }
+  [data-state="done"] .dot { background: #4cc77a; }
   [data-state="done"] .meter, [data-state="error"] .meter { display: none; }
-  [data-state="error"] .dot { background: #f2a93b; box-shadow: 0 0 0 3px rgba(242, 169, 59, 0.22); }
+  [data-state="error"] .dot { background: #f2a93b; }
   [data-state="error"] .label { color: #ffd59a; }
   .meter i:nth-child(2) { animation-delay: 0.08s; } .meter i:nth-child(3) { animation-delay: 0.16s; }
   .meter i:nth-child(4) { animation-delay: 0.24s; } .meter i:nth-child(5) { animation-delay: 0.32s; }
   .meter i:nth-child(6) { animation-delay: 0.40s; } .meter i:nth-child(7) { animation-delay: 0.48s; }
   @keyframes wave { 0%, 100% { transform: scaleY(0.14); } 40% { transform: scaleY(0.55); } }
   @media (prefers-reduced-motion: reduce) {
-    .pill, .meter i { transition: none !important; animation: none !important; }
+    .pill { transform: none; transition: opacity 0.16s ease-out; }
+    .meter i { transition: none !important; animation: none !important; }
     [data-state="transcribing"] .meter i, [data-state="cleaning"] .meter i { transform: scaleY(0.3); }
   }
 </style>

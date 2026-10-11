@@ -89,7 +89,7 @@ function syncBound() {
 function changed(p) {
   if (p === 'mode' || p === 'hotkey') renderHotkey();
   if (p === 'translate_to_english') renderLangNote();
-  if (p === 'cleanup.enabled') $('#cleanupBody').classList.toggle('disabled', !S.cleanup.enabled);
+  if (p === 'cleanup.enabled') setCleanupInert();
   if (p.startsWith('local_api')) refreshApi();
   if (p === 'history_enabled') renderHistory();
 }
@@ -188,11 +188,27 @@ let dictation = { state: 'idle' };
 const STATE_LABEL = { idle: 'Ready', recording: 'Listening', transcribing: 'Transcribing', cleaning: 'Cleaning up', done: 'Pasted', error: "Couldn't dictate" };
 const METER = [0.5, 0.75, 0.95, 1, 0.8, 0.95, 0.7, 0.5];
 
+// What stops dictation from working right now, with the one action that fixes it.
+let perms = null, sttKeySaved = true;
+function blocker() {
+  if (perms && !perms.accessibility) return { text: "Echotype can't paste yet: Accessibility access is off.", label: 'Allow Accessibility', act: () => invoke('open_permission_settings', { kind: 'accessibility' }) };
+  if (perms?.microphone === 'denied') return { text: 'Microphone access is blocked for Echotype.', label: 'Allow microphone', act: () => invoke('open_permission_settings', { kind: 'microphone' }) };
+  const p = preset(S.stt.provider);
+  if (S.stt.provider === 'local') {
+    if (!models.find(m => m.id === S.stt.local_model)?.downloaded) return { text: 'No speech model is downloaded yet.', label: 'Choose a model', act: () => go('speech') };
+  } else if (p?.needs_key && !sttKeySaved) return { text: `Add your ${p.label} API key to transcribe.`, label: 'Add key', act: () => go('speech') };
+  return null;
+}
+
 function renderHero() {
+  if (!S) return; // a focus event can land before boot finishes
   const st = dictation.state;
+  const b = st === 'idle' || st === 'done' ? blocker() : null;
   document.body.dataset.state = st;
-  $('#heroState span').textContent = STATE_LABEL[st] ?? 'Ready';
+  document.body.toggleAttribute('data-blocked', !!b);
+  $('#heroState span').textContent = b ? 'Not ready' : STATE_LABEL[st] ?? 'Ready';
   const line = $('#heroLine'), sub = $('#heroSub');
+  const start = h('button', { className: 'btn quiet', type: 'button', onclick: () => invoke('toggle_dictation') }, 'Start with a click');
   if (st === 'recording') {
     line.replaceChildren('Listening', h('span', { className: 'meter', id: 'heroMeter', 'aria-hidden': 'true' }, METER.map(() => h('i'))));
     sub.replaceChildren(S.mode === 'toggle' ? 'Press the shortcut again to stop. Esc cancels.' : 'Let go to paste. Esc cancels.');
@@ -201,10 +217,9 @@ function renderHero() {
     sub.replaceChildren('The text goes wherever your cursor is.');
   } else {
     line.replaceChildren(S.mode === 'toggle' ? 'Press' : 'Hold', ...keycaps(S.hotkey), 'to dictate');
-    sub.replaceChildren(
-      st === 'error' ? dictation.error || 'Something went wrong. Try again.' : 'Text appears wherever your cursor is.',
-      h('button', { className: 'btn quiet', type: 'button', onclick: () => invoke('toggle_dictation') }, 'Start with a click'),
-    );
+    if (b) sub.replaceChildren(h('span', {}, b.text), h('button', { className: 'btn', type: 'button', onclick: b.act }, b.label));
+    else if (st === 'error') sub.replaceChildren(h('span', {}, `${dictation.error || 'Dictation stopped.'} Try again, or check Settings.`), start);
+    else sub.replaceChildren(h('span', {}, 'Text appears wherever your cursor is.'), start);
   }
 }
 
@@ -219,9 +234,13 @@ function renderRecent() {
 }
 
 function renderDrops() {
+  const dismiss = r => h('button', { className: 'icon-btn', type: 'button', 'aria-label': `Dismiss ${r.name}`, onclick: () => { dropResults = dropResults.filter(x => x !== r); renderDrops(); } }, svg(CROSS));
   $('#dropResults').replaceChildren(...dropResults.map((r, i) => {
     if (r.pending) return h('div', { className: 'result' }, h('div', { className: 'result-head' }, h('span', { className: 'result-name working' }, `Transcribing ${r.name}`)));
-    if (r.error) return h('div', { className: 'result err', role: 'alert' }, h('div', { className: 'result-head' }, h('span', { className: 'result-name' }, r.name)), h('p', {}, r.error));
+    if (r.error) return h('div', { className: 'result err', role: 'alert' },
+      h('div', { className: 'result-head' }, h('span', { className: 'result-name' }, `Couldn't transcribe ${r.name}`), dismiss(r)),
+      h('p', {}, r.error),
+      h('p', { className: 'hint' }, 'Echotype reads .opus, .ogg, .m4a, .mp3, .wav and .flac files.'));
     const copy = h('button', { className: 'btn', type: 'button' }, 'Copy');
     copy.onclick = () => copyText(r.showRaw ? r.raw : r.text, copy);
     const differs = r.raw.trim() !== r.text.trim();
@@ -229,7 +248,7 @@ function renderDrops() {
       ['Clean', 'Raw'].map(v => h('label', {}, h('input', { type: 'radio', name: 'v' + i, checked: (v === 'Raw') === !!r.showRaw, onchange: () => { r.showRaw = v === 'Raw'; renderDrops(); } }), h('span', {}, v))));
     const secs = ((r.stt_ms || 0) + (r.cleanup_ms || 0)) / 1000;
     return h('div', { className: 'result' },
-      h('div', { className: 'result-head' }, h('span', { className: 'result-name', title: r.path }, r.name), h('span', { className: 'result-meta', title: timingTitle(r) }, `${secs.toFixed(1)} s`), seg, copy),
+      h('div', { className: 'result-head' }, h('span', { className: 'result-name', title: r.path }, r.name), h('span', { className: 'result-meta', title: timingTitle(r) }, `${secs.toFixed(1)} s`), seg, copy, dismiss(r)),
       h('p', { className: 'text' }, r.showRaw ? r.raw : r.text));
   }));
 }
@@ -281,8 +300,12 @@ for (const kind of ['stt', 'cleanup']) {
 async function renderKey(kind) {
   const row = $(`[data-key="${kind}"]`);
   const p = preset(S[kind].provider), name = secretName(kind);
+  // Local servers such as Ollama take no key; hide the row rather than show an optional field.
+  row.hidden = p?.needs_key === false && p.id !== 'custom';
+  if (row.hidden) return;
   const saved = await invoke('has_secret', { name }).catch(() => false);
   if (secretName(kind) !== name) return; // provider changed while we waited
+  if (kind === 'stt') { sttKeySaved = saved; renderHero(); }
   const title = h('span', { className: 'row-text' },
     h('span', { className: 'row-title' }, p?.needs_key === false ? 'API key (optional)' : 'API key'),
     h('span', { className: 'row-desc' }, 'Stored in your keychain, never in the settings file.'));
@@ -323,7 +346,7 @@ function modelRow(m, { compact, pick } = {}) {
   const p = progress[m.id];
   let actions;
   if (p != null) {
-    actions = [h('span', { className: 'bar', role: 'progressbar', 'aria-label': `Downloading ${m.label}`, 'aria-valuenow': Math.round(p * 100), 'data-progress': m.id }, h('i', { style: `width:${p * 100}%` })),
+    actions = [h('span', { className: 'bar', role: 'progressbar', 'aria-label': `Downloading ${m.label}`, 'aria-valuenow': Math.round(p * 100), 'data-progress': m.id }, h('i', { style: `transform:scaleX(${p})` })),
       h('span', { className: 'pct', 'data-pct': m.id }, `${Math.round(p * 100)}%`)];
   } else if (!m.downloaded) {
     actions = [h('button', { className: m.recommended ? 'btn primary' : 'btn', type: 'button', onclick: () => download(m.id) }, 'Download')];
@@ -348,14 +371,14 @@ function modelRow(m, { compact, pick } = {}) {
       h('span', { className: 'model-meta' },
         h('span', {}, fmtMB(m.size_mb)),
         h('span', {}, `${fmtMB(m.ram_mb)} memory`),
-        h('span', { className: m.fits ? 'badge' : 'badge warn' }, m.fits ? 'Fits' : 'Needs more memory')),
+        !m.fits && h('span', { className: 'badge warn' }, 'Needs more memory')),
       !compact && m.note && h('span', { className: 'row-desc' }, m.note),
       modelErr[m.id] && h('span', { className: 'row-desc error', role: 'alert' }, modelErr[m.id])),
     h('span', { className: 'actions' }, actions));
 }
 
 function renderModels() {
-  $('#memline').replaceChildren('Free memory now ', h('b', {}, `${sys.available_ram_gb.toFixed(1)} GB`), ` of ${Math.round(sys.total_ram_gb)} GB. Models marked Fits leave 2 GB for everything else.`);
+  $('#memline').replaceChildren('Free memory now ', h('b', {}, `${sys.available_ram_gb.toFixed(1)} GB`), ` of ${Math.round(sys.total_ram_gb)} GB. A model fits when it leaves 2 GB for everything else.`);
   $('#modelList').replaceChildren(...models.map(m => modelRow(m)));
   renderObModels();
 }
@@ -364,6 +387,7 @@ async function refreshModels() {
   [models, sys] = await Promise.all([invoke('list_models'), invoke('get_system_info')]);
   renderModels();
   renderLangNote();
+  renderHero();
 }
 
 async function download(id) {
@@ -381,12 +405,18 @@ function useModel(id) {
   renderStt();
   renderObModels();
   renderLangNote();
+  renderHero();
 }
 
 // ---------- cleanup ----------
+function setCleanupInert() {
+  const off = !S.cleanup.enabled;
+  $('#cleanupBody').classList.toggle('disabled', off);
+  $('#cleanupBody').inert = off; // off means not focusable either, not just dimmed
+}
 function renderCleanup() {
   $('#cleanupProvider').replaceChildren(...presets.filter(p => p.cleanup).map(p => h('option', { value: p.id, selected: p.id === S.cleanup.provider }, p.label)));
-  $('#cleanupBody').classList.toggle('disabled', !S.cleanup.enabled);
+  setCleanupInert();
   fillRemote('cleanup');
 }
 $('#cleanupProvider').addEventListener('change', e => setProvider('cleanup', e.target.value));
@@ -401,9 +431,11 @@ function renderLangNote() {
   note.hidden = !(S.translate_to_english && S.stt.provider === 'local' && m && !m.translates);
   if (note.hidden) return;
   const alt = models.find(x => x.translates && x.downloaded);
-  note.textContent = alt
+  note.classList.toggle('warn', !alt);
+  note.replaceChildren(alt
     ? `${m.label} can't translate, so Echotype uses ${alt.label} while this is on.`
-    : `${m.label} can't translate. Download a multilingual model, such as Medium, in Speech model.`;
+    : `${m.label} can't translate, and no multilingual model is downloaded yet. Medium works best for Hinglish.`,
+  !alt && h('button', { className: 'btn', type: 'button', onclick: () => go('speech') }, 'Choose a model'));
 }
 
 // ---------- dictionary ----------
@@ -440,10 +472,19 @@ function fmtTime(ts, short) {
 
 async function renderHistory() {
   const list = $('#historyList');
-  const items = await invoke('get_history', { limit: 200 }).catch(() => []);
+  if (!list.children.length) list.replaceChildren(h('p', { className: 'empty' }, 'Loading history…'));
+  let items;
+  try { items = await invoke('get_history', { limit: 200 }); }
+  catch (e) {
+    list.replaceChildren(h('p', { className: 'empty', role: 'alert' }, `Couldn't read history: ${e}`,
+      h('button', { className: 'btn', type: 'button', onclick: renderHistory }, 'Try again')));
+    return;
+  }
   $('#clearHistory').disabled = !items.length;
   if (!items.length) {
-    list.replaceChildren(h('p', { className: 'empty' }, S.history_enabled ? 'Nothing yet. Dictate something and it shows up here.' : 'History is off. Turn on Keep history in Settings.'));
+    list.replaceChildren(S.history_enabled
+      ? h('p', { className: 'empty' }, 'No dictations yet. ', S.mode === 'toggle' ? 'Press ' : 'Hold ', hotkeyText(S.hotkey), ' in any text field and the result lands here.')
+      : h('p', { className: 'empty' }, 'History is off, so nothing is kept.', h('button', { className: 'btn', type: 'button', onclick: () => go('settings') }, 'Turn on in Settings')));
     return;
   }
   list.replaceChildren(...items.map(it => {
@@ -471,7 +512,9 @@ $('#clearYes').addEventListener('click', async () => {
 
 // ---------- settings: mic, local API, permissions ----------
 async function renderMics() {
-  const devices = await invoke('list_input_devices').catch(() => []);
+  let devices = [];
+  try { devices = await invoke('list_input_devices'); $('#micError').hidden = true; }
+  catch (e) { $('#micError').textContent = `Couldn't list microphones (${e}). Echotype uses the system default.`; $('#micError').hidden = false; }
   $('#mic').replaceChildren(h('option', { value: '' }, 'System default'), ...devices.map(d => h('option', { value: d }, d)));
   $('#mic').value = S.input_device ?? '';
 }
@@ -479,11 +522,13 @@ async function renderMics() {
 async function refreshApi() {
   $('#apiBody').hidden = !S.local_api.enabled;
   if (!S.local_api.enabled) return;
-  apiStatus = await invoke('local_api_status').catch(() => null);
+  let err = '';
+  try { apiStatus = await invoke('local_api_status'); } catch (e) { apiStatus = null; err = String(e); }
   const tok = apiStatus?.token || '';
   const port = apiStatus?.port || S.local_api.port;
   const shown = tokenShown ? tok : tok.slice(0, 6) + '•'.repeat(Math.max(0, Math.min(18, tok.length - 6)));
-  $('#token').textContent = tok ? shown : 'Starting…';
+  $('#token').textContent = tok ? shown : err ? `Couldn't start the API: ${err}. Try another port.` : 'Starting the server…';
+  $('#token').classList.toggle('error', !!err);
   $('#showToken').textContent = tokenShown ? 'Hide' : 'Show';
   $('#curl').textContent = curl(port, shown);
 }
@@ -492,21 +537,28 @@ $('#showToken').addEventListener('click', () => { tokenShown = !tokenShown; refr
 $('#copyToken').addEventListener('click', e => copyText(apiStatus?.token || '', e.currentTarget));
 $('#copyCurl').addEventListener('click', e => copyText(curl(apiStatus?.port || S.local_api.port, apiStatus?.token || ''), e.currentTarget));
 
-const MIC = { granted: ['Allowed', ''], denied: ['Blocked', 'bad'], unknown: ['Not asked yet', 'warn'] };
+// [badge, badge style, show the Open Settings button]
+const MIC = { granted: ['Allowed', '', false], denied: ['Blocked', 'bad', true], unknown: ['Asked on first use', 'muted', false] };
 async function refreshPerms() {
-  const p = await invoke('check_permissions').catch(() => ({ microphone: 'unknown', accessibility: false }));
-  const row = (title, desc, [label, cls], ok, kind) => h('div', { className: 'row' },
+  let failed = false;
+  try { perms = await invoke('check_permissions'); }
+  catch { failed = true; perms = null; }
+  const p = perms ?? { microphone: 'unknown', accessibility: true };
+  const row = (title, desc, [label, cls, fix], kind) => h('div', { className: 'row' },
     h('span', { className: 'row-text' }, h('span', { className: 'row-title' }, title), h('span', { className: 'row-desc' }, desc)),
     h('span', { className: 'actions' }, h('span', { className: `badge ${cls}` }, label),
-      !ok && h('button', { className: 'btn', type: 'button', onclick: () => invoke('open_permission_settings', { kind }) }, 'Open Settings')));
-  const rows = () => [
-    row('Microphone', 'To hear you while the shortcut is down.', MIC[p.microphone] ?? MIC.unknown, p.microphone === 'granted', 'microphone'),
-    row('Accessibility', 'To paste the text into the app you are using.', p.accessibility ? ['Allowed', ''] : ['Needed to paste', 'warn'], p.accessibility, 'accessibility'),
-  ];
+      fix && h('button', { className: 'btn', type: 'button', onclick: () => invoke('open_permission_settings', { kind }) }, 'Open Settings')));
+  const rows = () => failed
+    ? [h('p', { className: 'empty', role: 'alert' }, "Couldn't check permissions. Open System Settings, Privacy & Security, to review Microphone and Accessibility.")]
+    : [
+      row('Microphone', p.microphone === 'unknown' ? 'macOS asks the first time you dictate.' : 'To hear you while the shortcut is down.', MIC[p.microphone] ?? MIC.unknown, 'microphone'),
+      row('Accessibility', 'Echotype uses it only to press ⌘V in the app you are using.', p.accessibility ? ['Allowed', '', false] : ['Needed to paste', 'warn', true], 'accessibility'),
+    ];
   $('#perms').replaceChildren(...rows());
   $('#obPerms').replaceChildren(...rows());
+  $('.ob-step[data-step="1"] [data-next]').textContent = p.accessibility ? 'Continue' : 'Continue without pasting';
+  renderHero();
 }
-$('#recheck').addEventListener('click', refreshPerms);
 window.addEventListener('focus', refreshPerms); // coming back from System Settings
 
 // ---------- onboarding ----------
@@ -516,7 +568,11 @@ function obShow(n) {
   $$('.ob-step').forEach(s => (s.hidden = +s.dataset.step !== n));
   $$('#obSteps li').forEach((li, i) => { li.className = i + 1 === n ? 'on' : i + 1 < n ? 'done' : ''; li.toggleAttribute('aria-current', i + 1 === n); });
   if (n === 2) renderObModels();
-  $(`.ob-step[data-step="${n}"] h2`).focus?.();
+  $(`.ob-step[data-step="${n}"] h2`).focus();
+}
+function showOnboarding(on) {
+  $('#onboard').hidden = !on;
+  $('aside').inert = $('main').inert = on; // keep Tab inside the dialog
 }
 function renderObModels() {
   if ($('#onboard').hidden) return;
@@ -537,9 +593,11 @@ $$('[data-recheck]').forEach(b => b.addEventListener('click', refreshPerms));
 async function finishOnboarding(page) {
   S.onboarded = true;
   await save();
-  $('#onboard').hidden = true;
+  showOnboarding(false);
   go(page);
 }
+$('#obSkip').addEventListener('click', () => finishOnboarding('home'));
+$('#onboard').addEventListener('keydown', e => { if (e.key === 'Escape') finishOnboarding('home'); });
 $('#obApi').addEventListener('click', () => finishOnboarding('speech'));
 $('#obDone').addEventListener('click', () => finishOnboarding('home'));
 $('#obToggle').addEventListener('click', () => invoke('toggle_dictation'));
@@ -591,7 +649,7 @@ listen('model-download', ({ payload: p }) => {
   progress[p.id] = frac;
   const bars = $$(`[data-progress="${p.id}"]`);
   if (!had || !bars.length) return renderModels();
-  bars.forEach(b => { b.firstChild.style.width = `${frac * 100}%`; b.setAttribute('aria-valuenow', Math.round(frac * 100)); });
+  bars.forEach(b => { b.firstChild.style.transform = `scaleX(${frac})`; b.setAttribute('aria-valuenow', Math.round(frac * 100)); });
   $$(`[data-pct="${p.id}"]`).forEach(el => (el.textContent = `${Math.round(frac * 100)}%`));
 });
 
@@ -605,7 +663,13 @@ listen('tauri://drag-drop', ({ payload }) => {
 });
 
 // ---------- boot ----------
-[S, presets, models, sys] = await Promise.all([invoke('get_settings'), invoke('get_presets'), invoke('list_models'), invoke('get_system_info')]);
+try {
+  [S, presets, models, sys] = await Promise.all([invoke('get_settings'), invoke('get_presets'), invoke('list_models'), invoke('get_system_info')]);
+} catch (e) {
+  $('#main').replaceChildren(h('h1', {}, "Echotype couldn't load its settings"),
+    h('p', { className: 'lede boot-error', role: 'alert' }, `${e}. Quit Echotype from the menu bar and open it again. If this keeps happening, the settings file may be damaged.`));
+  throw e;
+}
 presets = presets.filter(p => p.id !== 'cloud'); // v1: no cloud
 isMac = /mac|darwin/i.test(sys.os);
 S.dictionary ??= [];
@@ -624,4 +688,4 @@ renderMics();
 refreshPerms();
 const start = location.hash.slice(1);
 go($(`main > section[data-page="${start}"]`) ? start : 'home');
-if (!S.onboarded) { $('#onboard').hidden = false; obShow(1); }
+if (!S.onboarded) { showOnboarding(true); obShow(1); }

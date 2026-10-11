@@ -94,7 +94,7 @@ const commands = {
     busy = false;
     return null;
   },
-  check_permissions: () => ({ microphone: 'granted', accessibility: false }),
+  check_permissions: () => ({ microphone: 'granted', accessibility: !q.has('noaccess') }),
   open_permission_settings: () => null,
 };
 
@@ -114,6 +114,10 @@ window.__TAURI__ = {
   },
 };
 window.__mock = { emit, commands };
+
+// Say so on screen: everything in this preview is sample data.
+const sidebar = document.querySelector('.sidebar');
+if (sidebar) sidebar.append(Object.assign(document.createElement('p'), { className: 'preview-note', textContent: 'Browser preview, sample data' }));
 
 // HTML5 drag and drop stands in for Tauri's native drag-drop events.
 addEventListener('dragover', e => { e.preventDefault(); emit('tauri://drag-enter', {}); });

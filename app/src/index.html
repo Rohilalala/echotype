@@ -29,7 +29,7 @@
     <!-- Home -->
     <section data-page="home" hidden>
       <div class="hero">
-        <p class="hero-state" id="heroState"><i class="dot"></i><span>Ready</span></p>
+        <p class="hero-state" id="heroState" aria-live="polite"><i class="dot"></i><span>Ready</span></p>
         <h1 class="hero-line" id="heroLine"></h1>
         <p class="hero-sub" id="heroSub"></p>
       </div>
@@ -108,7 +108,7 @@
       <div class="group">
         <label class="row"><span class="row-text"><span class="row-title">Spoken language</span><span class="row-desc">Auto-detect works for most people. Pick one if short clips come out in the wrong language.</span></span>
           <select id="language" data-bind="language"></select></label>
-        <label class="row"><span class="row-text"><span class="row-title">Translate to English</span><span class="row-desc">Speak Hindi, Hinglish or any language and get English. Turbo models can’t translate, so Echotype uses a multilingual model when this is on.</span></span>
+        <label class="row"><span class="row-text"><span class="row-title">Translate to English</span><span class="row-desc">Speak Hindi, Hinglish or any language and get English. Turbo models can’t translate, so Echotype switches to a multilingual model you have downloaded.</span></span>
           <input type="checkbox" class="switch" data-bind="translate_to_english" /></label>
       </div>
       <p class="note" id="translateNote" hidden></p>
@@ -164,7 +164,7 @@
 
       <h2 class="group-title">Audio and text</h2>
       <div class="group">
-        <label class="row"><span class="row-text"><span class="row-title">Microphone</span></span>
+        <label class="row"><span class="row-text"><span class="row-title">Microphone</span><span class="row-desc error" id="micError" role="alert" hidden></span></span>
           <select id="mic" data-bind="input_device" data-null></select></label>
         <label class="row"><span class="row-text"><span class="row-title">Sounds</span><span class="row-desc">A soft tick when recording starts and stops.</span></span>
           <input type="checkbox" class="switch" data-bind="sounds" /></label>
@@ -191,31 +191,33 @@
 
       <h2 class="group-title">Permissions</h2>
       <div class="group" id="perms"></div>
-      <p class="lede small"><button class="btn quiet" id="recheck" type="button">Check again</button></p>
     </section>
   </main>
 
   <!-- First run -->
   <div class="onboard" id="onboard" role="dialog" aria-modal="true" aria-labelledby="obTitle" hidden>
     <div class="ob-card">
-      <ol class="ob-steps" id="obSteps"><li>Permissions</li><li>Model</li><li>Try it</li></ol>
+      <div class="ob-top">
+        <ol class="ob-steps" id="obSteps"><li>Permissions</li><li>Model</li><li>Try it</li></ol>
+        <button class="btn quiet" id="obSkip" type="button">Set up later</button>
+      </div>
 
       <div class="ob-step" data-step="1">
-        <h2 id="obTitle">Let Echotype hear you and type for you</h2>
+        <h2 id="obTitle" tabindex="-1">Let Echotype hear you and type for you</h2>
         <p class="lede">macOS asks once for each. You can change them later in System Settings.</p>
         <div class="group" id="obPerms"></div>
         <div class="ob-foot"><button class="btn quiet" data-recheck type="button">Check again</button><button class="btn primary" data-next type="button">Continue</button></div>
       </div>
 
       <div class="ob-step" data-step="2" hidden>
-        <h2>Choose a speech model</h2>
+        <h2 tabindex="-1">Choose a speech model</h2>
         <p class="lede" id="obModelLede"></p>
         <div class="group scroll" id="obModels"></div>
         <div class="ob-foot"><button class="btn quiet" id="obApi" type="button">Use an API instead</button><button class="btn primary" data-next id="obModelNext" type="button">Continue</button></div>
       </div>
 
       <div class="ob-step" data-step="3" hidden>
-        <h2 class="ob-try" id="obTry"></h2>
+        <h2 class="ob-try" id="obTry" tabindex="-1"></h2>
         <p class="lede" id="obTryState" aria-live="polite">Click into any text field first, then say a sentence.</p>
         <p class="ob-result text" id="obResult" hidden></p>
         <div class="ob-foot"><button class="btn quiet" id="obToggle" type="button">Start with a click</button><button class="btn primary" id="obDone" type="button">Finish</button></div>

@@ -5,7 +5,7 @@
       <stop offset="1" stop-color="#0a2522"/>
     </linearGradient>
     <linearGradient id="wave" gradientUnits="userSpaceOnUse" x1="264" y1="0" x2="628" y2="0">
-      <stop offset="0" stop-color="#3cc2b1" stop-opacity="0.45"/>
+      <stop offset="0" stop-color="#3cc2b1" stop-opacity="0.72"/>
       <stop offset="1" stop-color="#5fdcca"/>
     </linearGradient>
     <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
