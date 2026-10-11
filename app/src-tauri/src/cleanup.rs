@@ -70,6 +70,9 @@ pub fn cleanup(s: &Settings, text: &str) -> Result<String, String> {
     let status = resp.status();
     let body = resp.text().unwrap_or_default();
     if !status.is_success() {
+        if c.provider == "cloud" {
+            return Err(crate::cloud::error_message(status.as_u16(), &body));
+        }
         return Err(format!("Cleanup failed ({status}): {}", body.chars().take(300).collect::<String>()));
     }
     let v: Value = serde_json::from_str(&body).map_err(|_| "Cleanup returned a non-JSON response".to_string())?;
@@ -146,7 +149,7 @@ pub fn run(s: &Settings, pcm: &[f32], on_cleaning: impl FnOnce()) -> Result<Outp
         match cleanup(s, &text) {
             Ok(c) if !c.is_empty() => text = c,
             Ok(_) => {}
-            Err(e) => warning = Some(format!("{e}. Pasted the raw transcript instead.")),
+            Err(e) => warning = Some(format!("{}. Pasted the raw transcript instead.", e.trim_end_matches('.'))),
         }
         cleanup_ms = t.elapsed().as_millis() as u64;
     }

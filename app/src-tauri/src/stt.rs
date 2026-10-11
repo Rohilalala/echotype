@@ -356,6 +356,9 @@ pub fn transcribe_remote(s: &Settings, pcm: &[f32], prompt: &str) -> Result<Stri
     let status = resp.status();
     let body = resp.text().unwrap_or_default();
     if !status.is_success() {
+        if provider == "cloud" {
+            return Err(crate::cloud::error_message(status.as_u16(), &body)); // e.g. 402: this week's words are used up
+        }
         return Err(format!("Speech-to-text failed ({status}): {}", body.chars().take(300).collect::<String>()));
     }
     let v: serde_json::Value = serde_json::from_str(&body).map_err(|_| format!("Unexpected speech-to-text response: {}", body.chars().take(200).collect::<String>()))?;

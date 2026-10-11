@@ -1,6 +1,7 @@
 mod api;
 mod audio;
 mod cleanup;
+mod cloud;
 mod platform;
 mod settings;
 mod stt;
@@ -457,6 +458,45 @@ async fn open_permission_settings(app: AppHandle, kind: String) -> R<()> {
     Ok(())
 }
 
+// ---------- Echotype Cloud ----------
+
+/// The cloud calls are blocking HTTP and keychain work, so they run off the async runtime.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> R<T> + Send + 'static) -> R<T> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn cloud_start_login(email: String) -> R<()> {
+    blocking(move || cloud::start_login(&email)).await
+}
+
+#[tauri::command]
+async fn cloud_verify(email: String, code: String) -> R<serde_json::Value> {
+    blocking(move || cloud::verify(&email, &code)).await
+}
+
+#[tauri::command]
+async fn cloud_account() -> R<serde_json::Value> {
+    blocking(cloud::account).await
+}
+
+#[tauri::command]
+async fn cloud_checkout(app: AppHandle, plan: String) -> R<()> {
+    let url = blocking(move || cloud::billing_url(Some(&plan))).await?;
+    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn cloud_portal(app: AppHandle) -> R<()> {
+    let url = blocking(|| cloud::billing_url(None)).await?;
+    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn cloud_logout() -> R<()> {
+    blocking(cloud::logout).await
+}
+
 // ---------- app ----------
 
 fn create_overlay(app: &tauri::App) -> tauri::Result<()> {
@@ -584,6 +624,12 @@ pub fn run() {
             retry_last,
             check_permissions,
             open_permission_settings,
+            cloud_start_login,
+            cloud_verify,
+            cloud_account,
+            cloud_checkout,
+            cloud_portal,
+            cloud_logout,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Echotype");
