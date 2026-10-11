@@ -1,18 +1,27 @@
 //! Paste into the focused app, and OS permission checks.
 
+use std::sync::Mutex;
 use std::time::Duration;
 use tauri::AppHandle;
+
+/// One clipboard for the life of the app. On Linux (X11) the Clipboard object itself
+/// serves what was copied, so a per-call instance would take the text with it when dropped.
+static CLIPBOARD: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
 
 /// Clipboard + Cmd/Ctrl+V, then restore the previous clipboard text.
 /// Never loses text: without Accessibility, or if the keystroke fails, the text stays on the clipboard.
 pub fn paste(app: &AppHandle, text: &str, restore: bool) -> Result<(), String> {
-    let mut cb = arboard::Clipboard::new().map_err(|e| format!("Clipboard unavailable: {e}"))?;
+    let mut slot = CLIPBOARD.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.is_none() {
+        *slot = Some(arboard::Clipboard::new().map_err(|e| format!("Clipboard unavailable: {e}"))?);
+    }
+    let cb = slot.as_mut().expect("set above");
     if !accessibility_granted() {
-        set_private(&mut cb, text).map_err(|e| format!("Clipboard write failed: {e}"))?;
+        set_private(cb, text).map_err(|e| format!("Clipboard write failed: {e}"))?;
         return Err("Accessibility permission is off, so Echotype could not paste. The text is on your clipboard.".into());
     }
     let saved = if restore { cb.get_text().ok() } else { None };
-    set_private(&mut cb, text).map_err(|e| format!("Clipboard write failed: {e}"))?;
+    set_private(cb, text).map_err(|e| format!("Clipboard write failed: {e}"))?;
     // Delays follow Handy (MIT): 60 ms for the pasteboard to settle, 100 ms modifier hold, 60 ms before restoring.
     std::thread::sleep(Duration::from_millis(60));
     let (tx, rx) = std::sync::mpsc::channel();
@@ -24,7 +33,7 @@ pub fn paste(app: &AppHandle, text: &str, restore: bool) -> Result<(), String> {
     rx.recv().map_err(|e| e.to_string())?.map_err(|e| format!("{e}. The text is on your clipboard."))?;
     std::thread::sleep(Duration::from_millis(60));
     if let Some(prev) = saved {
-        let _ = set_private(&mut cb, &prev);
+        let _ = set_private(cb, &prev);
     }
     // ponytail: restores text only; an image on the clipboard is replaced by the transcript. Handy's image path is the upgrade.
     Ok(())

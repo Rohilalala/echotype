@@ -224,10 +224,18 @@ function renderHero() {
   } else {
     line.replaceChildren(S.mode === 'toggle' ? 'Press' : 'Hold', ...keycaps(S.hotkey), 'to dictate');
     if (b) sub.replaceChildren(h('span', {}, b.text), h('button', { className: 'btn', type: 'button', onclick: b.act }, b.label));
-    else if (st === 'error') sub.replaceChildren(h('span', {}, `${dictation.error || 'Dictation stopped.'} Try again, or check Settings.`), start);
+    else if (st === 'error') sub.replaceChildren(h('span', {}, `${dictation.error || 'Dictation stopped.'} Try again, or check Settings.`), ...keptText(), start);
     else if (st === 'done' && dictation.warning) sub.replaceChildren(h('span', {}, dictation.warning), start);
     else sub.replaceChildren(h('span', {}, 'Text appears wherever your cursor is.'), start);
   }
+}
+
+// Text that was transcribed but not pasted: shown with Copy so it survives even with history off.
+function keptText() {
+  if (!dictation.text) return [];
+  const copy = h('button', { className: 'btn', type: 'button' }, 'Copy');
+  copy.onclick = () => copyText(dictation.text, copy);
+  return [h('span', { className: 'text kept' }, dictation.text), copy];
 }
 
 function renderRecent() {
@@ -628,7 +636,7 @@ async function copyText(text, btn) {
 listen('dictation-state', ({ payload }) => {
   dictation = payload;
   renderHero();
-  if (payload.state === 'done' && payload.text) {
+  if ((payload.state === 'done' || payload.state === 'error') && payload.text) { // error + text = transcribed but not pasted
     recent.unshift({ ts: Date.now(), text: payload.text });
     renderRecent();
   }

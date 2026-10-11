@@ -321,6 +321,7 @@ body[data-blocked] .dot { display: inline-block; background: var(--warn); }
 .hero-line kbd { font-size: 0.62em; }
 .hero-sub { color: var(--text-2); margin: 10px 0 0; max-width: 60ch; min-height: 24px; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
 body[data-state="error"] .hero-sub span:first-child { color: var(--bad); }
+.hero-sub .kept { flex-basis: 100%; color: var(--text); white-space: pre-line; max-height: 8.5em; overflow: auto; }
 
 .meter { display: inline-flex; align-items: center; gap: 3px; height: 26px; }
 .meter i { width: 4px; height: 100%; border-radius: 2px; background: var(--rec); transform: scaleY(0.15); transition: transform 0.09s linear; }
