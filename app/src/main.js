@@ -95,7 +95,7 @@ function syncBound() {
 function changed(p) {
   if (p === 'mode' || p === 'hotkey') renderHotkey();
   if (p === 'translate_to_english') renderLangNote();
-  if (p === 'cleanup.enabled') setCleanupInert();
+  if (p === 'cleanup.enabled') { setCleanupInert(); renderCloud(); refreshCloud(); }
   if (p.startsWith('local_api')) refreshApi();
   if (p === 'history_enabled') renderHistory();
 }
@@ -107,6 +107,7 @@ function go(page) {
   $('#main').scrollTop = 0;
   if (page === 'history') renderHistory();
   if (page === 'settings') { refreshPerms(); refreshApi(); }
+  if (page === 'speech' || page === 'cleanup') refreshCloud();
   history.replaceState(null, '', '#' + page);
 }
 $('#nav').addEventListener('click', e => { const b = e.target.closest('button'); if (b) go(b.dataset.page); });
@@ -201,7 +202,9 @@ function blocker() {
   if (perms && !perms.accessibility) return { text: "Echotype can't paste yet: Accessibility access is off.", label: 'Allow Accessibility', act: () => invoke('open_permission_settings', { kind: 'accessibility' }) };
   if (perms?.microphone === 'denied') return { text: 'Microphone access is blocked for Echotype.', label: 'Allow microphone', act: () => invoke('open_permission_settings', { kind: 'microphone' }) };
   const p = preset(S.stt.provider);
-  if (S.stt.provider === 'local') {
+  if (S.stt.provider === 'cloud') {
+    if (cloud.status === 'out' || cloud.status === 'code') return { text: 'Sign in to Echotype Cloud to transcribe.', label: 'Sign in', act: () => go('speech') };
+  } else if (S.stt.provider === 'local') {
     if (!models.find(m => m.id === S.stt.local_model)?.downloaded) return { text: 'No speech model is downloaded yet.', label: 'Choose a model', act: () => go('speech') };
   } else if (p?.needs_key && !sttKeySaved) return { text: `Add your ${p.label} API key to transcribe.`, label: 'Add key', act: () => go('speech') };
   return null;
@@ -213,7 +216,7 @@ function renderHero() {
   const b = st === 'idle' || st === 'done' ? blocker() : null;
   document.body.dataset.state = st;
   document.body.toggleAttribute('data-blocked', !!b);
-  $('#heroState span').textContent = b ? 'Not ready' : STATE_LABEL[st] ?? 'Ready';
+  $('#heroState span').textContent = b ? 'Not ready' : dictation.copied ? 'Copied' : STATE_LABEL[st] ?? 'Ready';
   const line = $('#heroLine'), sub = $('#heroSub');
   const start = h('button', { className: 'btn quiet', type: 'button', onclick: () => invoke('toggle_dictation') }, 'Start with a click');
   if (st === 'recording') {
@@ -226,6 +229,7 @@ function renderHero() {
     line.replaceChildren(S.mode === 'toggle' ? 'Press' : 'Hold', ...keycaps(S.hotkey), 'to dictate');
     if (b) sub.replaceChildren(h('span', {}, b.text), h('button', { className: 'btn', type: 'button', onclick: b.act }, b.label));
     else if (st === 'error') sub.replaceChildren(h('span', {}, `${dictation.error || 'Dictation stopped.'} Try again, or check Settings.`), ...keptText(), dictation.retry && retryBtn(), start);
+    else if (st === 'done' && dictation.copied) sub.replaceChildren(h('span', {}, dictation.warning || 'The retry worked. The text is on your clipboard.'), ...keptText(), start);
     else if (st === 'done' && dictation.warning) sub.replaceChildren(h('span', {}, dictation.warning), start);
     else sub.replaceChildren(h('span', {}, 'Text appears wherever your cursor is.'), start);
   }
@@ -298,6 +302,8 @@ function setProvider(kind, id) {
   save();
   if (kind === 'stt') renderStt(); else fillRemote('cleanup');
   renderLangNote();
+  renderCloud();
+  refreshCloud();
 }
 
 function fillRemote(kind) {
@@ -322,7 +328,8 @@ async function renderKey(kind) {
   const row = $(`[data-key="${kind}"]`);
   const p = preset(S[kind].provider), name = secretName(kind);
   // Local servers such as Ollama take no key; hide the row rather than show an optional field.
-  row.hidden = p?.needs_key === false && p.id !== 'custom';
+  // Echotype Cloud signs in on its own panel instead.
+  row.hidden = (p?.needs_key === false && p.id !== 'custom') || p?.id === 'cloud';
   if (row.hidden) return;
   const saved = await invoke('has_secret', { name }).catch(() => false);
   if (secretName(kind) !== name) return; // provider changed while we waited
@@ -354,10 +361,10 @@ function renderStt() {
   const seg = $('#sttProvider');
   seg.replaceChildren(...[{ id: 'local', label: 'Local' }, ...presets.filter(p => p.stt)].map(p =>
     h('label', {}, h('input', { type: 'radio', name: 'sttp', value: p.id, checked: p.id === S.stt.provider, onchange: () => setProvider('stt', p.id) }), h('span', {}, p.label))));
-  const local = S.stt.provider === 'local';
+  const local = S.stt.provider === 'local', viaCloud = S.stt.provider === 'cloud';
   $('#sttLocal').hidden = !local;
-  $('#sttRemote').hidden = local;
-  if (local) renderModels(); else fillRemote('stt');
+  $('#sttRemote').hidden = local || viaCloud;
+  if (local) renderModels(); else if (!viaCloud) fillRemote('stt');
 }
 
 const fmtMB = mb => mb >= 1000 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
@@ -441,6 +448,134 @@ function renderCleanup() {
   fillRemote('cleanup');
 }
 $('#cleanupProvider').addEventListener('change', e => setProvider('cleanup', e.target.value));
+
+// ---------- Echotype Cloud ----------
+// status: loading | out (email step) | code (code step) | in (signed in) | error (unreachable, no account yet).
+// The API key never reaches this window; Rust keeps it in the keychain.
+let cloud = { status: 'loading' }, cloudEmail = '';
+const usesCloud = () => S.stt.provider === 'cloud' || (S.cleanup.enabled && S.cleanup.provider === 'cloud');
+const SIGNED_OUT = 'signed out';
+
+function cloudFailed(e) {
+  if (String(e) === SIGNED_OUT) cloud = { status: 'out' };
+  else cloud.error = String(e);
+  renderCloud();
+}
+
+async function refreshCloud() {
+  if (!S || !usesCloud()) return;
+  try {
+    const account = await invoke('cloud_account');
+    cloud = { status: 'in', account, note: account.plan === cloud.account?.plan ? cloud.note : null };
+  } catch (e) {
+    // Mid sign-in, leave the form alone: re-rendering would wipe what was typed, and the form shows its own errors.
+    if (cloud.status === 'out' || cloud.status === 'code') return;
+    cloud = String(e) === SIGNED_OUT ? { status: 'out' } : { ...cloud, status: cloud.account ? 'in' : 'error', error: String(e) };
+  }
+  renderCloud();
+}
+
+const fmtNum = n => Number(n || 0).toLocaleString();
+function usageLine(a) {
+  if (a.plan === 'pro') {
+    const hours = s => (s / 3600).toFixed(1).replace(/\.0$/, '');
+    return `Unlimited · ${hours(a.audio_seconds_used)} of ${hours(a.audio_seconds_limit)} audio hours this month`;
+  }
+  const day = new Date(a.resets_at).toLocaleDateString([], { weekday: 'long' });
+  return `${fmtNum(a.words_used)} of ${fmtNum(a.words_limit)} words this week · resets ${day}`;
+}
+
+const cloudRow = (title, desc, actions, ...extra) => h('div', { className: 'row' },
+  h('span', { className: 'row-text' }, h('span', { className: 'row-title' }, title), desc && h('span', { className: 'row-desc' }, desc), ...extra),
+  actions && h('span', { className: 'actions' }, actions));
+const cloudErr = () => cloud.error && h('span', { className: 'row-desc error', role: 'alert' }, cloud.error);
+
+// One form row: label text on the left, field and submit button on the right.
+function cloudForm(title, desc, input, label, run) {
+  const btn = h('button', { className: 'btn primary', type: 'submit' }, label);
+  return h('form', { className: 'row', onsubmit: async e => {
+    e.preventDefault();
+    if (!input.value.trim()) return input.focus();
+    btn.disabled = input.disabled = true;
+    cloud.error = null;
+    try { await run(input.value.trim()); }
+    catch (err) { cloud.error = String(err); renderCloud(); $('#cloudAccount input')?.focus(); }
+  } },
+  h('span', { className: 'row-text' }, h('span', { className: 'row-title' }, title), h('span', { className: 'row-desc' }, desc), cloudErr()),
+  h('span', { className: 'actions' }, input, btn));
+}
+
+function cloudPanel() {
+  if (cloud.status === 'loading') return [h('p', { className: 'empty working' }, 'Checking your account')];
+  if (cloud.status === 'error') return [h('p', { className: 'empty', role: 'alert' }, `${cloud.error} `, h('button', { className: 'btn', type: 'button', onclick: () => { cloud = { status: 'loading' }; renderCloud(); refreshCloud(); } }, 'Try again'))];
+  if (cloud.status === 'out') {
+    const email = h('input', { type: 'text', inputMode: 'email', autocomplete: 'email', spellcheck: false, placeholder: 'you@example.com', 'aria-label': 'Email', value: cloudEmail });
+    return [cloudForm('Sign in with your email', 'Echotype emails you a 6-digit code. There is no password.', email, 'Send code', async v => {
+      cloudEmail = v;
+      await invoke('cloud_start_login', { email: v });
+      cloud = { status: 'code' };
+      renderCloud();
+      $('#cloudCode')?.focus();
+    })];
+  }
+  if (cloud.status === 'code') {
+    const code = h('input', { type: 'text', id: 'cloudCode', className: 'code', inputMode: 'numeric', autocomplete: 'one-time-code', maxLength: 6, spellcheck: false, placeholder: '6 digits', 'aria-label': 'Sign-in code' });
+    return [
+      cloudForm('Enter the code', `Sent to ${cloudEmail}. It works for 10 minutes.`, code, 'Sign in', async v => {
+        const who = await invoke('cloud_verify', { email: cloudEmail, code: v });
+        cloud = { status: 'in', account: who };
+        renderCloud();
+        refreshCloud();
+      }),
+      h('div', { className: 'row' }, h('button', { className: 'btn quiet', type: 'button', onclick: () => { cloud = { status: 'out' }; renderCloud(); $('#cloudAccount input')?.focus(); } }, 'Use a different email')),
+    ];
+  }
+  const a = cloud.account, pro = a.plan === 'pro';
+  const billing = (label, cmd, args) => {
+    const btn = h('button', { className: 'btn', type: 'button' }, label);
+    btn.onclick = async () => {
+      btn.disabled = true;
+      cloud.error = cloud.note = null;
+      try { await invoke(cmd, args); cloud.note = 'Opened in your browser. Your plan updates here when you come back.'; renderCloud(); }
+      catch (e) { cloudFailed(e); }
+    };
+    return btn;
+  };
+  const signOut = h('button', { className: 'btn', type: 'button', onclick: async () => {
+    try { await invoke('cloud_logout'); cloud = { status: 'out' }; renderCloud(); } catch (e) { cloudFailed(e); }
+  } }, 'Sign out');
+  const free = !pro && a.words_limit > 0;
+  const status = [cloud.note && h('span', { className: 'row-desc' }, cloud.note), cloudErr()];
+  return [
+    cloudRow(a.email, pro ? 'Pro plan' : 'Free plan', [signOut]),
+    a.words_used != null && cloudRow('Usage', usageLine(a),
+      free && [h('span', { className: 'bar', role: 'progressbar', 'aria-label': 'Words used this week', 'aria-valuenow': Math.round(Math.min(1, a.words_used / a.words_limit) * 100) }, h('i', { style: `transform:scaleX(${Math.min(1, a.words_used / a.words_limit)})` }))]),
+    pro
+      ? cloudRow('Billing', 'Change your plan, update your card or cancel.', [billing('Manage billing', 'cloud_portal')], ...status)
+      : cloudRow('Upgrade to Pro', 'Unlimited words, with a fair-use limit of 40 audio hours a month.', [billing('$6 a month', 'cloud_checkout', { plan: 'pro_monthly' }), billing('$60 a year', 'cloud_checkout', { plan: 'pro_yearly' })], ...status),
+  ];
+}
+
+function renderCloud() {
+  if (!S) return;
+  $('#cloudBox').hidden = !usesCloud();
+  if (usesCloud()) $('#cloudAccount').replaceChildren(...cloudPanel().filter(Boolean));
+  // Cleanup through the cloud uses the same account: no URL, model or key to set.
+  const viaCloud = S.cleanup.provider === 'cloud';
+  for (const id of ['#cleanupUrl', '#cleanupModel']) $(id).closest('.row').hidden = viaCloud;
+  if (viaCloud) $('[data-key="cleanup"]').hidden = true;
+  const row = $('#cleanupCloud');
+  row.hidden = !viaCloud;
+  if (viaCloud) {
+    const st = cloud.status;
+    row.replaceChildren(h('span', { className: 'row-text' }, h('span', { className: 'row-title' }, 'Uses your Echotype Cloud account'),
+      h('span', { className: st === 'error' ? 'row-desc error' : 'row-desc' },
+        st === 'in' ? `Signed in as ${cloud.account.email}.` : st === 'loading' ? 'Checking your account…' : st === 'error' ? cloud.error : 'You are not signed in. Sign in on the Speech model page.')),
+      (st === 'out' || st === 'code') && h('span', { className: 'actions' }, h('button', { className: 'btn', type: 'button', onclick: () => go('speech') }, 'Open Speech model')));
+  }
+  renderHero();
+}
+window.addEventListener('focus', refreshCloud); // back from the browser after checkout
 
 // ---------- language ----------
 const LANGS = [['auto', 'Auto-detect'], ['en', 'English'], ['hi', 'Hindi'], ['ar', 'Arabic'], ['bn', 'Bengali'], ['zh', 'Chinese'], ['nl', 'Dutch'], ['fr', 'French'], ['de', 'German'], ['gu', 'Gujarati'], ['id', 'Indonesian'], ['it', 'Italian'], ['ja', 'Japanese'], ['kn', 'Kannada'], ['ko', 'Korean'], ['ml', 'Malayalam'], ['mr', 'Marathi'], ['pa', 'Punjabi'], ['pl', 'Polish'], ['pt', 'Portuguese'], ['ru', 'Russian'], ['es', 'Spanish'], ['ta', 'Tamil'], ['te', 'Telugu'], ['tr', 'Turkish'], ['uk', 'Ukrainian'], ['ur', 'Urdu'], ['vi', 'Vietnamese']];
@@ -644,6 +779,7 @@ listen('dictation-state', ({ payload }) => {
     recent.unshift({ ts: Date.now(), text: payload.text });
     renderRecent();
   }
+  if (payload.state === 'done' || payload.state === 'error') refreshCloud(); // words used went up
   const st = $('#obTryState'), res = $('#obResult');
   st.textContent = payload.state === 'error' ? payload.error || 'Something went wrong. Try again.'
     : payload.state === 'idle' || payload.state === 'done' ? 'Click into any text field first, then say a sentence.'
@@ -702,6 +838,8 @@ renderHotkey();
 renderRecent();
 renderStt();
 renderCleanup();
+renderCloud();
+refreshCloud();
 renderLangNote();
 renderDict();
 renderMics();

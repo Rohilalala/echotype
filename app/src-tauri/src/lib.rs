@@ -1,6 +1,7 @@
 mod api;
 mod audio;
 mod cleanup;
+mod cloud;
 mod platform;
 mod settings;
 mod stt;
@@ -53,6 +54,9 @@ struct DictationState {
     /// The recording is kept and `retry_last` can transcribe it again.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     retry: bool,
+    /// `text` went to the clipboard instead of being pasted (a retry started from this window).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    copied: bool,
 }
 
 fn state(app: &AppHandle) -> tauri::State<'_, AppState> {
@@ -114,7 +118,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                 (Cmd::Retry, false) if !busy.load(Ordering::SeqCst) => {
                     let pcm = state(&app).last_failed.lock().unwrap_or_else(|e| e.into_inner()).take();
                     if let Some(pcm) = pcm {
-                        process(&app, pcm, busy.clone());
+                        process(&app, pcm, busy.clone(), false);
                     }
                 }
                 (Cmd::Press | Cmd::Toggle, false) if !busy.load(Ordering::SeqCst) => {
@@ -144,7 +148,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
 fn finish(app: &AppHandle, rec: &mut Option<audio::Recorder>, busy: &Arc<AtomicBool>) {
     let pcm = rec.take().map(audio::Recorder::stop).unwrap_or_default();
     let _ = app.global_shortcut().unregister(escape());
-    process(app, pcm, busy.clone());
+    process(app, pcm, busy.clone(), true);
 }
 
 /// Clears the busy flag when dropped, so even a panicking worker can't leave dictation stuck.
@@ -157,7 +161,9 @@ impl Drop for Busy {
 }
 
 /// STT + cleanup + paste + history on a worker thread, so the hotkey stays responsive.
-fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>) {
+/// `paste` is false for a retry from Echotype's own window: pasting there would type into
+/// Echotype itself, so the text goes to the clipboard instead.
+fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, paste: bool) {
     if pcm.len() < MIN_SAMPLES {
         emit_state(app, simple("idle"));
         return;
@@ -179,8 +185,9 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>) {
             Ok(out) if out.text.trim().is_empty() => simple("idle"),
             Ok(out) => {
                 record_history(&s, &out);
-                match platform::paste(&app, &out.text, s.restore_clipboard) {
-                    Ok(()) => DictationState { state: "done", text: Some(out.text), warning: out.warning, ..Default::default() },
+                let res = if paste { platform::paste(&app, &out.text, s.restore_clipboard) } else { platform::copy(&out.text) };
+                match res {
+                    Ok(()) => DictationState { state: "done", text: Some(out.text), warning: out.warning, copied: !paste, ..Default::default() },
                     Err(e) => DictationState { state: "error", text: Some(out.text), error: Some(e), warning: out.warning, ..Default::default() },
                 }
             }
@@ -429,7 +436,8 @@ async fn toggle_dictation(app: AppHandle) -> R<()> {
     state(&app).dictation.send(Cmd::Toggle).map_err(|e| e.to_string())
 }
 
-/// Runs the last failed recording through STT, cleanup and paste again.
+/// Runs the last failed recording through STT and cleanup again. It is started from the UI,
+/// so the result is copied, not pasted.
 #[tauri::command]
 async fn retry_last(app: AppHandle) -> R<()> {
     let st = state(&app);
@@ -455,6 +463,45 @@ async fn open_permission_settings(app: AppHandle, kind: String) -> R<()> {
         app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+// ---------- Echotype Cloud ----------
+
+/// The cloud calls are blocking HTTP and keychain work, so they run off the async runtime.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> R<T> + Send + 'static) -> R<T> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn cloud_start_login(email: String) -> R<()> {
+    blocking(move || cloud::start_login(&email)).await
+}
+
+#[tauri::command]
+async fn cloud_verify(email: String, code: String) -> R<serde_json::Value> {
+    blocking(move || cloud::verify(&email, &code)).await
+}
+
+#[tauri::command]
+async fn cloud_account() -> R<serde_json::Value> {
+    blocking(cloud::account).await
+}
+
+#[tauri::command]
+async fn cloud_checkout(app: AppHandle, plan: String) -> R<()> {
+    let url = blocking(move || cloud::billing_url(Some(&plan))).await?;
+    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn cloud_portal(app: AppHandle) -> R<()> {
+    let url = blocking(|| cloud::billing_url(None)).await?;
+    app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn cloud_logout() -> R<()> {
+    blocking(cloud::logout).await
 }
 
 // ---------- app ----------
@@ -584,6 +631,12 @@ pub fn run() {
             retry_last,
             check_permissions,
             open_permission_settings,
+            cloud_start_login,
+            cloud_verify,
+            cloud_account,
+            cloud_checkout,
+            cloud_portal,
+            cloud_logout,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Echotype");

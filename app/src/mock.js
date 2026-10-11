@@ -17,6 +17,7 @@ const settings = {
   onboarded: !q.has('onboarding'),
 };
 const presets = [
+  { id: 'cloud', label: 'Echotype Cloud', stt: true, cleanup: true, base_url: 'https://cloud.echotype.app/v1', default_stt_model: 'whisper-large-v3-turbo', default_cleanup_model: 'openai/gpt-oss-20b', needs_key: true },
   { id: 'openai', label: 'OpenAI', stt: true, cleanup: true, base_url: 'https://api.openai.com/v1', default_stt_model: 'gpt-4o-mini-transcribe', default_cleanup_model: 'gpt-4.1-mini', needs_key: true },
   { id: 'groq', label: 'Groq', stt: true, cleanup: true, base_url: 'https://api.groq.com/openai/v1', default_stt_model: 'whisper-large-v3-turbo', default_cleanup_model: 'llama-3.1-8b-instant', needs_key: true },
   { id: 'openrouter', label: 'OpenRouter', stt: false, cleanup: true, base_url: 'https://openrouter.ai/api/v1', default_stt_model: '', default_cleanup_model: 'meta-llama/llama-3.1-8b-instruct', needs_key: true },
@@ -44,6 +45,15 @@ let history = [
   { ts: ago(60 * 26), raw: 'ship it after the tauri build passes on ci', text: 'Ship it after the Tauri build passes on CI.', stt_ms: 350, cleanup_ms: null, stt_provider: 'local', cleanup_provider: null },
 ];
 const secrets = new Set(['llm:groq']);
+
+// Echotype Cloud: ?cloud=free or ?cloud=pro starts signed in; any 6 digits except 000000 sign in.
+// Sample numbers only (the preview says so in the sidebar).
+const nextMonday = () => { const d = new Date(); d.setUTCDate(d.getUTCDate() + ((8 - d.getUTCDay()) % 7 || 7)); d.setUTCHours(0, 0, 0, 0); return d.toISOString(); };
+const sampleAccount = plan => plan === 'pro'
+  ? { email: 'you@example.com', plan, words_used: 18240, words_limit: 0, resets_at: nextMonday(), audio_seconds_used: 11520, audio_seconds_limit: 144000 }
+  : { email: 'you@example.com', plan: 'free', words_used: 1240, words_limit: 2000, resets_at: nextMonday(), audio_seconds_used: 610, audio_seconds_limit: 7200 };
+let cloudAccount = ['free', 'pro'].includes(q.get('cloud')) ? sampleAccount(q.get('cloud')) : null;
+if (q.has('cloud')) settings.stt.provider = 'cloud';
 let busy = false;
 
 const commands = {
@@ -95,7 +105,26 @@ const commands = {
   },
   check_permissions: () => ({ microphone: 'granted', accessibility: !q.has('noaccess') }),
   open_permission_settings: () => null,
-  retry_last: () => null,
+  cloud_start_login: async ({ email }) => {
+    await wait(500);
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw 'Enter a valid email address.';
+    return null;
+  },
+  cloud_verify: async ({ email, code }) => {
+    await wait(500);
+    if (!/^\d{6}$/.test(code) || code === '000000') throw 'That code is wrong or has expired.';
+    cloudAccount = { ...sampleAccount('free'), email };
+    return { email, plan: 'free' };
+  },
+  cloud_account: () => { if (!cloudAccount) throw 'signed out'; return structuredClone(cloudAccount); },
+  cloud_checkout: () => { if (!cloudAccount) throw 'signed out'; cloudAccount = { ...sampleAccount('pro'), email: cloudAccount.email }; return null; },
+  cloud_portal: () => { if (!cloudAccount) throw 'signed out'; return null; },
+  cloud_logout: () => { cloudAccount = null; return null; },
+  retry_last: async () => {
+    emit('dictation-state', { state: 'transcribing' }); await wait(700);
+    emit('dictation-state', { state: 'done', text: 'Moving the design review to Friday at 3.', copied: true });
+    return null;
+  },
 };
 
 window.__TAURI__ = {

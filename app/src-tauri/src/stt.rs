@@ -349,13 +349,16 @@ pub fn transcribe_remote(s: &Settings, pcm: &[f32], prompt: &str) -> Result<Stri
     }
     let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(120)).build().map_err(|e| e.to_string())?;
     let mut req = client.post(format!("{base}/{endpoint}")).multipart(form);
-    if let Some(key) = settings::get_secret(&format!("stt:{provider}")) {
+    if let Some(key) = settings::provider_key("stt", provider) {
         req = req.bearer_auth(key);
     }
     let resp = req.send().map_err(|e| format!("Speech-to-text request failed: {e}"))?;
     let status = resp.status();
     let body = resp.text().unwrap_or_default();
     if !status.is_success() {
+        if provider == "cloud" {
+            return Err(crate::cloud::error_message(status.as_u16(), &body)); // e.g. 402: this week's words are used up
+        }
         return Err(format!("Speech-to-text failed ({status}): {}", body.chars().take(300).collect::<String>()));
     }
     let v: serde_json::Value = serde_json::from_str(&body).map_err(|_| format!("Unexpected speech-to-text response: {}", body.chars().take(200).collect::<String>()))?;
