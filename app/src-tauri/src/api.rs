@@ -6,15 +6,20 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde_json::json;
+use std::sync::Arc;
 use tauri::AppHandle;
+use tokio::sync::Semaphore;
 
 /// Same cap as OpenAI's transcription endpoint.
 pub const MAX_BODY: usize = 25 * 1024 * 1024;
+/// Transcriptions at once: each can decode up to 60 minutes of audio (~700 MB).
+const MAX_JOBS: usize = 2;
 
 #[derive(Clone)]
 struct ApiState {
     app: AppHandle,
     token: String,
+    jobs: Arc<Semaphore>,
 }
 
 pub fn new_token() -> Result<String, String> {
@@ -48,25 +53,28 @@ pub fn too_large(content_length: Option<&str>) -> bool {
     content_length.and_then(|v| v.parse::<u64>().ok()).is_some_and(|n| n > MAX_BODY as u64)
 }
 
-/// Binds now (so "port in use" surfaces immediately) and serves until the task is aborted.
-pub fn start(app: AppHandle, port: u16, token: String) -> Result<tauri::async_runtime::JoinHandle<()>, String> {
+/// Binds now (so "port in use" surfaces immediately) and serves until the returned sender is
+/// dropped. Shutdown is graceful: open keep-alive connections close too, not just the listener.
+pub fn start(app: AppHandle, port: u16, token: String) -> Result<tokio::sync::oneshot::Sender<()>, String> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", port)).map_err(|e| format!("Local API could not use port {port}: {e}"))?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let router = Router::new()
         .route("/v1/audio/transcriptions", post(transcribe))
         .route("/v1/models", get(models))
         .layer(DefaultBodyLimit::max(MAX_BODY))
-        .with_state(ApiState { app, token });
-    Ok(tauri::async_runtime::spawn(async move {
+        .with_state(ApiState { app, token, jobs: Arc::new(Semaphore::new(MAX_JOBS)) });
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    tauri::async_runtime::spawn(async move {
         match tokio::net::TcpListener::from_std(listener) {
             Ok(l) => {
-                if let Err(e) = axum::serve(l, router).await {
+                if let Err(e) = axum::serve(l, router).with_graceful_shutdown(async { let _ = stopped.await; }).await {
                     eprintln!("echotype: local API stopped: {e}");
                 }
             }
             Err(e) => eprintln!("echotype: local API listener failed: {e}"),
         }
-    }))
+    });
+    Ok(stop)
 }
 
 async fn models(State(st): State<ApiState>, headers: HeaderMap) -> Response {
@@ -84,6 +92,10 @@ async fn transcribe(State(st): State<ApiState>, req: Request) -> Response {
     if too_large(req.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok())) {
         return error(StatusCode::PAYLOAD_TOO_LARGE, "invalid_request_error", "Audio file is larger than 25 MB");
     }
+    // Held by the blocking job, so a client that hangs up does not free the slot early.
+    let Ok(permit) = st.jobs.clone().try_acquire_owned() else {
+        return error(StatusCode::TOO_MANY_REQUESTS, "rate_limit_error", format!("Echotype is already transcribing {MAX_JOBS} files; try again shortly"));
+    };
     let mut mp = match Multipart::from_request(req, &st).await {
         Ok(m) => m,
         Err(e) => return error(e.status(), "invalid_request_error", e.body_text()),
@@ -123,6 +135,7 @@ async fn transcribe(State(st): State<ApiState>, req: Request) -> Response {
         settings.dictionary.push(p);
     }
     let job = tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
         let pcm = crate::audio::decode(file, ext.as_deref()).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
         crate::cleanup::run(&settings, &pcm, || {}).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
     });

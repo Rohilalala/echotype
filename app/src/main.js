@@ -33,9 +33,15 @@ const progress = {}, modelErr = {};
 let recent = [], dropResults = [], apiStatus = null, tokenShown = false;
 
 // ---------- saving ----------
-let saveTimer, savedTimer;
-async function save(quiet) {
+let saveTimer, savedTimer, saving = Promise.resolve();
+// Saves run one after another, each sending S as it is when its turn comes.
+function save(quiet) {
   clearTimeout(saveTimer);
+  const run = saving.then(() => saveNow(quiet));
+  saving = run;
+  return run;
+}
+async function saveNow(quiet) {
   const settings = { ...S, replacements: S.replacements.filter(r => r.from.trim()) };
   try {
     await invoke('save_settings', { settings });
@@ -128,7 +134,8 @@ function accelFrom(e) {
   const c = e.code;
   if (!c || /^(Meta|Control|Alt|Shift|OS|Fn|CapsLock)/.test(c)) return { mods };
   const key = c.startsWith('Key') ? c.slice(3) : c.startsWith('Digit') ? c.slice(5) : c;
-  if (!mods.length && !/^F\d+$/.test(key)) return { mods, error: 'Add a modifier such as ⌥, ⌃ or ⌘.' };
+  // Shift alone is not enough: Shift+A would take capital A away from every app.
+  if (!mods.some(m => m !== 'Shift') && !/^F\d+$/.test(key)) return { mods, error: 'Add a modifier such as ⌥, ⌃ or ⌘.' };
   return { mods, accel: [...mods, key].join('+') };
 }
 
@@ -218,11 +225,22 @@ function renderHero() {
   } else {
     line.replaceChildren(S.mode === 'toggle' ? 'Press' : 'Hold', ...keycaps(S.hotkey), 'to dictate');
     if (b) sub.replaceChildren(h('span', {}, b.text), h('button', { className: 'btn', type: 'button', onclick: b.act }, b.label));
-    else if (st === 'error') sub.replaceChildren(h('span', {}, `${dictation.error || 'Dictation stopped.'} Try again, or check Settings.`), start);
+    else if (st === 'error') sub.replaceChildren(h('span', {}, `${dictation.error || 'Dictation stopped.'} Try again, or check Settings.`), ...keptText(), dictation.retry && retryBtn(), start);
     else if (st === 'done' && dictation.warning) sub.replaceChildren(h('span', {}, dictation.warning), start);
     else sub.replaceChildren(h('span', {}, 'Text appears wherever your cursor is.'), start);
   }
 }
+
+// Text that was transcribed but not pasted: shown with Copy so it survives even with history off.
+function keptText() {
+  if (!dictation.text) return [];
+  const copy = h('button', { className: 'btn', type: 'button' }, 'Copy');
+  copy.onclick = () => copyText(dictation.text, copy);
+  return [h('span', { className: 'text kept' }, dictation.text), copy];
+}
+
+// The recording is kept when transcription fails: run it again without re-dictating.
+const retryBtn = () => h('button', { className: 'btn primary', type: 'button', onclick: () => invoke('retry_last').catch(e => { dictation = { state: 'error', error: String(e) }; renderHero(); }) }, 'Retry');
 
 function renderRecent() {
   const box = $('#recent');
@@ -499,7 +517,7 @@ async function renderHistory() {
         it.raw !== it.text && h('p', { className: 'raw text' }, h('b', {}, 'Heard: '), it.raw),
         h('span', { className: 'timing' },
           h('span', {}, `Speech ${it.stt_ms} ms${it.stt_provider ? ` (${it.stt_provider})` : ''}`),
-          it.cleanup_ms != null && h('span', {}, `Cleanup ${it.cleanup_ms} ms${it.cleanup_provider ? ` (${it.cleanup_provider})` : ''}`))));
+          it.cleanup_provider && h('span', {}, `Cleanup ${it.cleanup_ms} ms (${it.cleanup_provider})`))));
   }));
 }
 const confirmClear = on => { $('#clearHistory').hidden = on; $('#clearConfirm').hidden = !on; (on ? $('#clearCancel') : $('#clearHistory')).focus(); };
@@ -622,7 +640,7 @@ async function copyText(text, btn) {
 listen('dictation-state', ({ payload }) => {
   dictation = payload;
   renderHero();
-  if (payload.state === 'done' && payload.text) {
+  if ((payload.state === 'done' || payload.state === 'error') && payload.text) { // error + text = transcribed but not pasted
     recent.unshift({ ts: Date.now(), text: payload.text });
     renderRecent();
   }

@@ -17,12 +17,18 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutSt
 use tauri_plugin_opener::OpenerExt;
 
 const MIN_SAMPLES: usize = audio::RATE as usize * 3 / 10; // recordings under 0.3 s are taps
+/// A recording this long stops itself and is transcribed as usual (toggle mode left on, a stuck key).
+const MAX_RECORDING: Duration = Duration::from_secs(30 * 60);
 
 struct AppState {
     settings: Mutex<Settings>,
     dictation: mpsc::Sender<Cmd>,
-    api: Mutex<Option<(u16, tauri::async_runtime::JoinHandle<()>)>>,
+    /// Running local API: port, the token it accepts, and the sender whose drop shuts it down.
+    api: Mutex<Option<(u16, String, tokio::sync::oneshot::Sender<()>)>>,
     overlay_gen: AtomicU64,
+    /// The last recording whose transcription failed, kept so `retry_last` can run it again.
+    // ponytail: only the last one, in memory; a failed-recordings folder if users need more than one retry.
+    last_failed: Mutex<Option<Vec<f32>>>,
 }
 
 enum Cmd {
@@ -30,6 +36,9 @@ enum Cmd {
     Release,
     Toggle,
     Cancel,
+    Retry,
+    /// Sent by recording `n` when it reaches MAX_RECORDING.
+    AutoStop(u64),
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -41,6 +50,9 @@ struct DictationState {
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     warning: Option<String>,
+    /// The recording is kept and `retry_last` can transcribe it again.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    retry: bool,
 }
 
 fn state(app: &AppHandle) -> tauri::State<'_, AppState> {
@@ -86,6 +98,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
     std::thread::spawn(move || {
         let busy = Arc::new(AtomicBool::new(false));
         let mut rec: Option<audio::Recorder> = None;
+        let mut rec_id = 0u64;
         for cmd in rx {
             let toggle_mode = current_settings(&app).mode == "toggle";
             match (cmd, rec.is_some()) {
@@ -95,12 +108,23 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                     emit_state(&app, simple("idle"));
                 }
                 (Cmd::Toggle, true) => finish(&app, &mut rec, &busy),
+                (Cmd::AutoStop(id), true) if id == rec_id => finish(&app, &mut rec, &busy),
                 (Cmd::Press, true) if toggle_mode => finish(&app, &mut rec, &busy),
                 (Cmd::Release, true) if !toggle_mode => finish(&app, &mut rec, &busy),
+                (Cmd::Retry, false) if !busy.load(Ordering::SeqCst) => {
+                    let pcm = state(&app).last_failed.lock().unwrap_or_else(|e| e.into_inner()).take();
+                    if let Some(pcm) = pcm {
+                        process(&app, pcm, busy.clone());
+                    }
+                }
                 (Cmd::Press | Cmd::Toggle, false) if !busy.load(Ordering::SeqCst) => {
-                    let a = app.clone();
+                    rec_id += 1;
+                    let (a, id, started, sent) = (app.clone(), rec_id, std::time::Instant::now(), AtomicBool::new(false));
                     match audio::Recorder::start(current_settings(&app).input_device, move |level| {
                         let _ = a.emit("audio-level", serde_json::json!({ "level": level }));
+                        if started.elapsed() >= MAX_RECORDING && !sent.swap(true, Ordering::SeqCst) {
+                            let _ = state(&a).dictation.send(Cmd::AutoStop(id));
+                        }
                     }) {
                         Ok(r) => {
                             rec = Some(r);
@@ -123,6 +147,15 @@ fn finish(app: &AppHandle, rec: &mut Option<audio::Recorder>, busy: &Arc<AtomicB
     process(app, pcm, busy.clone());
 }
 
+/// Clears the busy flag when dropped, so even a panicking worker can't leave dictation stuck.
+struct Busy(Arc<AtomicBool>);
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 /// STT + cleanup + paste + history on a worker thread, so the hotkey stays responsive.
 fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>) {
     if pcm.len() < MIN_SAMPLES {
@@ -132,21 +165,27 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>) {
     busy.store(true, Ordering::SeqCst);
     let app = app.clone();
     std::thread::spawn(move || {
+        let guard = Busy(busy);
         let s = current_settings(&app);
         emit_state(&app, simple("transcribing"));
-        let result = cleanup::run(&s, &pcm, || emit_state(&app, simple("cleaning")));
+        // A panic in a decoder, whisper-rs or the HTTP stack becomes an error state, not a silent loss.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cleanup::run(&s, &pcm, || emit_state(&app, simple("cleaning")))))
+            .unwrap_or_else(|_| Err("Transcription crashed unexpectedly".into()));
+        let failed = result.is_err();
+        // Keep the audio of a failed transcription for retry_last; a success frees the old one.
+        *state(&app).last_failed.lock().unwrap_or_else(|e| e.into_inner()) = failed.then_some(pcm);
         let ev = match result {
+            Err(e) => DictationState { state: "error", error: Some(e), retry: true, ..Default::default() },
             Ok(out) if out.text.trim().is_empty() => simple("idle"),
             Ok(out) => {
                 record_history(&s, &out);
                 match platform::paste(&app, &out.text, s.restore_clipboard) {
                     Ok(()) => DictationState { state: "done", text: Some(out.text), warning: out.warning, ..Default::default() },
-                    Err(e) => DictationState { state: "error", text: Some(out.text), error: Some(e), warning: out.warning },
+                    Err(e) => DictationState { state: "error", text: Some(out.text), error: Some(e), warning: out.warning, ..Default::default() },
                 }
             }
-            Err(e) => DictationState { state: "error", error: Some(e), ..Default::default() },
         };
-        busy.store(false, Ordering::SeqCst);
+        drop(guard);
         emit_state(&app, ev);
     });
 }
@@ -196,22 +235,21 @@ fn swap_hotkey(app: &AppHandle, old: Option<&str>, new: &str) -> Result<(), Stri
 fn apply_local_api(app: &AppHandle, s: &Settings) -> Result<(), String> {
     let st = state(app);
     let mut api = st.api.lock().unwrap_or_else(|e| e.into_inner());
-    let running_port = api.as_ref().map(|(p, _)| *p);
+    let running_port = api.as_ref().map(|(p, ..)| *p);
     if s.local_api.enabled && running_port == Some(s.local_api.port) {
         return Ok(());
     }
-    if let Some((_, handle)) = api.take() {
-        handle.abort();
-    }
+    api.take(); // dropping the sender stops the old server
     if s.local_api.enabled {
         let token = local_api_token()?;
-        *api = Some((s.local_api.port, api::start(app.clone(), s.local_api.port, token)?));
+        let stop = api::start(app.clone(), s.local_api.port, token.clone())?;
+        *api = Some((s.local_api.port, token, stop));
     }
     Ok(())
 }
 
 fn local_api_token() -> Result<String, String> {
-    if let Some(t) = settings::get_secret("local_api") {
+    if let Some(t) = settings::secret("local_api")? {
         return Ok(t);
     }
     let t = api::new_token()?;
@@ -236,16 +274,47 @@ async fn get_settings(app: AppHandle) -> R<Settings> {
     Ok(current_settings(&app))
 }
 
+/// Saves `new`, keeping the hotkey registration in step with what is on disk. The hotkey is
+/// swapped only when it changed. A key that cannot be registered never blocks the rest: the
+/// other settings are saved with the old key and the reason comes back as a warning. A failed
+/// save swaps the key back, so the registration, the file and memory never disagree.
+fn commit(old: &Settings, mut new: Settings, swap: impl Fn(&str, &str) -> R<()>, save: impl Fn(&Settings) -> R<()>) -> R<(Settings, Option<String>)> {
+    let mut warning = None;
+    let swapped = new.hotkey != old.hotkey
+        && match swap(&old.hotkey, &new.hotkey) {
+            Ok(()) => true,
+            Err(e) => {
+                warning = Some(format!("{e}. Your other settings were saved."));
+                new.hotkey = old.hotkey.clone();
+                false
+            }
+        };
+    if let Err(e) = save(&new) {
+        if swapped {
+            let _ = swap(&new.hotkey, &old.hotkey);
+        }
+        return Err(e);
+    }
+    Ok((new, warning))
+}
+
 #[tauri::command]
 async fn save_settings(app: AppHandle, settings: Settings) -> R<()> {
-    let old = current_settings(&app);
-    swap_hotkey(&app, Some(&old.hotkey), &settings.hotkey)?;
-    settings.save()?;
-    *state(&app).settings.lock().unwrap_or_else(|e| e.into_inner()) = settings.clone();
-    if (settings.stt.local_model != old.stt.local_model || settings.stt.provider != old.stt.provider) && settings.stt.provider == "local" {
-        std::thread::spawn(move || stt::warm_up(&settings));
+    if settings.local_api.port < settings::MIN_PORT {
+        return Err(format!("The local API port must be between {} and 65535", settings::MIN_PORT));
     }
-    apply_local_api(&app, &current_settings(&app))
+    // One save at a time: hotkey swap, file write, in-memory update and API restart happen together.
+    static SAVE: Mutex<()> = Mutex::new(());
+    let _g = SAVE.lock().unwrap_or_else(|e| e.into_inner());
+    let old = current_settings(&app);
+    let (new, warning) = commit(&old, settings, |o, n| swap_hotkey(&app, Some(o), n), Settings::save)?;
+    *state(&app).settings.lock().unwrap_or_else(|e| e.into_inner()) = new.clone();
+    if (new.stt.local_model != old.stt.local_model || new.stt.provider != old.stt.provider) && new.stt.provider == "local" {
+        let s = new.clone();
+        std::thread::spawn(move || stt::warm_up(&s));
+    }
+    apply_local_api(&app, &new)?;
+    warning.map_or(Ok(()), Err)
 }
 
 #[tauri::command]
@@ -346,13 +415,28 @@ async fn get_system_info() -> R<SystemInfo> {
 #[tauri::command]
 async fn local_api_status(app: AppHandle) -> R<serde_json::Value> {
     let s = current_settings(&app);
-    let token = if s.local_api.enabled { Some(local_api_token()?) } else { settings::get_secret("local_api") };
-    Ok(serde_json::json!({ "enabled": s.local_api.enabled, "port": s.local_api.port, "token": token }))
+    if s.local_api.enabled {
+        apply_local_api(&app, &s)?; // no-op when running; otherwise starts it or says why it can't
+    }
+    // The running server's own port and token, so the UI never shows a token the server rejects.
+    let running = state(&app).api.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|(p, t, _)| (*p, t.clone()));
+    let (port, token) = running.map_or((s.local_api.port, None), |(p, t)| (p, Some(t)));
+    Ok(serde_json::json!({ "enabled": s.local_api.enabled, "port": port, "token": token }))
 }
 
 #[tauri::command]
 async fn toggle_dictation(app: AppHandle) -> R<()> {
     state(&app).dictation.send(Cmd::Toggle).map_err(|e| e.to_string())
+}
+
+/// Runs the last failed recording through STT, cleanup and paste again.
+#[tauri::command]
+async fn retry_last(app: AppHandle) -> R<()> {
+    let st = state(&app);
+    if st.last_failed.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+        return Err("There is no failed recording to retry".into());
+    }
+    st.dictation.send(Cmd::Retry).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -451,6 +535,7 @@ pub fn run() {
                 dictation: spawn_dictation(app.handle().clone()),
                 api: Mutex::new(None),
                 overlay_gen: AtomicU64::new(0),
+                last_failed: Mutex::new(None),
             });
             create_overlay(app)?;
             create_tray(app)?;
@@ -496,6 +581,7 @@ pub fn run() {
             get_system_info,
             local_api_status,
             toggle_dictation,
+            retry_last,
             check_permissions,
             open_permission_settings,
         ])
@@ -563,7 +649,8 @@ pub fn cli(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_hotkey;
+    use super::{Settings, commit, parse_hotkey};
+    use std::cell::RefCell;
 
     #[test]
     fn hotkeys_the_ui_sends_parse_and_junk_is_a_readable_error() {
@@ -574,5 +661,51 @@ mod tests {
         let e = parse_hotkey("Alt+Nope").unwrap_err();
         assert!(e.starts_with("Invalid hotkey 'Alt+Nope'"), "{e}");
         assert!(parse_hotkey("").is_err());
+    }
+
+    #[test]
+    fn saving_with_an_unchanged_hotkey_never_touches_the_registration() {
+        let old = Settings::default();
+        let mut new = old.clone();
+        new.onboarded = true;
+        let saved = RefCell::new(None);
+        let (kept, warning) = commit(&old, new, |_, _| panic!("swapped an unchanged hotkey"), |s| {
+            *saved.borrow_mut() = Some(s.clone());
+            Ok(())
+        }).unwrap();
+        assert!(kept.onboarded && warning.is_none());
+        assert_eq!(saved.into_inner(), Some(kept));
+    }
+
+    #[test]
+    fn a_hotkey_that_cannot_register_still_saves_everything_else() {
+        let old = Settings::default();
+        let mut new = old.clone();
+        new.hotkey = "Control+Alt+KeyK".into();
+        new.history_enabled = false;
+        let saved = RefCell::new(None);
+        let (kept, warning) = commit(&old, new, |_, n| Err(format!("Could not register hotkey '{n}'")), |s| {
+            *saved.borrow_mut() = Some(s.clone());
+            Ok(())
+        }).unwrap();
+        assert_eq!(kept.hotkey, "Alt+Space");
+        assert!(!kept.history_enabled);
+        assert!(warning.unwrap().contains("other settings were saved"));
+        assert_eq!(saved.into_inner(), Some(kept));
+    }
+
+    #[test]
+    fn a_failed_save_swaps_the_hotkey_back() {
+        let old = Settings::default();
+        let mut new = old.clone();
+        new.hotkey = "Control+Alt+KeyK".into();
+        let swaps = RefCell::new(vec![]);
+        let err = commit(&old, new, |o, n| {
+            swaps.borrow_mut().push((o.to_string(), n.to_string()));
+            Ok(())
+        }, |_| Err("disk full".into())).unwrap_err();
+        assert_eq!(err, "disk full");
+        let k = |a: &str, b: &str| (a.to_string(), b.to_string());
+        assert_eq!(swaps.into_inner(), vec![k("Alt+Space", "Control+Alt+KeyK"), k("Control+Alt+KeyK", "Alt+Space")]);
     }
 }
