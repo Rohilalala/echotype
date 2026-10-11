@@ -17,6 +17,10 @@ const (
 	freeAudioSecondsPerWeek = 2 * 3600
 	// Pro is unlimited words with a fair-use ceiling on audio.
 	proAudioSecondsPerMonth = 40 * 3600
+	// Cleanup (chat) tokens, prompt + completion. A cleanup call is about 850 tokens, so Free
+	// covers roughly 115 cleanups a week.
+	freeTokensPerWeek = 100_000
+	proTokensPerMonth = 4_000_000
 	// Longest single recording accepted, by plan.
 	freeMaxRequestSeconds = 10 * 60
 	proMaxRequestSeconds  = 60 * 60
@@ -43,6 +47,7 @@ func monthStart(t time.Time) time.Time {
 type quota struct {
 	WordsUsed, WordsLimit int64 // limit 0 = unlimited
 	AudioMs, AudioLimitMs int64
+	Tokens, TokensLimit   int64
 	MaxRequestMs          int64
 	Since, Resets         time.Time
 }
@@ -55,14 +60,16 @@ type querier interface {
 // calendar month (UTC) for Pro. Pending reservations count as used.
 func (s *server) quotaFor(ctx context.Context, db querier, a account) (quota, error) {
 	now := s.now()
-	q := quota{Since: weekStart(now), WordsLimit: freeWordsPerWeek, AudioLimitMs: freeAudioSecondsPerWeek * 1000, MaxRequestMs: freeMaxRequestSeconds * 1000}
+	q := quota{Since: weekStart(now), WordsLimit: freeWordsPerWeek, AudioLimitMs: freeAudioSecondsPerWeek * 1000,
+		TokensLimit: freeTokensPerWeek, MaxRequestMs: freeMaxRequestSeconds * 1000}
 	q.Resets = q.Since.AddDate(0, 0, 7)
 	if a.Plan == "pro" {
-		q = quota{Since: monthStart(now), AudioLimitMs: proAudioSecondsPerMonth * 1000, MaxRequestMs: proMaxRequestSeconds * 1000}
+		q = quota{Since: monthStart(now), AudioLimitMs: proAudioSecondsPerMonth * 1000,
+			TokensLimit: proTokensPerMonth, MaxRequestMs: proMaxRequestSeconds * 1000}
 		q.Resets = q.Since.AddDate(0, 1, 0)
 	}
-	err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(words), 0), COALESCE(SUM(audio_ms), 0) FROM usage WHERE account_id = ? AND at >= ?`,
-		a.ID, q.Since.Unix()).Scan(&q.WordsUsed, &q.AudioMs)
+	err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(words), 0), COALESCE(SUM(audio_ms), 0), COALESCE(SUM(tokens), 0) FROM usage WHERE account_id = ? AND at >= ?`,
+		a.ID, q.Since.Unix()).Scan(&q.WordsUsed, &q.AudioMs, &q.Tokens)
 	return q, err
 }
 
@@ -74,12 +81,13 @@ func (s *server) overQuota(w http.ResponseWriter, r *http.Request, a account) bo
 		internalError(w, "quota", err)
 		return true
 	}
-	return refuse(w, q, 0)
+	return refuse(w, q, 0, 0)
 }
 
 // refuse answers the client and returns true when a request needing up to audioMs of audio
-// does not fit the account's remaining allowance or the plan's per-request cap.
-func refuse(w http.ResponseWriter, q quota, audioMs int64) bool {
+// does not fit the account's remaining allowance or the plan's per-request cap, or when a
+// chat request (tokens > 0) finds the token budget spent.
+func refuse(w http.ResponseWriter, q quota, audioMs, tokens int64) bool {
 	resets := q.Resets.Format("Monday 2 January 15:04 UTC")
 	left := q.AudioLimitMs - q.AudioMs
 	switch {
@@ -93,6 +101,9 @@ func refuse(w http.ResponseWriter, q quota, audioMs int64) bool {
 		apiError(w, http.StatusPaymentRequired, "quota_exceeded",
 			fmt.Sprintf("This recording may be up to %d minutes long, more than the %d minutes of audio left this period. It resets %s.",
 				(audioMs+59_999)/60_000, left/60_000, resets))
+	case tokens > 0 && q.Tokens >= q.TokensLimit:
+		apiError(w, http.StatusPaymentRequired, "quota_exceeded",
+			fmt.Sprintf("You have used this period's %d cleanup tokens. They reset %s.", q.TokensLimit, resets))
 	case audioMs > q.MaxRequestMs:
 		apiError(w, http.StatusBadRequest, "invalid_request_error",
 			fmt.Sprintf("Recordings are limited to %d minutes per request on this plan.", q.MaxRequestMs/60_000))
@@ -106,7 +117,7 @@ func refuse(w http.ResponseWriter, q quota, audioMs int64) bool {
 // records that bound as a usage row in the same transaction. Requests in flight therefore
 // see each other's reservations and cannot jointly overshoot. The caller must settle or
 // release the returned row. It answers the client itself when it returns false.
-func (s *server) reserve(w http.ResponseWriter, r *http.Request, a account, audioMs int64) (int64, bool) {
+func (s *server) reserve(w http.ResponseWriter, r *http.Request, a account, audioMs, tokens int64) (int64, bool) {
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		internalError(w, "reserve", err)
@@ -118,12 +129,12 @@ func (s *server) reserve(w http.ResponseWriter, r *http.Request, a account, audi
 		internalError(w, "reserve", err)
 		return 0, false
 	}
-	if refuse(w, q, audioMs) {
+	if refuse(w, q, audioMs, tokens) {
 		return 0, false
 	}
 	var id int64
-	err = tx.QueryRowContext(r.Context(), `INSERT INTO usage (account_id, at, words, audio_ms) VALUES (?, ?, 0, ?) RETURNING rowid`,
-		a.ID, s.now().Unix(), audioMs).Scan(&id)
+	err = tx.QueryRowContext(r.Context(), `INSERT INTO usage (account_id, at, words, audio_ms, tokens) VALUES (?, ?, 0, ?, ?) RETURNING rowid`,
+		a.ID, s.now().Unix(), audioMs, tokens).Scan(&id)
 	if err == nil {
 		err = tx.Commit()
 	}
@@ -136,9 +147,9 @@ func (s *server) reserve(w http.ResponseWriter, r *http.Request, a account, audi
 
 // settle replaces a reservation with what the request really used. It runs even if the
 // client has gone away: the upstream has already billed us.
-func (s *server) settle(id, words, audioMs int64) {
-	if _, err := s.db.Exec(`UPDATE usage SET words = ?, audio_ms = ? WHERE rowid = ?`, words, audioMs, id); err != nil {
-		slog.Error("settle usage", "row", id, "words", words, "audio_ms", audioMs, "err", err)
+func (s *server) settle(id, words, audioMs, tokens int64) {
+	if _, err := s.db.Exec(`UPDATE usage SET words = ?, audio_ms = ?, tokens = ? WHERE rowid = ?`, words, audioMs, tokens, id); err != nil {
+		slog.Error("settle usage", "row", id, "words", words, "audio_ms", audioMs, "tokens", tokens, "err", err)
 	}
 }
 
@@ -164,6 +175,8 @@ func (s *server) me(w http.ResponseWriter, r *http.Request, a account) {
 		"resets_at":           q.Resets.Format(time.RFC3339),
 		"audio_seconds_used":  q.AudioMs / 1000,
 		"audio_seconds_limit": q.AudioLimitMs / 1000,
+		"tokens_used":         q.Tokens,
+		"tokens_limit":        q.TokensLimit,
 	})
 }
 

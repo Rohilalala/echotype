@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -38,12 +39,14 @@ CREATE TABLE IF NOT EXISTS auth_failures (
 );
 CREATE INDEX IF NOT EXISTS auth_failures_email_at ON auth_failures(email, at);
 
--- One row per transcription: counts only, never text or audio.
+-- One row per proxied request: counts only, never text or audio. A row is written as a
+-- reservation (upper bounds) before the upstream call and settled to real figures after.
 CREATE TABLE IF NOT EXISTS usage (
 	account_id INTEGER NOT NULL REFERENCES accounts(id),
 	at         INTEGER NOT NULL,
 	words      INTEGER NOT NULL,
-	audio_ms   INTEGER NOT NULL
+	audio_ms   INTEGER NOT NULL,
+	tokens     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS usage_account_at ON usage(account_id, at);
 
@@ -64,6 +67,12 @@ func openDB(path string) (*sql.DB, error) {
 	// move to a read pool + single writer if DB time ever shows up in latency.
 	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(schema); err != nil {
+		db.Close()
+		return nil, err
+	}
+	// Columns added after the first release. On a database that already has them the
+	// ALTER fails with "duplicate column", which is the no-op case.
+	if _, err := db.Exec(`ALTER TABLE usage ADD COLUMN tokens INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 		db.Close()
 		return nil, err
 	}

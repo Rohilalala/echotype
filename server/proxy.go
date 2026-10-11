@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
@@ -16,7 +17,8 @@ import (
 
 const (
 	maxAudioBytes  = 25 << 20
-	maxChatBytes   = 64 << 10
+	maxChatBytes   = 16 << 10 // a cleanup prompt plus transcript is a few kB
+	maxChatMsgs    = 8
 	maxChatTokens  = 2048
 	maxPromptBytes = 4 << 10
 )
@@ -111,7 +113,7 @@ func (s *server) transcribe(w http.ResponseWriter, r *http.Request, a account) {
 
 	// Reserve the most audio this file can hold before any upstream cost is incurred.
 	bound := boundSeconds(audio)
-	row, ok := s.reserve(w, r, a, int64(bound*1000))
+	row, ok := s.reserve(w, r, a, int64(bound*1000), 0)
 	if !ok {
 		return
 	}
@@ -148,7 +150,7 @@ func (s *server) transcribe(w http.ResponseWriter, r *http.Request, a account) {
 	case !isWav:
 		secs = bound
 	}
-	s.settle(row, int64(len(strings.Fields(out.Text))), int64(secs*1000))
+	s.settle(row, int64(len(strings.Fields(out.Text))), int64(secs*1000), 0)
 	settled = true
 	if format == "text" {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -165,21 +167,18 @@ var chatFields = map[string]bool{
 	"max_tokens": true, "max_completion_tokens": true, "response_format": true, "reasoning_effort": true,
 }
 
-// POST /v1/chat/completions: transcript cleanup. Not metered, but only for accounts that may
-// still transcribe.
+// POST /v1/chat/completions: transcript cleanup, metered in tokens against its own budget and
+// only for accounts that may still transcribe.
 func (s *server) chat(w http.ResponseWriter, r *http.Request, a account) {
 	release, ok := s.limitKey(w, a)
 	if !ok {
 		return
 	}
 	defer release()
-	if s.overQuota(w, r, a) {
-		return
-	}
 	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxChatBytes))
 	if err != nil {
 		if tooLarge(err) {
-			apiError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Chat requests are limited to 64 KB.")
+			apiError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Chat requests are limited to 16 KB.")
 		} else {
 			apiError(w, http.StatusBadRequest, "invalid_request_error", "Could not read the request body.")
 		}
@@ -191,8 +190,8 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request, a account) {
 		return
 	}
 	var msgs []json.RawMessage
-	if json.Unmarshal(in["messages"], &msgs) != nil || len(msgs) == 0 {
-		apiError(w, http.StatusBadRequest, "invalid_request_error", "messages must be a non-empty array.")
+	if json.Unmarshal(in["messages"], &msgs) != nil || len(msgs) == 0 || len(msgs) > maxChatMsgs {
+		apiError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("messages must be an array of 1 to %d messages.", maxChatMsgs))
 		return
 	}
 	out := map[string]any{}
@@ -214,6 +213,19 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request, a account) {
 	out["stream"] = false
 	payload, _ := json.Marshal(out)
 
+	// Reserve the most this call can cost: about 3 bytes per input token, plus the output cap.
+	estimate := int64(len(payload)/3 + limit)
+	row, ok := s.reserve(w, r, a, 0, estimate)
+	if !ok {
+		return
+	}
+	settled := false
+	defer func() {
+		if !settled {
+			s.release(row)
+		}
+	}()
+
 	req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, s.cfg.LLMURL+"/chat/completions", bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.cfg.LLMKey)
@@ -221,6 +233,18 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request, a account) {
 	if !ok {
 		return
 	}
+	var resp struct {
+		Usage *struct {
+			Prompt     int64 `json:"prompt_tokens"`
+			Completion int64 `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	tokens := estimate
+	if json.Unmarshal(body, &resp) == nil && resp.Usage != nil && resp.Usage.Prompt+resp.Usage.Completion > 0 {
+		tokens = resp.Usage.Prompt + resp.Usage.Completion
+	}
+	s.settle(row, 0, 0, tokens)
+	settled = true
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(body)
 }

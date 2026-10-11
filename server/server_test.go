@@ -334,7 +334,7 @@ func TestProFairUse(t *testing.T) {
 	id := accountID(t, x, "a@b.co")
 	x.s.db.Exec(`UPDATE accounts SET plan = 'pro' WHERE id = ?`, id)
 	x.s.db.Exec(`INSERT INTO usage (account_id, at, words, audio_ms) VALUES (?, ?, 900000, ?)`, id, t0.Add(-24*time.Hour).Unix(), int64(40*3600*1000-1000)) // exactly 1 s left
-	x.s.db.Exec(`INSERT INTO usage (account_id, at, words, audio_ms) VALUES (?, ?, 1, 99999999)`, id, time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC).Unix()) // last month
+	x.s.db.Exec(`INSERT INTO usage (account_id, at, words, audio_ms) VALUES (?, ?, 1, 99999999)`, id, time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC).Unix())  // last month
 	me := decode(t, x.do("GET", "/v1/me", nil, bearer(key)...))
 	if me["plan"] != "pro" || me["words_limit"] != float64(0) || me["resets_at"] != "2026-11-01T00:00:00Z" {
 		t.Fatalf("me: %v", me)
@@ -628,9 +628,9 @@ func TestChatProxyCaps(t *testing.T) {
 	if lastSeen.body["max_tokens"] != float64(300) || lastSeen.body["max_completion_tokens"] != nil {
 		t.Fatalf("smaller cap not kept: %v", lastSeen.body)
 	}
-	big := `{"messages":[{"role":"user","content":"` + strings.Repeat("a", 64<<10) + `"}]}`
+	big := `{"messages":[{"role":"user","content":"` + strings.Repeat("a", 16<<10) + `"}]}`
 	if w := x.json("POST", "/v1/chat/completions", big, bearer(key)...); w.Code != 413 {
-		t.Fatalf("64 KB+ body: %d", w.Code)
+		t.Fatalf("16 KB+ body: %d", w.Code)
 	}
 	if w := x.json("POST", "/v1/chat/completions", `{"messages":[]}`, bearer(key)...); w.Code != 400 {
 		t.Fatalf("empty messages: %d", w.Code)
@@ -641,6 +641,63 @@ func TestChatProxyCaps(t *testing.T) {
 	models := decode(t, x.do("GET", "/v1/models", nil, bearer(key)...))
 	if d, _ := models["data"].([]any); len(d) != 2 {
 		t.Fatalf("models: %v", models)
+	}
+}
+
+func TestChatTokensMeteredAndCapped(t *testing.T) {
+	withUsage := true
+	x := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		if withUsage {
+			io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":120,"completion_tokens":30,"total_tokens":150}}`)
+		} else {
+			io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+		}
+	})
+	key := x.signIn(t, "a@b.co")
+	id := accountID(t, x, "a@b.co")
+	msg := `{"messages":[{"role":"user","content":"um so hi"}]}`
+	if w := x.json("POST", "/v1/chat/completions", msg, bearer(key)...); w.Code != 200 {
+		t.Fatalf("chat: %d", w.Code)
+	}
+	me := decode(t, x.do("GET", "/v1/me", nil, bearer(key)...))
+	if me["tokens_used"] != float64(150) || me["tokens_limit"] != float64(100_000) {
+		t.Fatalf("metered from upstream usage: %v", me)
+	}
+	// Without usage in the reply: bytes/3 of the forwarded body + the max_tokens cap.
+	withUsage = false
+	x.json("POST", "/v1/chat/completions", msg, bearer(key)...)
+	var last int64
+	x.s.db.QueryRow(`SELECT tokens FROM usage WHERE account_id = ? ORDER BY rowid DESC LIMIT 1`, id).Scan(&last)
+	if last < 2048 || last > 2048+100 {
+		t.Fatalf("estimated tokens = %d", last)
+	}
+	// Budget spent: 402, and the upstream is not called.
+	x.s.db.Exec(`INSERT INTO usage (account_id, at, words, audio_ms, tokens) VALUES (?, ?, 0, 0, 100000)`, id, t0.Unix())
+	w := x.json("POST", "/v1/chat/completions", msg, bearer(key)...)
+	if w.Code != 402 || !strings.Contains(w.Body.String(), "cleanup tokens") {
+		t.Fatalf("over token budget: %d %s", w.Code, w.Body)
+	}
+	// Transcription is still allowed: the token budget only gates cleanup.
+	if w := transcribeReq(x, key, wavFile(1), nil); w.Code != 200 {
+		t.Fatalf("transcribe with tokens spent: %d %s", w.Code, w.Body)
+	}
+	// Caps: 16 KB body, 8 messages.
+	big := `{"messages":[{"role":"user","content":"` + strings.Repeat("a", 16<<10) + `"}]}`
+	if w := x.json("POST", "/v1/chat/completions", big, bearer(key)...); w.Code != 413 {
+		t.Fatalf("16 KB+ body: %d", w.Code)
+	}
+	nine := `{"messages":[` + strings.TrimSuffix(strings.Repeat(`{"role":"user","content":"x"},`, 9), ",") + `]}`
+	if w := x.json("POST", "/v1/chat/completions", nine, bearer(key)...); w.Code != 400 {
+		t.Fatalf("9 messages: %d", w.Code)
+	}
+	// Pro: 4M a month.
+	x.s.db.Exec(`UPDATE accounts SET plan = 'pro' WHERE id = ?`, id)
+	if w := x.json("POST", "/v1/chat/completions", msg, bearer(key)...); w.Code != 200 {
+		t.Fatalf("pro chat: %d %s", w.Code, w.Body)
+	}
+	if me := decode(t, x.do("GET", "/v1/me", nil, bearer(key)...)); me["tokens_limit"] != float64(4_000_000) {
+		t.Fatalf("pro me: %v", me)
 	}
 }
 
