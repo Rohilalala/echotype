@@ -1,39 +1,228 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="stylesheet" href="styles.css" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tauri App</title>
-    <script type="module" src="/main.js" defer></script>
-  </head>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <title>Echotype</title>
+  <link rel="icon" href="icon.svg" />
+  <link rel="stylesheet" href="styles.css" />
+  <script type="module" src="main.js"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><img src="icon.svg" alt="" width="22" height="22" /><span>Echotype</span></div>
+    <nav aria-label="Sections" id="nav">
+      <button data-page="home"><svg viewBox="0 0 16 16"><path d="M2.5 7.2 8 2.5l5.5 4.7V13a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1Z"/><path d="M6.3 14v-3.6h3.4V14"/></svg>Home</button>
+      <button data-page="speech"><svg viewBox="0 0 16 16"><path d="M2.5 6.5v3M5.25 4v8M8 2v12M10.75 5v6M13.5 7v2"/></svg>Speech model</button>
+      <button data-page="cleanup"><svg viewBox="0 0 16 16"><path d="M10.4 2.6l3 3L6 13H3v-3z"/><path d="M8.6 4.4l3 3"/></svg>Cleanup</button>
+      <button data-page="language"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.75"/><ellipse cx="8" cy="8" rx="2.4" ry="5.75"/><path d="M2.4 8h11.2"/></svg>Language</button>
+      <button data-page="dictionary"><svg viewBox="0 0 16 16"><path d="M3 12V4a1.5 1.5 0 0 1 1.5-1.5H13v9H4.5A1.5 1.5 0 0 0 3 13a1.5 1.5 0 0 0 1.5 1.5H13"/></svg>Dictionary</button>
+      <button data-page="history"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.75"/><path d="M8 4.8v3.4l2.2 1.4"/></svg>History</button>
+      <button data-page="settings"><svg viewBox="0 0 16 16"><path d="M2.5 5h6M11.5 5h2M2.5 11h2M7.5 11h6"/><circle cx="10" cy="5" r="1.5"/><circle cx="6" cy="11" r="1.5"/></svg>Settings</button>
+    </nav>
+  </aside>
 
-  <body>
-    <main class="container">
-      <h1>Welcome to Tauri</h1>
+  <main id="main" tabindex="-1">
+    <p class="saved" id="saved" role="status" aria-live="polite"></p>
 
-      <div class="row">
-        <a href="https://tauri.app" target="_blank">
-          <img src="/assets/tauri.svg" class="logo tauri" alt="Tauri logo" />
-        </a>
-        <a
-          href="https://developer.mozilla.org/en-US/docs/Web/JavaScript"
-          target="_blank"
-        >
-          <img
-            src="/assets/javascript.svg"
-            class="logo vanilla"
-            alt="JavaScript logo"
-          />
-        </a>
+    <!-- Home -->
+    <section data-page="home" hidden>
+      <div class="hero">
+        <p class="hero-state" id="heroState" aria-live="polite"><i class="dot"></i><span>Ready</span></p>
+        <h1 class="hero-line" id="heroLine"></h1>
+        <p class="hero-sub" id="heroSub"></p>
       </div>
-      <p>Click on the Tauri logo to learn more about the framework</p>
 
-      <form class="row" id="greet-form">
-        <input id="greet-input" placeholder="Enter a name..." />
-        <button type="submit">Greet</button>
-      </form>
-      <p id="greet-msg"></p>
-    </main>
-  </body>
+      <div class="drop" id="drop">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5"/><path d="M4.5 15.5v2A2.5 2.5 0 0 0 7 20h10a2.5 2.5 0 0 0 2.5-2.5v-2"/></svg>
+        <div>
+          <strong>Drop a voice note here</strong>
+          <span>WhatsApp .opus, .m4a, .mp3 or .wav. You get a clean transcript to copy.</span>
+        </div>
+      </div>
+      <div id="dropResults" class="drop-results"></div>
+
+      <h2 class="group-title" id="recentTitle">Recent</h2>
+      <div class="group" id="recent"></div>
+    </section>
+
+    <!-- Speech model -->
+    <section data-page="speech" hidden>
+      <h1>Speech model</h1>
+      <p class="lede">Turns your voice into text. A local model runs on this Mac and nothing leaves it.</p>
+      <div class="seg" id="sttProvider" role="radiogroup" aria-label="Speech provider"></div>
+
+      <div id="sttLocal">
+        <p class="memline" id="memline"></p>
+        <div class="group" id="modelList"></div>
+      </div>
+
+      <div id="sttRemote" class="group" hidden>
+        <label class="row"><span class="row-text"><span class="row-title">Base URL</span><span class="row-desc" id="sttUrlDesc">Any OpenAI-compatible /audio/transcriptions endpoint.</span></span>
+          <input type="url" id="sttUrl" spellcheck="false" /></label>
+        <label class="row"><span class="row-text"><span class="row-title">Model</span></span>
+          <input type="text" id="sttModel" data-bind="stt.model" spellcheck="false" /></label>
+        <div class="row key-row" data-key="stt"></div>
+      </div>
+    </section>
+
+    <!-- Cleanup -->
+    <section data-page="cleanup" hidden>
+      <h1>Cleanup</h1>
+      <p class="lede">A language model removes fillers, applies “no wait, I meant…” corrections and formats spoken lists. If it fails, you still get the raw text.</p>
+      <div class="group">
+        <label class="row"><span class="row-text"><span class="row-title">Clean up dictation</span></span>
+          <input type="checkbox" class="switch" data-bind="cleanup.enabled" /></label>
+      </div>
+
+      <div id="cleanupBody">
+        <h2 class="group-title">Model</h2>
+        <div class="group">
+          <label class="row"><span class="row-text"><span class="row-title">Provider</span></span>
+            <select id="cleanupProvider"></select></label>
+          <label class="row"><span class="row-text"><span class="row-title">Base URL</span><span class="row-desc" id="cleanupUrlDesc">Any OpenAI-compatible /chat/completions endpoint.</span></span>
+            <input type="url" id="cleanupUrl" spellcheck="false" /></label>
+          <label class="row"><span class="row-text"><span class="row-title">Model</span></span>
+            <input type="text" id="cleanupModel" data-bind="cleanup.model" spellcheck="false" /></label>
+          <div class="row key-row" data-key="cleanup"></div>
+        </div>
+
+        <h2 class="group-title">Style</h2>
+        <div class="group" role="radiogroup" aria-label="Style">
+          <label class="row choice"><input type="radio" name="style" value="default" data-bind="cleanup.style" /><span class="row-text"><span class="row-title">Default</span><span class="row-desc">Fixes fillers, corrections and punctuation. Keeps your wording.</span></span></label>
+          <label class="row choice"><input type="radio" name="style" value="casual" data-bind="cleanup.style" /><span class="row-text"><span class="row-title">Casual</span><span class="row-desc">Light punctuation and a relaxed tone. Good for chat.</span></span></label>
+          <label class="row choice"><input type="radio" name="style" value="formal" data-bind="cleanup.style" /><span class="row-text"><span class="row-title">Formal</span><span class="row-desc">Complete sentences and a professional tone. Good for email.</span></span></label>
+          <label class="row choice"><input type="radio" name="style" value="verbatim" data-bind="cleanup.style" /><span class="row-text"><span class="row-title">Verbatim</span><span class="row-desc">Adds punctuation only. Every word stays as you said it.</span></span></label>
+        </div>
+
+        <h2 class="group-title"><label for="custom">Custom instructions</label></h2>
+        <textarea id="custom" rows="3" data-bind="cleanup.custom_instructions" placeholder="For example: use British spelling, and write numbers as digits."></textarea>
+      </div>
+    </section>
+
+    <!-- Language -->
+    <section data-page="language" hidden>
+      <h1>Language</h1>
+      <p class="lede">Speak in any language. Echotype can give you the text in that language or in English.</p>
+      <div class="group">
+        <label class="row"><span class="row-text"><span class="row-title">Spoken language</span><span class="row-desc">Auto-detect works for most people. Pick one if short clips come out in the wrong language.</span></span>
+          <select id="language" data-bind="language"></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">Translate to English</span><span class="row-desc">Speak Hindi, Hinglish or any language and get English. Turbo models can’t translate, so Echotype switches to a multilingual model you have downloaded.</span></span>
+          <input type="checkbox" class="switch" data-bind="translate_to_english" /></label>
+      </div>
+      <p class="note" id="translateNote" hidden></p>
+    </section>
+
+    <!-- Dictionary -->
+    <section data-page="dictionary" hidden>
+      <h1>Dictionary</h1>
+      <p class="lede">Names and jargon you want spelled your way. They guide both the speech model and cleanup.</p>
+      <div class="group pad">
+        <div class="chips" id="chips"></div>
+        <form class="add-word" id="addWord">
+          <input type="text" id="newWord" placeholder="Add a word or name" aria-label="New word" spellcheck="false" />
+          <button class="btn" type="submit">Add</button>
+        </form>
+      </div>
+
+      <h2 class="group-title">Replacements</h2>
+      <p class="lede small">Say the phrase on the left, get the text on the right. Matches whole words in any case.</p>
+      <div class="group">
+        <div class="rep-head" aria-hidden="true"><span>When you say</span><span>Type</span><span></span></div>
+        <div id="reps"></div>
+        <div class="row"><button class="btn quiet" id="addRep" type="button">Add replacement</button></div>
+      </div>
+    </section>
+
+    <!-- History -->
+    <section data-page="history" hidden>
+      <div class="page-head">
+        <h1>History</h1>
+        <button class="btn" id="clearHistory" type="button">Clear history</button>
+        <span class="confirm" id="clearConfirm" hidden>Delete every entry?
+          <button class="btn" id="clearCancel" type="button">Cancel</button>
+          <button class="btn danger" id="clearYes" type="button">Clear history</button>
+        </span>
+      </div>
+      <p class="lede">Everything you dictated, newest first. Expand an entry to see what the speech model heard.</p>
+      <div id="historyList" class="history"></div>
+    </section>
+
+    <!-- Settings -->
+    <section data-page="settings" hidden>
+      <h1>Settings</h1>
+      <div class="group">
+        <div class="row"><span class="row-text"><span class="row-title" id="hotkeyLabel">Dictation shortcut</span><span class="row-desc" id="hotkeyDesc">Click, then press the keys you want. Esc cancels.</span><span class="row-desc error" id="hotkeyError" role="alert" hidden></span></span>
+          <button class="hotkey" id="hotkeyBtn" type="button" aria-describedby="hotkeyDesc" aria-labelledby="hotkeyLabel hotkeyBtn"></button></div>
+        <div class="row"><span class="row-text"><span class="row-title" id="modeLabel">Mode</span><span class="row-desc" id="modeDesc"></span></span>
+          <span class="seg" role="radiogroup" aria-labelledby="modeLabel">
+            <label><input type="radio" name="mode" value="hold" data-bind="mode" /><span>Hold to talk</span></label>
+            <label><input type="radio" name="mode" value="toggle" data-bind="mode" /><span>Toggle</span></label>
+          </span></div>
+      </div>
+
+      <h2 class="group-title">Audio and text</h2>
+      <div class="group">
+        <label class="row"><span class="row-text"><span class="row-title">Microphone</span><span class="row-desc error" id="micError" role="alert" hidden></span></span>
+          <select id="mic" data-bind="input_device" data-null></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">Sounds</span><span class="row-desc">A soft tick when recording starts and stops.</span></span>
+          <input type="checkbox" class="switch" data-bind="sounds" /></label>
+        <label class="row"><span class="row-text"><span class="row-title">Restore clipboard</span><span class="row-desc">Put back what you had copied after Echotype pastes.</span></span>
+          <input type="checkbox" class="switch" data-bind="restore_clipboard" /></label>
+        <label class="row"><span class="row-text"><span class="row-title">Keep history</span><span class="row-desc">Stored on this Mac only.</span></span>
+          <input type="checkbox" class="switch" data-bind="history_enabled" /></label>
+      </div>
+
+      <h2 class="group-title">Local API</h2>
+      <p class="lede small">Scripts and agents on this computer can send audio to Echotype and get text back through the same pipeline. OpenAI-compatible.</p>
+      <div class="group">
+        <label class="row"><span class="row-text"><span class="row-title">Serve on 127.0.0.1</span></span>
+          <input type="checkbox" class="switch" data-bind="local_api.enabled" /></label>
+        <div id="apiBody">
+          <label class="row"><span class="row-text"><span class="row-title">Port</span></span>
+            <input type="number" class="narrow" min="1024" max="65535" data-bind="local_api.port" /></label>
+          <div class="row"><span class="row-text"><span class="row-title">Token</span><code class="token" id="token"></code></span>
+            <span class="actions"><button class="btn" id="showToken" type="button">Show</button><button class="btn" id="copyToken" type="button">Copy</button></span></div>
+          <div class="row col"><div class="code-head"><span class="row-title">Try it</span><button class="btn" id="copyCurl" type="button">Copy</button></div>
+            <pre class="code" id="curl"></pre></div>
+        </div>
+      </div>
+
+      <h2 class="group-title">Permissions</h2>
+      <div class="group" id="perms"></div>
+    </section>
+  </main>
+
+  <!-- First run -->
+  <div class="onboard" id="onboard" role="dialog" aria-modal="true" aria-labelledby="obTitle" hidden>
+    <div class="ob-card">
+      <div class="ob-top">
+        <ol class="ob-steps" id="obSteps"><li>Permissions</li><li>Model</li><li>Try it</li></ol>
+        <button class="btn quiet" id="obSkip" type="button">Set up later</button>
+      </div>
+
+      <div class="ob-step" data-step="1">
+        <h2 id="obTitle" tabindex="-1">Let Echotype hear you and type for you</h2>
+        <p class="lede">macOS asks once for each. You can change them later in System Settings.</p>
+        <div class="group" id="obPerms"></div>
+        <div class="ob-foot"><button class="btn quiet" data-recheck type="button">Check again</button><button class="btn primary" data-next type="button">Continue</button></div>
+      </div>
+
+      <div class="ob-step" data-step="2" hidden>
+        <h2 tabindex="-1">Choose a speech model</h2>
+        <p class="lede" id="obModelLede"></p>
+        <div class="group scroll" id="obModels"></div>
+        <div class="ob-foot"><button class="btn quiet" id="obApi" type="button">Use an API instead</button><button class="btn primary" data-next id="obModelNext" type="button">Continue</button></div>
+      </div>
+
+      <div class="ob-step" data-step="3" hidden>
+        <h2 class="ob-try" id="obTry" tabindex="-1"></h2>
+        <p class="lede" id="obTryState" aria-live="polite">Click into any text field first, then say a sentence.</p>
+        <p class="ob-result text" id="obResult" hidden></p>
+        <div class="ob-foot"><button class="btn quiet" id="obToggle" type="button">Start with a click</button><button class="btn primary" id="obDone" type="button">Finish</button></div>
+      </div>
+    </div>
+  </div>
+</body>
 </html>
