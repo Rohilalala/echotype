@@ -7,6 +7,8 @@ on:
 
 jobs:
   build:
+    # A manual run from a branch would publish a release tagged with the branch name.
+    if: github.ref_type == 'tag'
     permissions:
       contents: write
     strategy:
