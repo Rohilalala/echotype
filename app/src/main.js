@@ -134,7 +134,8 @@ function accelFrom(e) {
   const c = e.code;
   if (!c || /^(Meta|Control|Alt|Shift|OS|Fn|CapsLock)/.test(c)) return { mods };
   const key = c.startsWith('Key') ? c.slice(3) : c.startsWith('Digit') ? c.slice(5) : c;
-  if (!mods.length && !/^F\d+$/.test(key)) return { mods, error: 'Add a modifier such as ⌥, ⌃ or ⌘.' };
+  // Shift alone is not enough: Shift+A would take capital A away from every app.
+  if (!mods.some(m => m !== 'Shift') && !/^F\d+$/.test(key)) return { mods, error: 'Add a modifier such as ⌥, ⌃ or ⌘.' };
   return { mods, accel: [...mods, key].join('+') };
 }
 
@@ -516,7 +517,7 @@ async function renderHistory() {
         it.raw !== it.text && h('p', { className: 'raw text' }, h('b', {}, 'Heard: '), it.raw),
         h('span', { className: 'timing' },
           h('span', {}, `Speech ${it.stt_ms} ms${it.stt_provider ? ` (${it.stt_provider})` : ''}`),
-          it.cleanup_ms != null && h('span', {}, `Cleanup ${it.cleanup_ms} ms${it.cleanup_provider ? ` (${it.cleanup_provider})` : ''}`))));
+          it.cleanup_provider && h('span', {}, `Cleanup ${it.cleanup_ms} ms (${it.cleanup_provider})`))));
   }));
 }
 const confirmClear = on => { $('#clearHistory').hidden = on; $('#clearConfirm').hidden = !on; (on ? $('#clearCancel') : $('#clearHistory')).focus(); };
