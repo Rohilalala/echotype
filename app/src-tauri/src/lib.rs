@@ -17,6 +17,8 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutSt
 use tauri_plugin_opener::OpenerExt;
 
 const MIN_SAMPLES: usize = audio::RATE as usize * 3 / 10; // recordings under 0.3 s are taps
+/// A recording this long stops itself and is transcribed as usual (toggle mode left on, a stuck key).
+const MAX_RECORDING: Duration = Duration::from_secs(30 * 60);
 
 struct AppState {
     settings: Mutex<Settings>,
@@ -35,6 +37,8 @@ enum Cmd {
     Toggle,
     Cancel,
     Retry,
+    /// Sent by recording `n` when it reaches MAX_RECORDING.
+    AutoStop(u64),
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -94,6 +98,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
     std::thread::spawn(move || {
         let busy = Arc::new(AtomicBool::new(false));
         let mut rec: Option<audio::Recorder> = None;
+        let mut rec_id = 0u64;
         for cmd in rx {
             let toggle_mode = current_settings(&app).mode == "toggle";
             match (cmd, rec.is_some()) {
@@ -103,17 +108,23 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                     emit_state(&app, simple("idle"));
                 }
                 (Cmd::Toggle, true) => finish(&app, &mut rec, &busy),
+                (Cmd::AutoStop(id), true) if id == rec_id => finish(&app, &mut rec, &busy),
                 (Cmd::Press, true) if toggle_mode => finish(&app, &mut rec, &busy),
                 (Cmd::Release, true) if !toggle_mode => finish(&app, &mut rec, &busy),
                 (Cmd::Retry, false) if !busy.load(Ordering::SeqCst) => {
-                    if let Some(pcm) = state(&app).last_failed.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    let pcm = state(&app).last_failed.lock().unwrap_or_else(|e| e.into_inner()).take();
+                    if let Some(pcm) = pcm {
                         process(&app, pcm, busy.clone());
                     }
                 }
                 (Cmd::Press | Cmd::Toggle, false) if !busy.load(Ordering::SeqCst) => {
-                    let a = app.clone();
+                    rec_id += 1;
+                    let (a, id, started, sent) = (app.clone(), rec_id, std::time::Instant::now(), AtomicBool::new(false));
                     match audio::Recorder::start(current_settings(&app).input_device, move |level| {
                         let _ = a.emit("audio-level", serde_json::json!({ "level": level }));
+                        if started.elapsed() >= MAX_RECORDING && !sent.swap(true, Ordering::SeqCst) {
+                            let _ = state(&a).dictation.send(Cmd::AutoStop(id));
+                        }
                     }) {
                         Ok(r) => {
                             rec = Some(r);
