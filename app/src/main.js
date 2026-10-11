@@ -672,7 +672,6 @@ try {
     h('p', { className: 'lede boot-error', role: 'alert' }, `${e}. Quit Echotype from the menu bar and open it again. If this keeps happening, the settings file may be damaged.`));
   throw e;
 }
-presets = presets.filter(p => p.id !== 'cloud'); // v1: no cloud
 isMac = /mac|darwin/i.test(sys.os);
 S.dictionary ??= [];
 S.replacements ??= [];

@@ -154,6 +154,9 @@ impl Settings {
 
 // ---------- presets ----------
 
+/// Echotype Cloud, the optional hosted tier (server/ in this repo).
+pub const CLOUD_URL: &str = "https://cloud.echotype.app/v1";
+
 #[derive(Serialize, Clone, Debug)]
 pub struct Preset {
     pub id: &'static str,
@@ -178,6 +181,7 @@ pub fn presets() -> Vec<Preset> {
         needs_key,
     };
     vec![
+        p("cloud", "Echotype Cloud", true, true, CLOUD_URL, "whisper-large-v3-turbo", "openai/gpt-oss-20b", true),
         p("openai", "OpenAI", true, true, "https://api.openai.com/v1", "gpt-4o-mini-transcribe", "gpt-4.1-nano", true),
         p("groq", "Groq", true, true, "https://api.groq.com/openai/v1", "whisper-large-v3-turbo", "openai/gpt-oss-20b", true),
         p("openrouter", "OpenRouter", false, true, "https://openrouter.ai/api/v1", "", "openai/gpt-4.1-nano", true),
@@ -306,11 +310,12 @@ mod tests {
     #[test]
     fn presets_and_base_urls() {
         let ids: Vec<_> = presets().iter().map(|p| p.id).collect();
-        assert_eq!(ids, ["openai", "groq", "openrouter", "ollama", "lmstudio", "custom"]);
+        assert_eq!(ids, ["cloud", "openai", "groq", "openrouter", "ollama", "lmstudio", "custom"]);
         assert_eq!(preset("openai").unwrap().default_stt_model, "gpt-4o-mini-transcribe");
         assert_eq!(preset("groq").unwrap().default_cleanup_model, "openai/gpt-oss-20b");
         assert!(!preset("openrouter").unwrap().stt);
         assert_eq!(base_url("groq", "").unwrap(), "https://api.groq.com/openai/v1");
+        assert_eq!(base_url("cloud", "").unwrap(), CLOUD_URL);
         assert_eq!(base_url("ollama", "http://127.0.0.1:9/v1/").unwrap(), "http://127.0.0.1:9/v1");
         assert!(base_url("custom", " ").is_err());
     }
