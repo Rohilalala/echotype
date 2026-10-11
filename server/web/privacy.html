@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy · Echotype Cloud</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header><a class="name" href="/">Echotype Cloud</a></header>
+<main>
+  <h1>Privacy</h1>
+  <p class="quiet">Last updated 12 October 2026. This notice covers Echotype Cloud only. The Echotype app, used with local models, sends nothing anywhere.</p>
+
+  <h2>Audio and text</h2>
+  <p>When you dictate with Cloud, the app sends the recording to our server. The server forwards it to the speech-to-text provider it is configured with (Groq at launch), returns the text to you, and drops the audio. Text sent for cleanup is forwarded to the language-model provider the same way. We do not store audio or transcripts, and our logs never contain them. What the provider does with a request is governed by its own data policy.</p>
+
+  <h2>What we store</h2>
+  <ul>
+    <li>Your email address, to sign you in.</li>
+    <li>Hashes of your API keys and of any pending sign-in code, never the key or code itself.</li>
+    <li>For each transcription: when it happened, how many words it produced and how many seconds of audio it had. This is what the plans are measured in.</li>
+    <li>If you subscribe: your plan and the Stripe customer and subscription IDs. Card details go to Stripe and never reach us.</li>
+  </ul>
+
+  <h2>What we log</h2>
+  <p>Server logs record the time, path and status of each request, without headers, bodies or keys. IP addresses are held in memory for rate limiting and are not written to disk.</p>
+
+  <h2>Email</h2>
+  <p>We email you sign-in codes and, if prices change, a notice beforehand. Nothing else.</p>
+
+  <h2>Deleting your data</h2>
+  <p>Ask us through <a href="https://github.com/Rohilalala/echotype/issues">GitHub</a> and we delete your account, keys and usage counts. Stripe keeps payment records as the law requires.</p>
+</main>
+<footer>
+  <nav aria-label="Footer">
+    <a href="/">Echotype Cloud</a>
+    <a href="/terms">Terms</a>
+  </nav>
+</footer>
+</body>
+</html>

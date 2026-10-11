@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Echotype Cloud</title>
+<meta name="description" content="Hosted speech-to-text and cleanup for Echotype, the free and open-source dictation app.">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header><a class="name" href="/">Echotype Cloud</a></header>
+<main>
+  <h1>Echotype, for computers that can't run the models.</h1>
+  <p class="lede">Echotype is a free dictation app that turns your speech into clean text on your own computer. Echotype Cloud does the transcription and cleanup on our servers instead, for machines without the memory to spare.</p>
+  <p>The app is free and open source under the MIT licence, and it works fully offline. Cloud is optional: you never need it to use Echotype.</p>
+  <a class="primary" href="https://github.com/Rohilalala/echotype">Download Echotype from GitHub</a>
+
+  <h2>Plans</h2>
+  <dl class="plans">
+    <div class="plan">
+      <dt>Free</dt>
+      <dd>2,000 words a week. The count resets every Monday at 00:00 UTC.</dd>
+    </div>
+    <div class="plan">
+      <dt>Pro</dt>
+      <dd><span class="price">$6 a month, or $60 a year.</span> Unlimited words, with a fair-use limit of 40 hours of audio a month.</dd>
+    </div>
+  </dl>
+  <p class="quiet">Words are counted from the transcribed text. Cleanup is included on both plans. Prices are in US dollars; payments are handled by Stripe.</p>
+
+  <h2>Signing in</h2>
+  <p>You sign in with your email address: we send a six-digit code, and the app gets a key in return. No password. The sign-in screen in the app arrives in the next release. Until then, request a key with the two calls described in the <a href="https://github.com/Rohilalala/echotype#readme">README</a>, then choose Echotype Cloud as the provider in Settings and paste it there.</p>
+
+  <h2>Your audio</h2>
+  <p>Each recording is passed to our speech-to-text provider, transcribed, and dropped. We keep no audio and no transcripts, only how many words and seconds each request used, which is what the plans are measured in. The details are in the <a href="/privacy">privacy notice</a>.</p>
+</main>
+<footer>
+  <nav aria-label="Footer">
+    <a href="https://github.com/Rohilalala/echotype">Source on GitHub</a>
+    <a href="/terms">Terms</a>
+    <a href="/privacy">Privacy</a>
+  </nav>
+</footer>
+</body>
+</html>

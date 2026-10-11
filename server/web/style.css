@@ -1,0 +1,71 @@
+/*
+  Echotype Cloud pages. Same voice as the desktop app's settings window: the system
+  font (Echotype lives next to the OS's own controls), neutral surfaces, hairline
+  separators, no shadows. The teal accent appears once per page, on the one action.
+  Light and dark follow the OS, as the app does. One column, left-aligned: these are
+  short documents, read top to bottom. Dials: ENERGY 1 / RHYTHM 1 / MOTION 1.
+*/
+:root {
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  --bg: #f5f5f4;
+  --text: #1d1d1f;
+  --text-2: #5c5c61;
+  --line: rgba(0, 0, 0, 0.12);
+  --accent: #0a6b62;
+  --accent-ink: #ffffff;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1e1e1f;
+    --text: #f2f2f3;
+    --text-2: #a3a3a9;
+    --line: rgba(255, 255, 255, 0.12);
+    --accent: #5cb8ab;
+    --accent-ink: #0b2a26;
+  }
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 17px/1.55 var(--font);
+}
+main, header, footer { max-width: 38rem; margin: 0 auto; padding: 0 20px; }
+header { padding-top: 32px; }
+footer { padding-top: 24px; padding-bottom: 48px; }
+
+.name { font-weight: 600; color: var(--text); text-decoration: none; }
+h1 { font-size: 2rem; line-height: 1.2; font-weight: 600; letter-spacing: -0.01em; margin: 72px 0 16px; }
+h2 { font-size: 1.25rem; font-weight: 600; margin: 56px 0 12px; }
+p, li { margin: 0 0 12px; }
+.lede { font-size: 1.2rem; color: var(--text); }
+.quiet { color: var(--text-2); }
+
+a { color: var(--text); text-underline-offset: 3px; }
+a:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; border-radius: 4px; }
+
+/* The one accented element on the page. */
+.primary {
+  display: inline-flex; align-items: center; min-height: 44px; padding: 0 18px; margin-top: 12px;
+  background: var(--accent); color: var(--accent-ink); border-radius: 8px;
+  font-weight: 600; text-decoration: none;
+}
+.primary:hover { filter: brightness(1.08); }
+
+/* Plans: two rows of facts separated by hairlines, not cards. */
+.plans { margin: 0 0 12px; border-top: 1px solid var(--line); }
+.plan { display: grid; grid-template-columns: 7rem 1fr; gap: 4px 16px; padding: 16px 0; border-bottom: 1px solid var(--line); }
+.plan dt { font-weight: 600; }
+.plan dd { margin: 0; }
+.price { font-weight: 600; }
+@media (max-width: 480px) {
+  h1 { margin-top: 48px; font-size: 1.75rem; }
+  .plan { grid-template-columns: 1fr; }
+}
+
+footer nav { display: flex; flex-wrap: wrap; gap: 4px 24px; border-top: 1px solid var(--line); padding-top: 16px; }
+footer nav a { display: inline-flex; align-items: center; min-height: 44px; color: var(--text-2); }
