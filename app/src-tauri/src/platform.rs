@@ -11,11 +11,8 @@ static CLIPBOARD: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
 /// Clipboard + Cmd/Ctrl+V, then restore the previous clipboard text.
 /// Never loses text: without Accessibility, or if the keystroke fails, the text stays on the clipboard.
 pub fn paste(app: &AppHandle, text: &str, restore: bool) -> Result<(), String> {
-    let mut slot = CLIPBOARD.lock().unwrap_or_else(|e| e.into_inner());
-    if slot.is_none() {
-        *slot = Some(arboard::Clipboard::new().map_err(|e| format!("Clipboard unavailable: {e}"))?);
-    }
-    let cb = slot.as_mut().expect("set above");
+    let mut slot = clipboard()?;
+    let cb = slot.as_mut().expect("set by clipboard()");
     if !accessibility_granted() {
         set_private(cb, text).map_err(|e| format!("Clipboard write failed: {e}"))?;
         return Err("Accessibility permission is off, so Echotype could not paste. The text is on your clipboard.".into());
@@ -37,6 +34,20 @@ pub fn paste(app: &AppHandle, text: &str, restore: bool) -> Result<(), String> {
     }
     // ponytail: restores text only; an image on the clipboard is replaced by the transcript. Handy's image path is the upgrade.
     Ok(())
+}
+
+fn clipboard() -> Result<std::sync::MutexGuard<'static, Option<arboard::Clipboard>>, String> {
+    let mut slot = CLIPBOARD.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.is_none() {
+        *slot = Some(arboard::Clipboard::new().map_err(|e| format!("Clipboard unavailable: {e}"))?);
+    }
+    Ok(slot)
+}
+
+/// Puts text on the clipboard without pasting it.
+pub fn copy(text: &str) -> Result<(), String> {
+    let mut slot = clipboard()?;
+    set_private(slot.as_mut().expect("set by clipboard()"), text).map_err(|e| format!("Clipboard write failed: {e}"))
 }
 
 /// Writes text marked "don't record" for clipboard-history apps (nspasteboard.org

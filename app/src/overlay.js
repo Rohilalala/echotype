@@ -9,7 +9,7 @@
   listen('dictation-state', ({ payload: p }) => {
     pill.dataset.state = p.state;
     pill.classList.toggle('on', p.state !== 'idle');
-    label.textContent = p.state === 'error' ? p.error || 'Something went wrong' : TEXT[p.state] ?? '';
+    label.textContent = p.state === 'error' ? p.error || 'Something went wrong' : p.copied ? 'Copied' : TEXT[p.state] ?? '';
     if (p.state !== 'recording') bars.forEach(b => (b.style.transform = ''));
   });
 

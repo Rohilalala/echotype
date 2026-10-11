@@ -213,7 +213,7 @@ function renderHero() {
   const b = st === 'idle' || st === 'done' ? blocker() : null;
   document.body.dataset.state = st;
   document.body.toggleAttribute('data-blocked', !!b);
-  $('#heroState span').textContent = b ? 'Not ready' : STATE_LABEL[st] ?? 'Ready';
+  $('#heroState span').textContent = b ? 'Not ready' : dictation.copied ? 'Copied' : STATE_LABEL[st] ?? 'Ready';
   const line = $('#heroLine'), sub = $('#heroSub');
   const start = h('button', { className: 'btn quiet', type: 'button', onclick: () => invoke('toggle_dictation') }, 'Start with a click');
   if (st === 'recording') {
@@ -226,6 +226,7 @@ function renderHero() {
     line.replaceChildren(S.mode === 'toggle' ? 'Press' : 'Hold', ...keycaps(S.hotkey), 'to dictate');
     if (b) sub.replaceChildren(h('span', {}, b.text), h('button', { className: 'btn', type: 'button', onclick: b.act }, b.label));
     else if (st === 'error') sub.replaceChildren(h('span', {}, `${dictation.error || 'Dictation stopped.'} Try again, or check Settings.`), ...keptText(), dictation.retry && retryBtn(), start);
+    else if (st === 'done' && dictation.copied) sub.replaceChildren(h('span', {}, dictation.warning || 'The retry worked. The text is on your clipboard.'), ...keptText(), start);
     else if (st === 'done' && dictation.warning) sub.replaceChildren(h('span', {}, dictation.warning), start);
     else sub.replaceChildren(h('span', {}, 'Text appears wherever your cursor is.'), start);
   }

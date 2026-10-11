@@ -95,7 +95,11 @@ const commands = {
   },
   check_permissions: () => ({ microphone: 'granted', accessibility: !q.has('noaccess') }),
   open_permission_settings: () => null,
-  retry_last: () => null,
+  retry_last: async () => {
+    emit('dictation-state', { state: 'transcribing' }); await wait(700);
+    emit('dictation-state', { state: 'done', text: 'Moving the design review to Friday at 3.', copied: true });
+    return null;
+  },
 };
 
 window.__TAURI__ = {
