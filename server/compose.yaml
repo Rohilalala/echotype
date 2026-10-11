@@ -1,0 +1,17 @@
+# Runs Echotype Cloud with its SQLite database on a named volume.
+# Secrets come from server/.env (not committed); every variable is documented in main.go.
+services:
+  server:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_PATH: /data/echotype-cloud.db
+    ports:
+      - "127.0.0.1:8080:8080" # put a TLS-terminating proxy in front; set TRUST_PROXY=1 when you do
+    volumes:
+      - data:/data
+    stop_grace_period: 40s # the server drains for up to 30 s on SIGTERM
+
+volumes:
+  data:
