@@ -259,7 +259,9 @@ pub fn transcribe_local(model: &Path, pcm: &[f32], language: Option<&str>, trans
     if g.as_ref().is_none_or(|(p, _)| p != model) {
         *g = None; // free the old model before loading the next one
         let path = model.to_str().ok_or("Model path is not valid UTF-8")?;
-        let ctx = WhisperContext::new_with_params(path, WhisperContextParameters::default()).map_err(|e| format!("Could not load {}: {e}", model.display()))?;
+        let mut cp = WhisperContextParameters::default();
+        cp.flash_attn(true); // whisper.cpp's own CLI default; faster on Metal
+        let ctx = WhisperContext::new_with_params(path, cp).map_err(|e| format!("Could not load {}: {e}", model.display()))?;
         let state = ctx.create_state().map_err(|e| format!("Could not start whisper: {e}"))?;
         *g = Some((model.to_path_buf(), state));
     }
