@@ -236,16 +236,43 @@ async fn get_settings(app: AppHandle) -> R<Settings> {
     Ok(current_settings(&app))
 }
 
+/// Saves `new`, keeping the hotkey registration in step with what is on disk. The hotkey is
+/// swapped only when it changed. A key that cannot be registered never blocks the rest: the
+/// other settings are saved with the old key and the reason comes back as a warning. A failed
+/// save swaps the key back, so the registration, the file and memory never disagree.
+fn commit(old: &Settings, mut new: Settings, swap: impl Fn(&str, &str) -> R<()>, save: impl Fn(&Settings) -> R<()>) -> R<(Settings, Option<String>)> {
+    let mut warning = None;
+    let swapped = new.hotkey != old.hotkey
+        && match swap(&old.hotkey, &new.hotkey) {
+            Ok(()) => true,
+            Err(e) => {
+                warning = Some(format!("{e}. Your other settings were saved."));
+                new.hotkey = old.hotkey.clone();
+                false
+            }
+        };
+    if let Err(e) = save(&new) {
+        if swapped {
+            let _ = swap(&new.hotkey, &old.hotkey);
+        }
+        return Err(e);
+    }
+    Ok((new, warning))
+}
+
 #[tauri::command]
 async fn save_settings(app: AppHandle, settings: Settings) -> R<()> {
+    // One save at a time: hotkey swap, file write, in-memory update and API restart happen together.
+    static SAVE: Mutex<()> = Mutex::new(());
+    let _g = SAVE.lock().unwrap_or_else(|e| e.into_inner());
     let old = current_settings(&app);
-    swap_hotkey(&app, Some(&old.hotkey), &settings.hotkey)?;
-    settings.save()?;
-    *state(&app).settings.lock().unwrap_or_else(|e| e.into_inner()) = settings.clone();
-    if (settings.stt.local_model != old.stt.local_model || settings.stt.provider != old.stt.provider) && settings.stt.provider == "local" {
-        std::thread::spawn(move || stt::warm_up(&settings));
+    let (new, warning) = commit(&old, settings, |o, n| swap_hotkey(&app, Some(o), n), Settings::save)?;
+    *state(&app).settings.lock().unwrap_or_else(|e| e.into_inner()) = new.clone();
+    apply_local_api(&app, &new)?;
+    if (new.stt.local_model != old.stt.local_model || new.stt.provider != old.stt.provider) && new.stt.provider == "local" {
+        std::thread::spawn(move || stt::warm_up(&new));
     }
-    apply_local_api(&app, &current_settings(&app))
+    warning.map_or(Ok(()), Err)
 }
 
 #[tauri::command]
@@ -563,7 +590,8 @@ pub fn cli(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_hotkey;
+    use super::{Settings, commit, parse_hotkey};
+    use std::cell::RefCell;
 
     #[test]
     fn hotkeys_the_ui_sends_parse_and_junk_is_a_readable_error() {
@@ -574,5 +602,42 @@ mod tests {
         let e = parse_hotkey("Alt+Nope").unwrap_err();
         assert!(e.starts_with("Invalid hotkey 'Alt+Nope'"), "{e}");
         assert!(parse_hotkey("").is_err());
+    }
+
+    #[test]
+    fn saving_with_an_unchanged_hotkey_never_touches_the_registration() {
+        let old = Settings::default();
+        let mut new = old.clone();
+        new.onboarded = true;
+        let saved = RefCell::new(None);
+        let (kept, warning) = commit(&old, new, |_, _| panic!("swapped an unchanged hotkey"), |s| Ok(*saved.borrow_mut() = Some(s.clone()))).unwrap();
+        assert!(kept.onboarded && warning.is_none());
+        assert_eq!(saved.into_inner(), Some(kept));
+    }
+
+    #[test]
+    fn a_hotkey_that_cannot_register_still_saves_everything_else() {
+        let old = Settings::default();
+        let mut new = old.clone();
+        new.hotkey = "Control+Alt+KeyK".into();
+        new.history_enabled = false;
+        let saved = RefCell::new(None);
+        let (kept, warning) = commit(&old, new, |_, n| Err(format!("Could not register hotkey '{n}'")), |s| Ok(*saved.borrow_mut() = Some(s.clone()))).unwrap();
+        assert_eq!(kept.hotkey, "Alt+Space");
+        assert!(!kept.history_enabled);
+        assert!(warning.unwrap().contains("other settings were saved"));
+        assert_eq!(saved.into_inner(), Some(kept));
+    }
+
+    #[test]
+    fn a_failed_save_swaps_the_hotkey_back() {
+        let old = Settings::default();
+        let mut new = old.clone();
+        new.hotkey = "Control+Alt+KeyK".into();
+        let swaps = RefCell::new(vec![]);
+        let err = commit(&old, new, |o, n| Ok(swaps.borrow_mut().push((o.to_string(), n.to_string()))), |_| Err("disk full".into())).unwrap_err();
+        assert_eq!(err, "disk full");
+        let k = |a: &str, b: &str| (a.to_string(), b.to_string());
+        assert_eq!(swaps.into_inner(), vec![k("Alt+Space", "Control+Alt+KeyK"), k("Control+Alt+KeyK", "Alt+Space")]);
     }
 }

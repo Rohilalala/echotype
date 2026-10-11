@@ -33,9 +33,15 @@ const progress = {}, modelErr = {};
 let recent = [], dropResults = [], apiStatus = null, tokenShown = false;
 
 // ---------- saving ----------
-let saveTimer, savedTimer;
-async function save(quiet) {
+let saveTimer, savedTimer, saving = Promise.resolve();
+// Saves run one after another, each sending S as it is when its turn comes.
+function save(quiet) {
   clearTimeout(saveTimer);
+  const run = saving.then(() => saveNow(quiet));
+  saving = run;
+  return run;
+}
+async function saveNow(quiet) {
   const settings = { ...S, replacements: S.replacements.filter(r => r.from.trim()) };
   try {
     await invoke('save_settings', { settings });
