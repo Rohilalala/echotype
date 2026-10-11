@@ -6,15 +6,20 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde_json::json;
+use std::sync::Arc;
 use tauri::AppHandle;
+use tokio::sync::Semaphore;
 
 /// Same cap as OpenAI's transcription endpoint.
 pub const MAX_BODY: usize = 25 * 1024 * 1024;
+/// Transcriptions at once: each can decode up to 60 minutes of audio (~700 MB).
+const MAX_JOBS: usize = 2;
 
 #[derive(Clone)]
 struct ApiState {
     app: AppHandle,
     token: String,
+    jobs: Arc<Semaphore>,
 }
 
 pub fn new_token() -> Result<String, String> {
@@ -57,7 +62,7 @@ pub fn start(app: AppHandle, port: u16, token: String) -> Result<tokio::sync::on
         .route("/v1/audio/transcriptions", post(transcribe))
         .route("/v1/models", get(models))
         .layer(DefaultBodyLimit::max(MAX_BODY))
-        .with_state(ApiState { app, token });
+        .with_state(ApiState { app, token, jobs: Arc::new(Semaphore::new(MAX_JOBS)) });
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     tauri::async_runtime::spawn(async move {
         match tokio::net::TcpListener::from_std(listener) {
@@ -87,6 +92,10 @@ async fn transcribe(State(st): State<ApiState>, req: Request) -> Response {
     if too_large(req.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok())) {
         return error(StatusCode::PAYLOAD_TOO_LARGE, "invalid_request_error", "Audio file is larger than 25 MB");
     }
+    // Held by the blocking job, so a client that hangs up does not free the slot early.
+    let Ok(permit) = st.jobs.clone().try_acquire_owned() else {
+        return error(StatusCode::TOO_MANY_REQUESTS, "rate_limit_error", format!("Echotype is already transcribing {MAX_JOBS} files; try again shortly"));
+    };
     let mut mp = match Multipart::from_request(req, &st).await {
         Ok(m) => m,
         Err(e) => return error(e.status(), "invalid_request_error", e.body_text()),
@@ -126,6 +135,7 @@ async fn transcribe(State(st): State<ApiState>, req: Request) -> Response {
         settings.dictionary.push(p);
     }
     let job = tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
         let pcm = crate::audio::decode(file, ext.as_deref()).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
         crate::cleanup::run(&settings, &pcm, || {}).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
     });
