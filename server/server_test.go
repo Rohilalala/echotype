@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -304,8 +305,8 @@ func TestFreeQuota(t *testing.T) {
 	key := x.signIn(t, "a@b.co")
 	id := accountID(t, x, "a@b.co")
 	// Last week's usage does not count.
-	x.s.db.Exec(`INSERT INTO usage VALUES (?, ?, 5000, 1000)`, id, t0.Add(-11*time.Hour).Unix())
-	x.s.db.Exec(`INSERT INTO usage VALUES (?, ?, 1999, 1000)`, id, t0.Add(-time.Hour).Unix())
+	x.s.db.Exec(`INSERT INTO usage (account_id, at, words, audio_ms) VALUES (?, ?, 5000, 1000)`, id, t0.Add(-11*time.Hour).Unix())
+	x.s.db.Exec(`INSERT INTO usage (account_id, at, words, audio_ms) VALUES (?, ?, 1999, 1000)`, id, t0.Add(-time.Hour).Unix())
 	me := decode(t, x.do("GET", "/v1/me", nil, bearer(key)...))
 	if me["words_used"] != float64(1999) || me["resets_at"] != "2026-10-19T00:00:00Z" {
 		t.Fatalf("me: %v", me)
@@ -332,8 +333,8 @@ func TestProFairUse(t *testing.T) {
 	key := x.signIn(t, "a@b.co")
 	id := accountID(t, x, "a@b.co")
 	x.s.db.Exec(`UPDATE accounts SET plan = 'pro' WHERE id = ?`, id)
-	x.s.db.Exec(`INSERT INTO usage VALUES (?, ?, 900000, ?)`, id, t0.Add(-24*time.Hour).Unix(), int64(40*3600*1000-1))
-	x.s.db.Exec(`INSERT INTO usage VALUES (?, ?, 1, 99999999)`, id, time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC).Unix()) // last month
+	x.s.db.Exec(`INSERT INTO usage (account_id, at, words, audio_ms) VALUES (?, ?, 900000, ?)`, id, t0.Add(-24*time.Hour).Unix(), int64(40*3600*1000-1000)) // exactly 1 s left
+	x.s.db.Exec(`INSERT INTO usage (account_id, at, words, audio_ms) VALUES (?, ?, 1, 99999999)`, id, time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC).Unix()) // last month
 	me := decode(t, x.do("GET", "/v1/me", nil, bearer(key)...))
 	if me["plan"] != "pro" || me["words_limit"] != float64(0) || me["resets_at"] != "2026-11-01T00:00:00Z" {
 		t.Fatalf("me: %v", me)
@@ -341,7 +342,7 @@ func TestProFairUse(t *testing.T) {
 	if w := transcribeReq(x, key, wavFile(1), nil); w.Code != 200 {
 		t.Fatalf("pro under ceiling with 900k words: %d", w.Code)
 	}
-	if w := transcribeReq(x, key, wavFile(1), nil); w.Code != 402 || !strings.Contains(w.Body.String(), "40 audio hours") {
+	if w := transcribeReq(x, key, wavFile(1), nil); w.Code != 402 || !strings.Contains(w.Body.String(), "40 hours of audio") {
 		t.Fatalf("pro over ceiling: %d %s", w.Code, w.Body)
 	}
 }
@@ -500,6 +501,79 @@ func TestUpstreamErrorsDoNotLookLikeClientAuth(t *testing.T) {
 	key := x.signIn(t, "a@b.co")
 	if w := transcribeReq(x, key, wavFile(1), nil); w.Code != 502 {
 		t.Fatalf("upstream 401 became %d", w.Code)
+	}
+	var n int
+	x.s.db.QueryRow(`SELECT COUNT(*) FROM usage`).Scan(&n)
+	if n != 0 {
+		t.Fatal("reservation kept for a request the upstream did not serve")
+	}
+}
+
+// countingUpstream counts transcription calls and, when gate is non-nil, holds each one
+// until gate is closed.
+func countingUpstream(calls *atomic.Int32, gate chan struct{}, duration float64) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if gate != nil {
+			<-gate
+		}
+		json.NewEncoder(w).Encode(map[string]any{"text": "a b", "duration": duration})
+	}
+}
+
+func TestAudioBoundCheckedBeforeUpstream(t *testing.T) {
+	var calls atomic.Int32
+	x := newHarness(t, countingUpstream(&calls, nil, 1))
+	key := x.signIn(t, "a@b.co")
+	// 6 MB of compressed audio could hold 6e6/750 s = 2.2 h, more than Free's 2 h a week.
+	w := transcribeReq(x, key, make([]byte, 6_000_000), nil)
+	if w.Code != 402 || errType(t, w) != "quota_exceeded" || calls.Load() != 0 {
+		t.Fatalf("big non-WAV on free: %d %s, upstream calls %d", w.Code, w.Body, calls.Load())
+	}
+	// 500 kB could hold 11 min: inside the allowance, over Free's 10-minute request cap.
+	if w := transcribeReq(x, key, make([]byte, 500_000), nil); w.Code != 400 || calls.Load() != 0 {
+		t.Fatalf("over the per-request cap: %d, calls %d", w.Code, calls.Load())
+	}
+	// A WAV is bounded by its header: 3 s of WAV passes.
+	if w := transcribeReq(x, key, wavFile(3), nil); w.Code != 200 || calls.Load() != 1 {
+		t.Fatalf("short WAV: %d", w.Code)
+	}
+	// Pro: 60-minute cap per request.
+	x.s.db.Exec(`UPDATE accounts SET plan = 'pro'`)
+	if w := transcribeReq(x, key, make([]byte, 61*60*750), nil); w.Code != 400 {
+		t.Fatalf("pro 61 min: %d", w.Code)
+	}
+	if w := transcribeReq(x, key, make([]byte, 59*60*750), nil); w.Code != 200 {
+		t.Fatalf("pro 59 min: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestConcurrentRequestsCannotJointlyOvershoot(t *testing.T) {
+	var calls atomic.Int32
+	gate := make(chan struct{})
+	x := newHarness(t, countingUpstream(&calls, gate, 300))
+	key := x.signIn(t, "a@b.co")
+	id := accountID(t, x, "a@b.co")
+	// 10 minutes of audio left this week.
+	x.s.db.Exec(`INSERT INTO usage (account_id, at, words, audio_ms) VALUES (?, ?, 0, ?)`, id, t0.Unix(), (freeAudioSecondsPerWeek-600)*1000)
+
+	// Three uploads that could each hold 5 minutes, all in flight at once.
+	codes := make(chan int, 3)
+	for i := 0; i < 3; i++ {
+		go func() { codes <- transcribeReq(x, key, make([]byte, 300*750), nil).Code }()
+	}
+	refused := <-codes // only the one that does not fit can finish while the upstream is held
+	close(gate)
+	got := map[int]int{refused: 1}
+	got[<-codes]++
+	got[<-codes]++
+	if got[200] != 2 || got[402] != 1 || calls.Load() != 2 {
+		t.Fatalf("codes %v, upstream calls %d", got, calls.Load())
+	}
+	var ms int64
+	x.s.db.QueryRow(`SELECT SUM(audio_ms) FROM usage WHERE account_id = ?`, id).Scan(&ms)
+	if ms != freeAudioSecondsPerWeek*1000 {
+		t.Fatalf("audio used %d ms, allowance %d", ms, freeAudioSecondsPerWeek*1000)
 	}
 }
 

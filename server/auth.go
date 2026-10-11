@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"crypto/tls"
@@ -132,9 +131,7 @@ func (s *server) authVerify(w http.ResponseWriter, r *http.Request) {
 var errBadCode = errors.New("bad code")
 
 // emailLocked reports whether the email has used up its wrong-code allowance for the window.
-func (s *server) emailLocked(r *http.Request, q interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, email string) (bool, error) {
+func (s *server) emailLocked(r *http.Request, q querier, email string) (bool, error) {
 	var n int
 	err := q.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM auth_failures WHERE email = ? AND at > ?`,
 		email, s.now().Add(-failureWindow).Unix()).Scan(&n)

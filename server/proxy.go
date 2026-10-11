@@ -37,8 +37,7 @@ func (s *server) transcribe(w http.ResponseWriter, r *http.Request, a account) {
 		return
 	}
 	defer release()
-	// ponytail: check-then-meter, so up to maxInflight requests can finish past the limit;
-	// reserve usage up front if that overshoot ever matters.
+	// Cheap refusal before reading 25 MB; the binding check is reserve() below.
 	if s.overQuota(w, r, a) {
 		return
 	}
@@ -110,6 +109,19 @@ func (s *server) transcribe(w http.ResponseWriter, r *http.Request, a account) {
 	}
 	mw.Close()
 
+	// Reserve the most audio this file can hold before any upstream cost is incurred.
+	bound := boundSeconds(audio)
+	row, ok := s.reserve(w, r, a, int64(bound*1000))
+	if !ok {
+		return
+	}
+	settled := false
+	defer func() {
+		if !settled {
+			s.release(row)
+		}
+	}()
+
 	req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, s.cfg.STTURL+"/audio/transcriptions", &buf)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	req.Header.Set("Authorization", "Bearer "+s.cfg.STTKey)
@@ -127,21 +139,17 @@ func (s *server) transcribe(w http.ResponseWriter, r *http.Request, a account) {
 		return
 	}
 
-	// Audio seconds: WAV header when it parses (raised to the upstream's figure if that is
-	// larger), else the upstream's duration, else a conservative estimate from the size.
+	// Real audio seconds: the WAV header (raised to the upstream's figure if that is larger),
+	// else the upstream's duration, else the reserved bound.
 	secs, isWav := wavSeconds(audio)
 	switch {
 	case out.Duration != nil && (!isWav || *out.Duration > secs):
 		secs = *out.Duration
 	case !isWav:
-		secs = estimateSeconds(len(audio))
+		secs = bound
 	}
-	words := len(strings.Fields(out.Text))
-	if _, err := s.db.ExecContext(r.Context(), `INSERT INTO usage (account_id, at, words, audio_ms) VALUES (?, ?, ?, ?)`,
-		a.ID, s.now().Unix(), words, int64(secs*1000)); err != nil {
-		// The transcript exists and the upstream has billed us; still answer, but make it loud.
-		slog.Error("meter usage", "account", a.ID, "words", words, "audio_ms", int64(secs*1000), "err", err)
-	}
+	s.settle(row, int64(len(strings.Fields(out.Text))), int64(secs*1000))
+	settled = true
 	if format == "text" {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		io.WriteString(w, out.Text)
