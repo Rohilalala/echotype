@@ -24,6 +24,9 @@ struct AppState {
     /// Running local API: port, the token it accepts, and the sender whose drop shuts it down.
     api: Mutex<Option<(u16, String, tokio::sync::oneshot::Sender<()>)>>,
     overlay_gen: AtomicU64,
+    /// The last recording whose transcription failed, kept so `retry_last` can run it again.
+    // ponytail: only the last one, in memory; a failed-recordings folder if users need more than one retry.
+    last_failed: Mutex<Option<Vec<f32>>>,
 }
 
 enum Cmd {
@@ -31,6 +34,7 @@ enum Cmd {
     Release,
     Toggle,
     Cancel,
+    Retry,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -42,6 +46,9 @@ struct DictationState {
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     warning: Option<String>,
+    /// The recording is kept and `retry_last` can transcribe it again.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    retry: bool,
 }
 
 fn state(app: &AppHandle) -> tauri::State<'_, AppState> {
@@ -98,6 +105,11 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                 (Cmd::Toggle, true) => finish(&app, &mut rec, &busy),
                 (Cmd::Press, true) if toggle_mode => finish(&app, &mut rec, &busy),
                 (Cmd::Release, true) if !toggle_mode => finish(&app, &mut rec, &busy),
+                (Cmd::Retry, false) if !busy.load(Ordering::SeqCst) => {
+                    if let Some(pcm) = state(&app).last_failed.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                        process(&app, pcm, busy.clone());
+                    }
+                }
                 (Cmd::Press | Cmd::Toggle, false) if !busy.load(Ordering::SeqCst) => {
                     let a = app.clone();
                     match audio::Recorder::start(current_settings(&app).input_device, move |level| {
@@ -148,16 +160,19 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>) {
         // A panic in a decoder, whisper-rs or the HTTP stack becomes an error state, not a silent loss.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cleanup::run(&s, &pcm, || emit_state(&app, simple("cleaning")))))
             .unwrap_or_else(|_| Err("Transcription crashed unexpectedly".into()));
+        let failed = result.is_err();
+        // Keep the audio of a failed transcription for retry_last; a success frees the old one.
+        *state(&app).last_failed.lock().unwrap_or_else(|e| e.into_inner()) = failed.then_some(pcm);
         let ev = match result {
+            Err(e) => DictationState { state: "error", error: Some(e), retry: true, ..Default::default() },
             Ok(out) if out.text.trim().is_empty() => simple("idle"),
             Ok(out) => {
                 record_history(&s, &out);
                 match platform::paste(&app, &out.text, s.restore_clipboard) {
                     Ok(()) => DictationState { state: "done", text: Some(out.text), warning: out.warning, ..Default::default() },
-                    Err(e) => DictationState { state: "error", text: Some(out.text), error: Some(e), warning: out.warning },
+                    Err(e) => DictationState { state: "error", text: Some(out.text), error: Some(e), warning: out.warning, ..Default::default() },
                 }
             }
-            Err(e) => DictationState { state: "error", error: Some(e), ..Default::default() },
         };
         drop(guard);
         emit_state(&app, ev);
@@ -402,6 +417,16 @@ async fn toggle_dictation(app: AppHandle) -> R<()> {
     state(&app).dictation.send(Cmd::Toggle).map_err(|e| e.to_string())
 }
 
+/// Runs the last failed recording through STT, cleanup and paste again.
+#[tauri::command]
+async fn retry_last(app: AppHandle) -> R<()> {
+    let st = state(&app);
+    if st.last_failed.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+        return Err("There is no failed recording to retry".into());
+    }
+    st.dictation.send(Cmd::Retry).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn check_permissions() -> R<serde_json::Value> {
     Ok(serde_json::json!({ "microphone": platform::microphone_status(), "accessibility": platform::accessibility_granted() }))
@@ -498,6 +523,7 @@ pub fn run() {
                 dictation: spawn_dictation(app.handle().clone()),
                 api: Mutex::new(None),
                 overlay_gen: AtomicU64::new(0),
+                last_failed: Mutex::new(None),
             });
             create_overlay(app)?;
             create_tray(app)?;
@@ -543,6 +569,7 @@ pub fn run() {
             get_system_info,
             local_api_status,
             toggle_dictation,
+            retry_last,
             check_permissions,
             open_permission_settings,
         ])

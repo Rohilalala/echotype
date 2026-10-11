@@ -95,6 +95,7 @@ const commands = {
   },
   check_permissions: () => ({ microphone: 'granted', accessibility: !q.has('noaccess') }),
   open_permission_settings: () => null,
+  retry_last: () => null,
 };
 
 window.__TAURI__ = {

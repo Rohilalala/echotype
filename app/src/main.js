@@ -224,7 +224,7 @@ function renderHero() {
   } else {
     line.replaceChildren(S.mode === 'toggle' ? 'Press' : 'Hold', ...keycaps(S.hotkey), 'to dictate');
     if (b) sub.replaceChildren(h('span', {}, b.text), h('button', { className: 'btn', type: 'button', onclick: b.act }, b.label));
-    else if (st === 'error') sub.replaceChildren(h('span', {}, `${dictation.error || 'Dictation stopped.'} Try again, or check Settings.`), ...keptText(), start);
+    else if (st === 'error') sub.replaceChildren(h('span', {}, `${dictation.error || 'Dictation stopped.'} Try again, or check Settings.`), ...keptText(), dictation.retry && retryBtn(), start);
     else if (st === 'done' && dictation.warning) sub.replaceChildren(h('span', {}, dictation.warning), start);
     else sub.replaceChildren(h('span', {}, 'Text appears wherever your cursor is.'), start);
   }
@@ -237,6 +237,9 @@ function keptText() {
   copy.onclick = () => copyText(dictation.text, copy);
   return [h('span', { className: 'text kept' }, dictation.text), copy];
 }
+
+// The recording is kept when transcription fails: run it again without re-dictating.
+const retryBtn = () => h('button', { className: 'btn primary', type: 'button', onclick: () => invoke('retry_last').catch(e => { dictation = { state: 'error', error: String(e) }; renderHero(); }) }, 'Retry');
 
 function renderRecent() {
   const box = $('#recent');
