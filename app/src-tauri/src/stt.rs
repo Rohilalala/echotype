@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use sha2::Digest;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState};
 
 /// Free RAM a model must leave behind for everything else on the machine.
@@ -18,16 +19,21 @@ pub struct Model {
     pub size_mb: u64,
     pub ram_mb: u64,
     pub note: &'static str,
+    /// SHA-256 of the file at HF_COMMIT; downloads that don't match are discarded.
+    pub sha256: &'static str,
 }
+
+/// Pinned whisper.cpp model repo revision, so a moved branch can't swap files under us.
+const HF_COMMIT: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
 
 /// Best first: `recommended` is the first entry that fits in RAM.
 pub const MODELS: &[Model] = &[
-    Model { id: "large-v3-turbo-q5_0", label: "Large v3 Turbo (Q5)", size_mb: 547, ram_mb: 800, note: "Best default: near-large accuracy, fast, 99 languages. Cannot translate." },
-    Model { id: "large-v3-turbo", label: "Large v3 Turbo", size_mb: 1624, ram_mb: 1700, note: "Full-precision turbo. Slightly more accurate, twice the size. Cannot translate." },
-    Model { id: "medium", label: "Medium", size_mb: 1533, ram_mb: 1800, note: "Multilingual and translates to English (Hinglish → English)." },
-    Model { id: "small", label: "Small", size_mb: 488, ram_mb: 852, note: "Multilingual, translates; lighter and less accurate than medium." },
-    Model { id: "base.en", label: "Base (English)", size_mb: 148, ram_mb: 388, note: "English only. For low-memory machines." },
-    Model { id: "tiny.en", label: "Tiny (English)", size_mb: 78, ram_mb: 273, note: "English only. Fastest, least accurate." },
+    Model { id: "large-v3-turbo-q5_0", label: "Large v3 Turbo (Q5)", size_mb: 547, ram_mb: 800, note: "Best default: near-large accuracy, fast, 99 languages. Cannot translate.", sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2" },
+    Model { id: "large-v3-turbo", label: "Large v3 Turbo", size_mb: 1624, ram_mb: 1700, note: "Full-precision turbo. Slightly more accurate, twice the size. Cannot translate.", sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69" },
+    Model { id: "medium", label: "Medium", size_mb: 1533, ram_mb: 1800, note: "Multilingual and translates to English (Hinglish → English).", sha256: "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208" },
+    Model { id: "small", label: "Small", size_mb: 488, ram_mb: 852, note: "Multilingual, translates; lighter and less accurate than medium.", sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b" },
+    Model { id: "base.en", label: "Base (English)", size_mb: 148, ram_mb: 388, note: "English only. For low-memory machines.", sha256: "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002" },
+    Model { id: "tiny.en", label: "Tiny (English)", size_mb: 78, ram_mb: 273, note: "English only. Fastest, least accurate.", sha256: "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f" },
 ];
 
 pub fn translates(id: &str) -> bool {
@@ -153,12 +159,12 @@ pub fn pick_local_model(s: &Settings) -> Result<(PathBuf, Option<String>), Strin
 // ---------- download / delete ----------
 
 pub fn download(id: &str, mut progress: impl FnMut(u64, Option<u64>)) -> Result<(), String> {
-    catalog(id)?;
     let dir = models_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let dest = dir.join(format!("ggml-{id}.bin"));
     let part = dir.join(format!("ggml-{id}.bin.part"));
-    let url = format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{id}.bin");
+    let want = catalog(id)?.sha256;
+    let url = format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/{HF_COMMIT}/ggml-{id}.bin");
     let client = reqwest::blocking::Client::builder().timeout(None::<Duration>).connect_timeout(Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
     let mut resp = client.get(&url).send().and_then(|r| r.error_for_status()).map_err(|e| format!("Download failed: {e}"))?;
     let total = resp.content_length();
@@ -166,12 +172,14 @@ pub fn download(id: &str, mut progress: impl FnMut(u64, Option<u64>)) -> Result<
         let mut f = std::fs::File::create(&part).map_err(|e| e.to_string())?;
         let mut buf = vec![0u8; 1 << 16];
         let (mut done, mut last) = (0u64, Instant::now());
+        let mut hasher = sha2::Sha256::new();
         loop {
             let n = resp.read(&mut buf).map_err(|e| format!("Download interrupted: {e}"))?;
             if n == 0 {
                 break;
             }
             f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+            hasher.update(&buf[..n]);
             done += n as u64;
             if last.elapsed() >= Duration::from_millis(250) {
                 progress(done, total);
@@ -181,6 +189,10 @@ pub fn download(id: &str, mut progress: impl FnMut(u64, Option<u64>)) -> Result<
         f.sync_all().map_err(|e| e.to_string())?;
         if total.is_some_and(|t| t != done) {
             return Err("Download ended early; try again".to_string());
+        }
+        let got: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        if got != want {
+            return Err("Downloaded model failed its checksum and was discarded; try again".to_string());
         }
         progress(done, total);
         Ok(())

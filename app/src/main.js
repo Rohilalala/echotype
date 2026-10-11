@@ -274,6 +274,7 @@ const secretName = kind => `${kind === 'stt' ? 'stt' : 'llm'}:${S[kind].provider
 function setProvider(kind, id) {
   const p = preset(id), cfg = S[kind];
   cfg.provider = id;
+  if (id !== 'custom') cfg.base_url = ''; // presets carry their own URL
   const def = p?.[kind === 'stt' ? 'default_stt_model' : 'default_cleanup_model'];
   if (def) cfg.model = def;
   save();

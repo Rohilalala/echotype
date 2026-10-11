@@ -191,12 +191,14 @@ pub fn preset(id: &str) -> Option<Preset> {
     presets().into_iter().find(|p| p.id == id)
 }
 
-/// Settings base URL wins; otherwise the preset's. Never ends with '/'.
+/// Only the `custom` provider uses the settings URL; every preset uses its own,
+/// so a stale custom URL can never receive another provider's API key.
+/// Never ends with '/'.
 pub fn base_url(provider: &str, override_url: &str) -> Result<String, String> {
-    let url = if override_url.trim().is_empty() {
-        preset(provider).map(|p| p.base_url.to_string()).unwrap_or_default()
-    } else {
+    let url = if provider == "custom" {
         override_url.trim().to_string()
+    } else {
+        preset(provider).map(|p| p.base_url.to_string()).unwrap_or_default()
     };
     if url.is_empty() {
         return Err(format!("No base URL set for provider '{provider}'"));
@@ -311,7 +313,8 @@ mod tests {
         assert_eq!(preset("groq").unwrap().default_cleanup_model, "openai/gpt-oss-20b");
         assert!(!preset("openrouter").unwrap().stt);
         assert_eq!(base_url("groq", "").unwrap(), "https://api.groq.com/openai/v1");
-        assert_eq!(base_url("ollama", "http://127.0.0.1:9/v1/").unwrap(), "http://127.0.0.1:9/v1");
+        assert_eq!(base_url("openai", "http://box.lan:8000/v1").unwrap(), "https://api.openai.com/v1");
+        assert_eq!(base_url("custom", "http://127.0.0.1:9/v1/").unwrap(), "http://127.0.0.1:9/v1");
         assert!(base_url("custom", " ").is_err());
     }
 }

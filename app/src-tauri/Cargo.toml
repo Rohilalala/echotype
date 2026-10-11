@@ -25,6 +25,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 enigo = "0.6"
 arboard = "3"
+sha2 = "0.10"
 sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 symphonia = { version = "0.6", default-features = false, features = ["aac", "isomp4", "mp3", "ogg", "wav", "flac", "vorbis", "pcm", "mkv"] }
 symphonia-adapter-libopus = "0.3"

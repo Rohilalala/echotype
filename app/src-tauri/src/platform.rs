@@ -8,11 +8,11 @@ use tauri::AppHandle;
 pub fn paste(app: &AppHandle, text: &str, restore: bool) -> Result<(), String> {
     let mut cb = arboard::Clipboard::new().map_err(|e| format!("Clipboard unavailable: {e}"))?;
     if !accessibility_granted() {
-        cb.set_text(text).map_err(|e| format!("Clipboard write failed: {e}"))?;
+        set_private(&mut cb, text).map_err(|e| format!("Clipboard write failed: {e}"))?;
         return Err("Accessibility permission is off, so Echotype could not paste. The text is on your clipboard.".into());
     }
     let saved = if restore { cb.get_text().ok() } else { None };
-    cb.set_text(text).map_err(|e| format!("Clipboard write failed: {e}"))?;
+    set_private(&mut cb, text).map_err(|e| format!("Clipboard write failed: {e}"))?;
     // Delays follow Handy (MIT): 60 ms for the pasteboard to settle, 100 ms modifier hold, 60 ms before restoring.
     std::thread::sleep(Duration::from_millis(60));
     let (tx, rx) = std::sync::mpsc::channel();
@@ -24,10 +24,23 @@ pub fn paste(app: &AppHandle, text: &str, restore: bool) -> Result<(), String> {
     rx.recv().map_err(|e| e.to_string())?.map_err(|e| format!("{e}. The text is on your clipboard."))?;
     std::thread::sleep(Duration::from_millis(60));
     if let Some(prev) = saved {
-        let _ = cb.set_text(prev);
+        let _ = set_private(&mut cb, &prev);
     }
     // ponytail: restores text only; an image on the clipboard is replaced by the transcript. Handy's image path is the upgrade.
     Ok(())
+}
+
+/// Writes text marked "don't record" for clipboard-history apps (nspasteboard.org
+/// on macOS, the history flag on Windows/Linux): transcripts are private, and the
+/// restored clipboard may be a password copied from a password manager.
+fn set_private(cb: &mut arboard::Clipboard, text: &str) -> Result<(), arboard::Error> {
+    #[cfg(target_os = "macos")]
+    use arboard::SetExtApple;
+    #[cfg(target_os = "windows")]
+    use arboard::SetExtWindows;
+    #[cfg(target_os = "linux")]
+    use arboard::SetExtLinux;
+    cb.set().exclude_from_history().text(text)
 }
 
 fn send_paste_keys() -> Result<(), String> {
