@@ -1,1 +1,107 @@
-# Echotype
+<p align="center">
+  <img src=".github/assets/icon.png" width="96" alt="">
+</p>
+
+<h1 align="center">Echotype</h1>
+
+<p align="center">
+  Hold a key, speak, let go. Clean text lands wherever your cursor is.<br>
+  Free, private, and it runs on the models you choose.
+</p>
+
+<p align="center">
+  <a href="#set-it-up-with-your-coding-agent">Set up with your agent</a> ·
+  <a href="#build-from-source">Build from source</a>
+</p>
+
+<p align="center">
+  <img src=".github/assets/screenshot.png" width="760" alt="Echotype's speech model settings, showing local whisper models with their download size and memory needs">
+</p>
+
+## What it does
+
+- **Dictate into any app.** Hold <kbd>⌥ Space</kbd>, talk, release. Echotype transcribes, cleans up and pastes, then puts your clipboard back.
+- **Reads like you typed it.** Filler words go, "four, no wait, five" becomes "5", spoken lists become lists, "new line" starts a new line.
+- **Speak Hinglish, get English.** Talk in Hindi, English or both at once; Echotype writes English.
+- **Drop in a voice note.** Drag a WhatsApp `.opus`, `.m4a`, `.mp3` or `.wav` onto the window for a clean transcript.
+- **Any model, both stages.** Local whisper.cpp on your machine, or any OpenAI-compatible endpoint: OpenAI, Groq, OpenRouter, Ollama, LM Studio, or your own server.
+- **Knows your machine.** Echotype checks free memory before it loads or recommends a model.
+- **A local API for your scripts and agents.** `POST http://127.0.0.1:7811/v1/audio/transcriptions` runs the same pipeline.
+
+With local models, nothing leaves your computer. API keys live in the system keychain.
+
+## Speed
+
+15-second clip on an M5 Pro, model already loaded:
+
+| Stage | Model | Time |
+|---|---|---|
+| Transcription | whisper large-v3-turbo Q5, local | 0.64 s |
+| Cleanup | gemma 4 E4B via Ollama | 0.5–0.9 s |
+
+## Set it up with your coding agent
+
+Paste this into Claude Code, Codex, Cursor or any agent that can run commands:
+
+```text
+Set up Echotype (https://github.com/Rohilalala/echotype) on this computer.
+
+1. Install what's missing: Rust (rustup), CMake and Node 20+. On Linux also install
+   libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev libxdo-dev.
+2. Clone the repo, then in app/ run `npm install` and `npm run tauri build`.
+3. Install the built app (macOS: copy Echotype.app from
+   app/src-tauri/target/release/bundle/macos to /Applications) and open it.
+4. Check how much memory is free. In Echotype's Speech model page, download the model it
+   marks Recommended; pick Medium instead if I speak a language other than English.
+5. Walk me through granting Microphone and Accessibility access.
+6. Prove it works: run Echotype's CLI on a short recording,
+   `/Applications/Echotype.app/Contents/MacOS/echotype --transcribe <file>`, and show me the text.
+
+Don't load any local language model unless I ask. If I want cleanup, ask me which provider to use.
+```
+
+## Build from source
+
+```sh
+git clone https://github.com/Rohilalala/echotype
+cd echotype/app
+npm install
+npm run tauri build
+```
+
+Needs Rust, CMake and Node 20+. Transcribe a file without opening the window:
+
+```sh
+echotype --transcribe note.opus
+```
+
+## Local models
+
+| Model | Download | Memory | Use it for |
+|---|---|---|---|
+| Large v3 Turbo Q5 | 547 MB | 0.8 GB | The default. Fast and accurate in 99 languages |
+| Medium | 1.5 GB | 1.8 GB | Translating Hinglish or any language to English |
+| Small | 488 MB | 0.9 GB | Lighter multilingual, also translates |
+| Base (English) | 148 MB | 0.4 GB | Low-memory machines |
+
+Turbo models can't translate, so with translation on Echotype switches to a multilingual model you've downloaded.
+
+## Local API
+
+Turn it on in Settings, copy the token, then:
+
+```sh
+curl http://127.0.0.1:7811/v1/audio/transcriptions \
+  -H "Authorization: Bearer $ECHOTYPE_TOKEN" \
+  -F file=@note.opus
+```
+
+It speaks the OpenAI transcription format, so OpenAI client libraries work if you point their base URL at it. It only listens on 127.0.0.1.
+
+## Credits
+
+Built on [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and [Tauri](https://tauri.app). Hotkey and paste handling borrow from [Handy](https://github.com/cjpais/Handy) (MIT).
+
+## License
+
+MIT
