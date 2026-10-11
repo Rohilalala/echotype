@@ -121,9 +121,14 @@ func (s *server) proxyAudio(w http.ResponseWriter, r *http.Request, a account, t
 	}
 	mw.Close()
 
-	// Reserve the most audio this file can hold before any upstream cost is incurred.
-	bound := boundSeconds(audio)
-	row, ok := s.reserve(w, r, a, int64(bound*1000), 0)
+	// WAV only: its duration is exact from the header, so the reservation below is a true
+	// upper bound taken before any upstream cost.
+	secs, isWav := wavSeconds(audio)
+	if !isWav {
+		apiError(w, http.StatusBadRequest, "invalid_request_error", "Echotype Cloud accepts WAV audio. The Echotype app converts recordings and voice notes automatically.")
+		return
+	}
+	row, ok := s.reserve(w, r, a, int64(secs*1000), 0)
 	if !ok {
 		return
 	}
@@ -151,14 +156,9 @@ func (s *server) proxyAudio(w http.ResponseWriter, r *http.Request, a account, t
 		return
 	}
 
-	// Real audio seconds: the WAV header (raised to the upstream's figure if that is larger),
-	// else the upstream's duration, else the reserved bound.
-	secs, isWav := wavSeconds(audio)
-	switch {
-	case out.Duration != nil && (!isWav || *out.Duration > secs):
+	// Metered seconds: the WAV header, raised to the upstream's figure if that is larger.
+	if out.Duration != nil && *out.Duration > secs {
 		secs = *out.Duration
-	case !isWav:
-		secs = bound
 	}
 	s.settle(row, int64(len(strings.Fields(out.Text))), int64(secs*1000), 0)
 	settled = true

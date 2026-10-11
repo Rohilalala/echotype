@@ -349,14 +349,17 @@ func TestProFairUse(t *testing.T) {
 
 // ---------- transcription proxy ----------
 
-// wavFile builds a 16 kHz mono 16-bit WAV of the given seconds.
-func wavFile(secs int) []byte {
-	data := make([]byte, 32000*secs)
+// wavFile builds a 16 kHz mono 16-bit PCM WAV of the given seconds, as the app sends.
+func wavFile(secs int) []byte { return wavOf(1, 16000, 16, secs) }
+
+// wavOf builds a mono WAV with the given format tag, sample rate and bit depth.
+func wavOf(tag uint16, rate uint32, bits uint16, secs int) []byte {
+	data := make([]byte, int(rate)*int(bits/8)*secs)
 	var b bytes.Buffer
 	b.WriteString("RIFF")
 	binary.Write(&b, binary.LittleEndian, uint32(36+len(data)))
 	b.WriteString("WAVEfmt ")
-	for _, v := range []any{uint32(16), uint16(1), uint16(1), uint32(16000), uint32(32000), uint16(2), uint16(16)} {
+	for _, v := range []any{uint32(16), tag, uint16(1), rate, rate * uint32(bits/8), bits / 8, bits} {
 		binary.Write(&b, binary.LittleEndian, v)
 	}
 	b.WriteString("data")
@@ -381,6 +384,12 @@ func TestWavSeconds(t *testing.T) {
 	}
 	if _, ok := wavSeconds([]byte("ID3\x03 not a wav")); ok {
 		t.Fatal("mp3 parsed as wav")
+	}
+	if _, ok := wavSeconds(wavOf(0x55, 16000, 16, 1)); ok {
+		t.Fatal("MP3-in-WAV (format 0x55) accepted")
+	}
+	if s, ok := wavSeconds(wavOf(3, 8000, 32, 2)); !ok || s != 2 {
+		t.Fatalf("float WAV: %v %v", s, ok)
 	}
 }
 
@@ -453,10 +462,10 @@ func TestTranscribeProxy(t *testing.T) {
 		t.Fatalf("metered %d words, %d ms", words, ms)
 	}
 
-	// response_format=text returns plain text; a non-WAV file is metered by the upstream duration.
+	// response_format=text returns plain text; an upstream duration above the header's wins.
 	y := newHarness(t, fakeUpstream(t, "plain words", 7.25))
 	key = y.signIn(t, "a@b.co")
-	w = transcribeReq(y, key, []byte("ID3 fake mp3 bytes"), map[string]string{"response_format": "text"})
+	w = transcribeReq(y, key, wavFile(1), map[string]string{"response_format": "text"})
 	if w.Code != 200 || w.Body.String() != "plain words" || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/plain") {
 		t.Fatalf("text format: %d %q", w.Code, w.Body)
 	}
@@ -547,30 +556,38 @@ func countingUpstream(calls *atomic.Int32, gate chan struct{}, duration float64)
 	}
 }
 
-func TestAudioBoundCheckedBeforeUpstream(t *testing.T) {
+func TestOnlyWAVAndBoundCheckedBeforeUpstream(t *testing.T) {
 	var calls atomic.Int32
 	x := newHarness(t, countingUpstream(&calls, nil, 1))
 	key := x.signIn(t, "a@b.co")
-	// 6 MB of compressed audio could hold 6e6/750 s = 2.2 h, more than Free's 2 h a week.
-	w := transcribeReq(x, key, make([]byte, 6_000_000), nil)
-	if w.Code != 402 || errType(t, w) != "quota_exceeded" || calls.Load() != 0 {
-		t.Fatalf("big non-WAV on free: %d %s, upstream calls %d", w.Code, w.Body, calls.Load())
+	id := accountID(t, x, "a@b.co")
+	wantWAV := "Echotype Cloud accepts WAV audio."
+	for name, file := range map[string][]byte{
+		"compressed bytes": make([]byte, 6_000_000),
+		"mp3":              []byte("ID3\x03 fake mp3"),
+		"MP3-in-WAV":       wavOf(0x55, 16000, 16, 1),
+	} {
+		for _, path := range []string{"/v1/audio/transcriptions", "/v1/audio/translations"} {
+			w := audioReq(x, path, key, file, nil)
+			if w.Code != 400 || errType(t, w) != "invalid_request_error" || !strings.Contains(w.Body.String(), wantWAV) {
+				t.Fatalf("%s to %s: %d %s", name, path, w.Code, w.Body)
+			}
+		}
 	}
-	// 500 kB could hold 11 min: inside the allowance, over Free's 10-minute request cap.
-	if w := transcribeReq(x, key, make([]byte, 500_000), nil); w.Code != 400 || calls.Load() != 0 {
-		t.Fatalf("over the per-request cap: %d, calls %d", w.Code, calls.Load())
+	// 11 minutes of WAV (8 kHz, 8-bit): over Free's 10-minute request cap.
+	if w := transcribeReq(x, key, wavOf(1, 8000, 8, 11*60), nil); w.Code != 400 {
+		t.Fatalf("over the per-request cap: %d", w.Code)
 	}
-	// A WAV is bounded by its header: 3 s of WAV passes.
+	// 6 minutes of WAV with 5 left this week: 402.
+	x.s.db.Exec(`INSERT INTO usage (account_id, at, words, audio_ms) VALUES (?, ?, 0, ?)`, id, t0.Unix(), (freeAudioSecondsPerWeek-300)*1000)
+	if w := transcribeReq(x, key, wavOf(1, 8000, 8, 6*60), nil); w.Code != 402 || errType(t, w) != "quota_exceeded" {
+		t.Fatalf("over the remaining allowance: %d %s", w.Code, w.Body)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("upstream called %d times for refused requests", calls.Load())
+	}
 	if w := transcribeReq(x, key, wavFile(3), nil); w.Code != 200 || calls.Load() != 1 {
 		t.Fatalf("short WAV: %d", w.Code)
-	}
-	// Pro: 60-minute cap per request.
-	x.s.db.Exec(`UPDATE accounts SET plan = 'pro'`)
-	if w := transcribeReq(x, key, make([]byte, 61*60*750), nil); w.Code != 400 {
-		t.Fatalf("pro 61 min: %d", w.Code)
-	}
-	if w := transcribeReq(x, key, make([]byte, 59*60*750), nil); w.Code != 200 {
-		t.Fatalf("pro 59 min: %d %s", w.Code, w.Body)
 	}
 }
 
@@ -583,10 +600,11 @@ func TestConcurrentRequestsCannotJointlyOvershoot(t *testing.T) {
 	// 10 minutes of audio left this week.
 	x.s.db.Exec(`INSERT INTO usage (account_id, at, words, audio_ms) VALUES (?, ?, 0, ?)`, id, t0.Unix(), (freeAudioSecondsPerWeek-600)*1000)
 
-	// Three uploads that could each hold 5 minutes, all in flight at once.
+	// Three 5-minute WAVs, all in flight at once.
+	five := wavOf(1, 8000, 8, 300)
 	codes := make(chan int, 3)
 	for i := 0; i < 3; i++ {
-		go func() { codes <- transcribeReq(x, key, make([]byte, 300*750), nil).Code }()
+		go func() { codes <- transcribeReq(x, key, five, nil).Code }()
 	}
 	refused := <-codes // only the one that does not fit can finish while the upstream is held
 	close(gate)

@@ -24,12 +24,6 @@ const (
 	// Longest single recording accepted, by plan.
 	freeMaxRequestSeconds = 10 * 60
 	proMaxRequestSeconds  = 60 * 60
-	// 6 kbit/s, below any speech codec a client normally sends, so bytes divided by this is
-	// an upper bound on a compressed file's duration before the upstream has seen it.
-	// ponytail: a crafted file (e.g. FLAC of silence) can still be longer than this bound; it
-	// is metered at its real length afterwards, so the overshoot is one request. Probe the
-	// duration with a demuxer before forwarding if that ever shows up in the bill.
-	boundBytesPerSecond = 750
 )
 
 // weekStart is Monday 00:00 UTC of t's ISO week.
@@ -180,9 +174,11 @@ func (s *server) me(w http.ResponseWriter, r *http.Request, a account) {
 	})
 }
 
-// wavSeconds reads the duration of a PCM WAV file from its header. The data size is clamped
-// to the bytes actually present and the byte rate is derived from the format fields (not the
-// declared byte rate), so a doctored header cannot shrink the metered duration.
+// wavSeconds reads the duration of an uncompressed WAV file from its header. Only PCM, float
+// and extensible formats are accepted, the data size is clamped to the bytes actually
+// present and the byte rate is derived from the format fields (not the declared byte rate),
+// so a doctored or compressed file cannot shrink the metered duration. Cloud accepts only
+// WAV for exactly this reason: the duration is known before any upstream cost.
 func wavSeconds(b []byte) (float64, bool) {
 	if len(b) < 12 || string(b[0:4]) != "RIFF" || string(b[8:12]) != "WAVE" {
 		return 0, false
@@ -194,6 +190,9 @@ func wavSeconds(b []byte) (float64, bool) {
 		switch id {
 		case "fmt ":
 			if size < 16 || body+16 > len(b) {
+				return 0, false
+			}
+			if tag := binary.LittleEndian.Uint16(b[body:]); tag != 1 && tag != 3 && tag != 0xFFFE {
 				return 0, false
 			}
 			ch := float64(binary.LittleEndian.Uint16(b[body+2:]))
@@ -212,13 +211,4 @@ func wavSeconds(b []byte) (float64, bool) {
 		p = body + size + size%2
 	}
 	return 0, false
-}
-
-// boundSeconds is the most audio a file can hold before the upstream has seen it: exact for
-// WAV (the desktop app always sends 16 kHz mono WAV), else bytes at 6 kbit/s.
-func boundSeconds(audio []byte) float64 {
-	if secs, ok := wavSeconds(audio); ok {
-		return secs
-	}
-	return float64(len(audio)) / boundBytesPerSecond
 }
