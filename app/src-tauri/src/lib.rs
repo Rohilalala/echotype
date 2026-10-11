@@ -21,7 +21,8 @@ const MIN_SAMPLES: usize = audio::RATE as usize * 3 / 10; // recordings under 0.
 struct AppState {
     settings: Mutex<Settings>,
     dictation: mpsc::Sender<Cmd>,
-    api: Mutex<Option<(u16, tauri::async_runtime::JoinHandle<()>)>>,
+    /// Running local API: port and the sender whose drop shuts it down.
+    api: Mutex<Option<(u16, tokio::sync::oneshot::Sender<()>)>>,
     overlay_gen: AtomicU64,
 }
 
@@ -200,9 +201,7 @@ fn apply_local_api(app: &AppHandle, s: &Settings) -> Result<(), String> {
     if s.local_api.enabled && running_port == Some(s.local_api.port) {
         return Ok(());
     }
-    if let Some((_, handle)) = api.take() {
-        handle.abort();
-    }
+    api.take(); // dropping the sender stops the old server
     if s.local_api.enabled {
         let token = local_api_token()?;
         *api = Some((s.local_api.port, api::start(app.clone(), s.local_api.port, token)?));

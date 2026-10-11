@@ -48,8 +48,9 @@ pub fn too_large(content_length: Option<&str>) -> bool {
     content_length.and_then(|v| v.parse::<u64>().ok()).is_some_and(|n| n > MAX_BODY as u64)
 }
 
-/// Binds now (so "port in use" surfaces immediately) and serves until the task is aborted.
-pub fn start(app: AppHandle, port: u16, token: String) -> Result<tauri::async_runtime::JoinHandle<()>, String> {
+/// Binds now (so "port in use" surfaces immediately) and serves until the returned sender is
+/// dropped. Shutdown is graceful: open keep-alive connections close too, not just the listener.
+pub fn start(app: AppHandle, port: u16, token: String) -> Result<tokio::sync::oneshot::Sender<()>, String> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", port)).map_err(|e| format!("Local API could not use port {port}: {e}"))?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let router = Router::new()
@@ -57,16 +58,18 @@ pub fn start(app: AppHandle, port: u16, token: String) -> Result<tauri::async_ru
         .route("/v1/models", get(models))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(ApiState { app, token });
-    Ok(tauri::async_runtime::spawn(async move {
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    tauri::async_runtime::spawn(async move {
         match tokio::net::TcpListener::from_std(listener) {
             Ok(l) => {
-                if let Err(e) = axum::serve(l, router).await {
+                if let Err(e) = axum::serve(l, router).with_graceful_shutdown(async { let _ = stopped.await; }).await {
                     eprintln!("echotype: local API stopped: {e}");
                 }
             }
             Err(e) => eprintln!("echotype: local API listener failed: {e}"),
         }
-    }))
+    });
+    Ok(stop)
 }
 
 async fn models(State(st): State<ApiState>, headers: HeaderMap) -> Response {
