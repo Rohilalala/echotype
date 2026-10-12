@@ -175,7 +175,7 @@ fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
 // ---------- presets ----------
 
 /// Echotype Cloud, the optional hosted tier (server/ in this repo).
-pub const CLOUD_URL: &str = "https://cloud.echotype.app/v1";
+pub const CLOUD_URL: &str = "https://echotype.zopmop.com/v1";
 
 /// CLOUD_URL, or ECHOTYPE_CLOUD_URL for people who run server/ themselves.
 pub fn cloud_url() -> String {
