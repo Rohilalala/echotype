@@ -57,8 +57,8 @@ enum Cmd {
     Retry,
     /// Recording `n`'s microphone went away: transcribe what it captured.
     Lost(u64),
-    /// Recording `n` survived SHOW_AFTER: show it and play the start sound.
-    Show(u64),
+    /// Recording `n` survived SHOW_AFTER: show it and play the start (or, once locked, the lock) sound.
+    Show(u64, bool),
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -222,14 +222,14 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
             let ev = match cmd {
                 Cmd::Key(ev) => ev,
                 Cmd::Lost(id) => Ev::AutoStop(id),
-                Cmd::Show(id) => {
-                    if let Some(l) = live.as_mut().filter(|l| l.id == id && !l.shown) {
+                Cmd::Show(id, locked) => {
+                    if let Some(l) = live.as_mut().filter(|l| l.id == id && (locked || !l.shown)) {
                         l.shown = true;
                         if s.sounds {
                             lock(&l.stats).exclude(SOUND_WINDOWS);
-                            platform::play_sound(&app, "start");
+                            platform::play_sound(&app, if locked { "lock" } else { "start" });
                         }
-                        emit_state(&app, DictationState { state: "recording", locked: false, ..Default::default() });
+                        emit_state(&app, DictationState { state: "recording", locked, ..Default::default() });
                     }
                     continue;
                 }
@@ -261,11 +261,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                             }
                             emit_state(&app, DictationState { state: "recording", locked: locked && !toggle_mode, ..Default::default() });
                         } else {
-                            let a = app.clone();
-                            std::thread::spawn(move || {
-                                std::thread::sleep(SHOW_AFTER);
-                                send(&a, Cmd::Show(id));
-                            });
+                            show_later(&app, id, false);
                         }
                         live = Some(l);
                         state(&app).recording.store(true, Ordering::SeqCst);
@@ -275,15 +271,11 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                         emit_state(&app, e);
                     }
                 },
+                // Deferred like Show: a lock press that turns out to be a chord (tap, then Right ⌘+V) stays silent.
                 Act::Lock => {
-                    if let Some(l) = live.as_mut() {
-                        l.shown = true;
-                        if s.sounds {
-                            lock(&l.stats).exclude(SOUND_WINDOWS);
-                            platform::play_sound(&app, "lock");
-                        }
+                    if let Some(l) = &live {
+                        show_later(&app, l.id, true);
                     }
-                    emit_state(&app, DictationState { state: "recording", locked: true, ..Default::default() });
                 }
                 Act::ArmTap { id, seq } => {
                     let a = app.clone();
@@ -324,6 +316,14 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
         }
     });
     tx
+}
+
+fn show_later(app: &AppHandle, id: u64, locked: bool) {
+    let a = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(SHOW_AFTER);
+        send(&a, Cmd::Show(id, locked));
+    });
 }
 
 /// Opens the mic for recording `id`, after checking a model or key is ready (no point recording
@@ -465,8 +465,8 @@ fn paste_last(app: &AppHandle, paste: bool) {
         let s = current_settings(&app);
         let paste = paste && !main_window_focused(&app) && platform::wait_for_modifiers_up(Duration::from_millis(500));
         let res = if paste { platform::paste(&app, &text, s.restore_clipboard) } else { platform::copy(&text).map_err(|e| (e, false)) };
-        if state(&app).recording.load(Ordering::SeqCst) {
-            return; // the pill is showing a live recording; the paste itself is the feedback
+        if res.is_ok() && state(&app).recording.load(Ordering::SeqCst) {
+            return; // the pill is showing a live recording; a successful paste is its own feedback
         }
         emit_state(&app, match res {
             Ok(()) if paste => hint("Pasted", None),
@@ -513,6 +513,7 @@ fn apply_talk_key(app: &AppHandle, s: &Settings) -> Option<String> {
                 hotkey::TapEv::Down => Ev::Press,
                 hotkey::TapEv::Up => Ev::Release,
                 hotkey::TapEv::Other => Ev::OtherKey,
+                hotkey::TapEv::Click => Ev::Click,
             };
             let _ = tx.send(Cmd::Key(ev));
         });

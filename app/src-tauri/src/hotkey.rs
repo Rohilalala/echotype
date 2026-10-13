@@ -20,6 +20,8 @@ pub enum Ev {
     Cancel,
     /// Another key went down while the talk key was held (fn+arrow, Right ⌘+C).
     OtherKey,
+    /// A mouse click while the talk key was held (Right ⌘-click).
+    Click,
     /// Recording `id` hit the 30-minute cap.
     AutoStop(u64),
     /// The double-tap window of recording `id`, tap `seq`, ran out.
@@ -149,6 +151,15 @@ impl Fsm {
                 }
                 _ => Act::None,
             },
+            // A modifier-click is a chord only right after the key went down; later, someone
+            // dictating with the key held may click around, and that must not drop their words.
+            Ev::Click => match self.rec {
+                Some(r) if self.down && r.by_press && !r.finishing && now.duration_since(r.started) < TAP => {
+                    self.rec = None;
+                    Act::Discard { hint: false }
+                }
+                _ => Act::None,
+            },
             Ev::AutoStop(id) => match self.rec {
                 Some(r) if r.id == id => {
                     self.rec = None;
@@ -202,6 +213,7 @@ pub enum TapEv {
     Down,
     Up,
     Other,
+    Click,
 }
 
 /// What one tapped event means for talk key `code`. The key is identified by its keycode on a
@@ -293,8 +305,9 @@ pub mod tap {
                 CGEventTapLocation::Session,
                 CGEventTapPlacement::TailAppendEventTap,
                 CGEventTapOptions::ListenOnly,
-                // Clicks and scrolls count as "another key": Right ⌘-click or ⌃-scroll is not a dictation.
-                vec![CGEventType::FlagsChanged, CGEventType::KeyDown, CGEventType::LeftMouseDown, CGEventType::RightMouseDown, CGEventType::OtherMouseDown, CGEventType::ScrollWheel],
+                // Clicks too, so a Right ⌘-click is not a dictation; scrolls are not (trackpad momentum
+                // keeps arriving after the finger lifts).
+                vec![CGEventType::FlagsChanged, CGEventType::KeyDown, CGEventType::LeftMouseDown, CGEventType::RightMouseDown, CGEventType::OtherMouseDown],
                 move |_, ty, ev| {
                     match ty {
                         CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
@@ -307,12 +320,14 @@ pub mod tap {
                         _ => {
                             let code = CODE.load(Ordering::SeqCst);
                             let flags_changed = matches!(ty, CGEventType::FlagsChanged);
+                            let click = !flags_changed && !matches!(ty, CGEventType::KeyDown);
                             let kc = if flags_changed { ev.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16 } else { 0 };
-                            match (code != 0).then(|| classify(flags_changed, kc, ev.get_flags().bits(), code)).flatten() {
+                            let what = (code != 0).then(|| classify(flags_changed, kc, ev.get_flags().bits(), code)).flatten();
+                            match what.map(|w| if click { TapEv::Click } else { w }) {
                                 Some(TapEv::Down) if !held.swap(true, Ordering::SeqCst) => send(TapEv::Down),
                                 Some(TapEv::Up) if held.swap(false, Ordering::SeqCst) => send(TapEv::Up),
                                 // Only while the talk key is down, and only that it happened, not which key.
-                                Some(TapEv::Other) if held.load(Ordering::SeqCst) => send(TapEv::Other),
+                                Some(e @ (TapEv::Other | TapEv::Click)) if held.load(Ordering::SeqCst) => send(e),
                                 _ => {}
                             }
                         }
@@ -553,6 +568,22 @@ mod tests {
         assert!(t.f.recording());
         t.at(5000, Ev::Press);
         assert_eq!(t.at(5100, Ev::Release), Act::Finish);
+    }
+
+    #[test]
+    fn a_click_cancels_only_right_after_the_press() {
+        let mut t = T::hold();
+        t.at(0, Ev::Press);
+        assert_eq!(t.at(120, Ev::Click), Act::Discard { hint: false }, "Right ⌘-click");
+        t.at(150, Ev::Release);
+        t.at(1000, Ev::Press);
+        assert_eq!(t.at(5000, Ev::Click), Act::None, "clicking around while dictating keeps the words");
+        assert_eq!(t.at(9000, Ev::Release), Act::Finish);
+        // A click during the press that finishes a hands-free recording does not cancel the finish.
+        t.at(10_000, Ev::Toggle);
+        t.at(20_000, Ev::Press);
+        assert_eq!(t.at(20_050, Ev::Click), Act::None);
+        assert_eq!(t.at(20_100, Ev::Release), Act::Finish);
     }
 
     #[test]
