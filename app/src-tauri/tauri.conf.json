@@ -15,8 +15,15 @@
         "title": "Echotype",
         "width": 800,
         "height": 600,
+        "minWidth": 720,
+        "minHeight": 520,
         "visible": false,
-        "center": true
+        "center": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 16, "y": 18 },
+        "transparent": true,
+        "windowEffects": { "effects": ["sidebar"], "state": "followsWindowActiveState" }
       }
     ],
     "security": {
