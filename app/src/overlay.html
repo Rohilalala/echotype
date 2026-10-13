@@ -10,59 +10,67 @@
   body {
     display: grid;
     place-items: center;
-    font: 500 13px/1 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+    font: 500 11px/1 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
     -webkit-user-select: none;
     user-select: none;
     cursor: default;
   }
+  /* One small capsule: 20 px while listening, 22 px for any line of text. No border; a soft shadow
+     carries it on light wallpapers, the 75% black fill on dark ones. */
   .pill {
     display: flex;
     align-items: center;
-    gap: 10px;
-    height: 36px;
-    padding: 0 16px 0 13px;
-    border-radius: 18px;
-    background: rgba(24, 24, 26, 0.9);
-    color: #f4f4f5;
-    /* inner hairline reads on dark wallpapers, outer one and the shadow on light ones */
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12), 0 0 0 0.5px rgba(0, 0, 0, 0.5), 0 6px 18px rgba(0, 0, 0, 0.28);
-    -webkit-backdrop-filter: blur(16px) saturate(1.4);
-    backdrop-filter: blur(16px) saturate(1.4);
+    gap: 6px;
+    height: 22px;
+    max-width: 240px;
+    padding: 0 10px;
+    box-sizing: border-box;
+    border-radius: 11px;
+    background: rgba(0, 0, 0, 0.75);
+    color: rgba(255, 255, 255, 0.94);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.16);
+    -webkit-backdrop-filter: blur(12px) saturate(1.3);
+    backdrop-filter: blur(12px) saturate(1.3);
     opacity: 0;
-    transform: translateY(6px) scale(0.97);
-    transition: opacity 0.16s ease-out, transform 0.16s ease-out;
-    max-width: calc(100vw - 24px);
+    transform: translateY(4px) scale(0.97);
+    transition: opacity 0.14s ease-out, transform 0.14s ease-out;
   }
   .pill.on { opacity: 1; transform: none; }
-  /* the dot is the real microphone-live light: solid, no halo, no pulse */
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: #ff5a5f; flex: none; }
-  .meter { display: flex; align-items: center; gap: 2.5px; height: 18px; flex: none; }
-  .meter i { width: 3px; height: 100%; border-radius: 1.5px; background: #f4f4f5; transform: scaleY(0.14); transition: transform 0.09s linear; }
-  .label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: -0.005em; }
+  .pill[data-state="recording"]:not(.muted) { height: 20px; border-radius: 10px; padding: 0 8px; gap: 7px; }
 
-  [data-state="transcribing"] .dot, [data-state="cleaning"] .dot { background: #a3a3a9; }
-  [data-state="transcribing"] .meter i, [data-state="cleaning"] .meter i { transition: none; animation: wave 1s ease-in-out infinite; opacity: 0.85; }
-  [data-state="done"] .dot { background: #4cc77a; }
-  [data-state="done"] .meter, [data-state="error"] .meter { display: none; }
-  [data-state="error"] .dot { background: #f2a93b; }
-  [data-state="error"] .label { color: #ffd59a; }
-  .meter i:nth-child(2) { animation-delay: 0.08s; } .meter i:nth-child(3) { animation-delay: 0.16s; }
-  .meter i:nth-child(4) { animation-delay: 0.24s; } .meter i:nth-child(5) { animation-delay: 0.32s; }
-  .meter i:nth-child(6) { animation-delay: 0.40s; } .meter i:nth-child(7) { animation-delay: 0.48s; }
-  @keyframes wave { 0%, 100% { transform: scaleY(0.14); } 40% { transform: scaleY(0.55); } }
+  .wave { display: flex; align-items: center; gap: 2px; height: 12px; flex: none; }
+  .wave i { width: 1.5px; height: 100%; border-radius: 1px; background: currentColor; transform: scaleY(0.12); transition: transform 0.08s linear; }
+  .time { font-size: 10px; font-variant-numeric: tabular-nums; color: rgba(255, 255, 255, 0.62); flex: none; letter-spacing: 0.01em; }
+  .lock { width: 9px; height: 9px; flex: none; display: none; }
+  .lock svg { width: 9px; height: 9px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; display: block; }
+  .pill.locked .lock { display: block; }
+  /* The primary line keeps its words; the chip gives way first. */
+  .label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 0 auto; max-width: 100%; letter-spacing: 0; }
+  .chip { white-space: nowrap; color: rgba(255, 255, 255, 0.6); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .chip::before { content: "·"; margin-right: 6px; color: rgba(255, 255, 255, 0.35); }
+  .chip[data-chip="too_quiet"] { color: #ffd59a; }
+
+  /* Listening: waveform + time only. Everything else: one line of text, plus at most one chip. */
+  .pill[data-state="recording"]:not(.muted) .label, .pill[data-state="recording"] .chip { display: none; }
+  .pill:not([data-state="recording"]) .wave, .pill:not([data-state="recording"]) .time { display: none; }
+  .pill.muted .wave { display: none; }
+  .pill[data-state="error"] .label { color: #ffd59a; }
+  .pill[data-state="transcribing"] .label, .pill[data-state="cleaning"] .label { color: rgba(255, 255, 255, 0.8); }
+
   @media (prefers-reduced-motion: reduce) {
-    .pill { transform: none; transition: opacity 0.16s ease-out; }
-    .meter i { transition: none !important; animation: none !important; }
-    [data-state="transcribing"] .meter i, [data-state="cleaning"] .meter i { transform: scaleY(0.3); }
+    .pill { transform: none; transition: opacity 0.14s ease-out; }
+    .wave i { transition: none; }
   }
 </style>
 </head>
 <body>
   <div class="pill" id="pill" data-state="idle" role="status" aria-live="polite">
-    <span class="dot"></span>
-    <span class="meter" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+    <span class="lock" aria-label="Locked, hands-free"><svg viewBox="0 0 10 10"><rect x="1.5" y="4.5" width="7" height="4.5" rx="1"/><path d="M3 4.5V3a2 2 0 0 1 4 0v1.5"/></svg></span>
+    <span class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+    <span class="time" id="time"></span>
     <span class="label" id="label"></span>
+    <span class="chip" id="chip" hidden></span>
   </div>
 <script type="module" src="overlay.js"></script>
 </body>

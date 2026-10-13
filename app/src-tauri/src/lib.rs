@@ -831,7 +831,7 @@ async fn check_permissions() -> R<serde_json::Value> {
 
 #[tauri::command]
 async fn open_permission_settings(app: AppHandle, kind: String) -> R<()> {
-    if !matches!(kind.as_str(), "microphone" | "accessibility" | "input_monitoring") {
+    if !matches!(kind.as_str(), "microphone" | "accessibility" | "input_monitoring" | "keyboard") {
         return Err(format!("Unknown permission '{kind}'"));
     }
     let k = kind.clone();
@@ -884,7 +884,7 @@ async fn cloud_logout() -> R<()> {
 // ---------- app ----------
 
 fn create_overlay(app: &tauri::App) -> tauri::Result<()> {
-    let (w, h) = (220.0, 56.0);
+    let (w, h) = (260.0, 32.0);
     let overlay = WebviewWindowBuilder::new(app, "overlay", WebviewUrl::App("overlay.html".into()))
         .title("Echotype")
         .inner_size(w, h)
@@ -903,7 +903,7 @@ fn create_overlay(app: &tauri::App) -> tauri::Result<()> {
         let scale = m.scale_factor();
         let size = m.size().to_logical::<f64>(scale);
         let pos = m.position().to_logical::<f64>(scale);
-        overlay.set_position(tauri::LogicalPosition::new(pos.x + (size.width - w) / 2.0, pos.y + size.height - h - 96.0))?;
+        overlay.set_position(tauri::LogicalPosition::new(pos.x + (size.width - w) / 2.0, pos.y + size.height - h - 84.0))?;
     }
     overlay.set_ignore_cursor_events(true)?;
     Ok(())
