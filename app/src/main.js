@@ -521,39 +521,52 @@ function renderStt() {
 
 const fmtMB = mb => mb >= 1000 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
 
-function modelRow(m, { compact, pick } = {}) {
+const WAVE = '<path d="M2.5 6.5v3M5.25 4v8M8 2v12M10.75 5v6M13.5 7v2"/>';
+const DOWN = '<path d="M8 2.75v8.5M4.5 7.75 8 11.25l3.5-3.5"/>';
+const MORE = '<circle cx="3.5" cy="8" r=".9"/><circle cx="8" cy="8" r=".9"/><circle cx="12.5" cy="8" r=".9"/>';
+
+// One model, in one of the D8 states: not downloaded (round ↓), downloading (ring), failed (reason +
+// Retry), downloaded (Use, delete in the overflow menu), in use (✓). ponytail: no cancel while
+// downloading, the core has no command for it yet.
+function modelRow(m) {
   const inUse = S.stt.provider === 'local' && S.stt.local_model === m.id;
-  const p = progress[m.id];
+  const p = progress[m.id], err = modelErr[m.id];
   let actions;
   if (p != null) {
-    actions = [h('span', { className: 'bar', role: 'progressbar', 'aria-label': `Downloading ${m.label}`, 'aria-valuenow': Math.round(p * 100), 'data-progress': m.id }, h('i', { style: `transform:scaleX(${p})` })),
-      h('span', { className: 'pct', 'data-pct': m.id }, `${Math.round(p * 100)}%`)];
+    actions = [h('span', { className: 'pct', 'data-pct': m.id }, `${Math.round(p * 100)}%`),
+      h('span', { className: 'ring', role: 'progressbar', 'aria-label': `Downloading ${m.label}`, 'aria-valuenow': Math.round(p * 100), 'data-progress': m.id, style: `--p:${p}` })];
   } else if (!m.downloaded) {
-    actions = [h('button', { className: m.recommended ? 'btn primary' : 'btn', type: 'button', onclick: () => download(m.id) }, 'Download')];
-  } else if (inUse && !pick) {
+    actions = [err ? h('button', { className: 'btn', type: 'button', onclick: () => download(m.id) }, 'Retry')
+      : h('button', { className: 'round', type: 'button', title: 'Download', 'aria-label': `Download ${m.label}, ${fmtMB(m.size_mb)}`, onclick: () => download(m.id) }, svg(DOWN))];
+  } else if (inUse) {
     actions = [h('span', { className: 'in-use' }, svg(CHECK), 'In use')];
   } else {
-    const del = !pick && h('button', { className: 'btn quiet danger', type: 'button' }, 'Delete');
-    if (del) del.onclick = async () => {
-      if (!del.dataset.armed) { del.dataset.armed = 1; del.textContent = 'Confirm delete'; return setTimeout(() => { del.textContent = 'Delete'; delete del.dataset.armed; }, 3000); }
+    const menu = h('div', { id: `menu-${m.id}`, className: 'menu', popover: 'auto', role: 'menu', onbeforetoggle: e => {
+      if (e.newState !== 'open') return;
+      const r = more.getBoundingClientRect();
+      menu.style.top = `${r.bottom + 4}px`;
+      menu.style.right = `${innerWidth - r.right}px`;
+    } }, h('button', { className: 'menu-item danger', type: 'button', role: 'menuitem', onclick: async () => {
+      menu.hidePopover();
       try { await invoke('delete_model', { id: m.id }); } catch (e) { modelErr[m.id] = String(e); }
       await refreshModels();
-    };
-    actions = [del, pick ? (inUse ? h('span', { className: 'in-use' }, svg(CHECK), 'Selected') : h('button', { className: 'btn', type: 'button', onclick: () => useModel(m.id) }, 'Use'))
-      : h('button', { className: 'btn', type: 'button', onclick: () => useModel(m.id) }, 'Use')];
+    } }, 'Delete model'));
+    const more = h('button', { className: 'icon-btn', type: 'button', popovertarget: menu.id, 'aria-haspopup': 'menu', 'aria-label': `More for ${m.label}` }, svg(MORE));
+    actions = [h('button', { className: 'btn', type: 'button', onclick: () => useModel(m.id) }, 'Use'), more, menu];
   }
   return h('div', { className: 'row model' },
+    h('span', { className: 'tile', 'aria-hidden': 'true' }, svg(WAVE)),
     h('span', { className: 'row-text' },
       h('span', { className: 'model-name' }, m.label,
         m.recommended && h('span', { className: 'tag rec' }, 'Recommended'),
         m.english_only && h('span', { className: 'tag' }, 'English only'),
         m.translates && h('span', { className: 'tag' }, 'Translates')),
+      m.note && h('span', { className: 'row-desc' }, m.note),
       h('span', { className: 'model-meta' },
         h('span', {}, fmtMB(m.size_mb)),
         h('span', {}, `${fmtMB(m.ram_mb)} memory`),
         !m.fits && h('span', { className: 'badge warn' }, 'Needs more memory')),
-      !compact && m.note && h('span', { className: 'row-desc' }, m.note),
-      modelErr[m.id] && h('span', { className: 'row-desc error', role: 'alert' }, modelErr[m.id])),
+      err && h('span', { className: 'row-desc error', role: 'alert' }, err)),
     h('span', { className: 'actions' }, actions));
 }
 
@@ -1077,7 +1090,7 @@ listen('model-download', ({ payload: p }) => {
   progress[p.id] = frac;
   const bars = $$(`[data-progress="${p.id}"]`);
   if (!had || !bars.length) return renderModels();
-  bars.forEach(b => { b.firstChild.style.transform = `scaleX(${frac})`; b.setAttribute('aria-valuenow', Math.round(frac * 100)); });
+  bars.forEach(b => { b.style.setProperty('--p', frac); b.setAttribute('aria-valuenow', Math.round(frac * 100)); });
   $$(`[data-pct="${p.id}"]`).forEach(el => (el.textContent = `${Math.round(frac * 100)}%`));
   renderObModel();
   renderHero(); // the readiness line counts the download
