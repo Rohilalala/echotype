@@ -42,6 +42,8 @@ whisper-rs = { version = "0.16", features = ["metal"] }
 libc = "0.2"
 core-graphics = "0.25"
 core-foundation = "0.10"
+# Pinned: the pill is a non-activating NSPanel; 2.1.1 is the version the panel spike verified.
+tauri-nspanel = "=2.1.1"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 whisper-rs = "0.16"

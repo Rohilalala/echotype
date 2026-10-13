@@ -1,11 +1,15 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "overlay",
-  "description": "Recording overlay: listens to dictation events only and may call no Echotype command",
+  "description": "The pill: listens to dictation events and may call the pill commands only",
   "windows": [
     "overlay"
   ],
   "permissions": [
-    "core:event:default"
+    "core:event:default",
+    "allow-pill-click",
+    "allow-pill-cancel",
+    "allow-pill-open",
+    "allow-pill-menu"
   ]
 }

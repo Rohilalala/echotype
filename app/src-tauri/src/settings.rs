@@ -55,6 +55,12 @@ pub struct Settings {
     pub sounds: bool,
     /// One-time notices already dismissed: "upgrade_offer", "bluetooth_tip", "no_cleanup_banner".
     pub dismissed: Vec<String>,
+    /// The idle pill (macOS): a thin bar bottom-centre while not dictating. On for upgraders too.
+    pub pill_idle: bool,
+    /// "Hide for 1 hour": the idle pill stays away until this time (ms since the epoch); 0 = not hidden.
+    pub pill_hidden_until: u64,
+    /// Let screenshots and screen sharing see the pill. Off = content protection (best effort).
+    pub pill_in_recordings: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -118,6 +124,9 @@ impl Default for Settings {
             autostart: false,
             sounds: true,
             dismissed: vec![],
+            pill_idle: true,
+            pill_hidden_until: 0,
+            pill_in_recordings: false,
         }
     }
 }
@@ -424,6 +433,7 @@ mod tests {
         assert!(!s.autostart, "upgraders are offered launch at login, not opted in");
         assert_eq!(s.talk_key, "accelerator");
         assert!(s.sounds && s.dismissed.is_empty());
+        assert!(s.pill_idle && s.pill_hidden_until == 0 && !s.pill_in_recordings, "the idle pill is on for upgraders, hidden from capture");
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
     }

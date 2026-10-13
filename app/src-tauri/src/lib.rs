@@ -3,6 +3,7 @@ mod audio;
 mod cleanup;
 mod cloud;
 mod hotkey;
+mod pill;
 mod platform;
 mod settings;
 mod stt;
@@ -12,12 +13,12 @@ use hotkey::{Act, Ev};
 use serde::Serialize;
 use settings::{HistoryEntry, Settings};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
 
@@ -37,7 +38,15 @@ struct AppState {
     dictation: mpsc::Sender<Cmd>,
     /// Running local API: port, the token it accepts, and the sender whose drop shuts it down.
     api: Mutex<Option<(u16, String, tokio::sync::oneshot::Sender<()>)>>,
-    overlay_gen: AtomicU64,
+    /// What the pill shows; `emit_state` feeds it and the pill loop ticks it.
+    pill: Mutex<pill::Pill>,
+    /// Wakes the pill loop after a state, settings or focus change.
+    pill_wake: mpsc::Sender<()>,
+    /// Echotype's settings window is the key window (D14: the pill steps aside).
+    main_key: AtomicBool,
+    clicks: Mutex<pill::Debounce>,
+    /// The tray's hide/show pill item (macOS), relabelled by the pill loop.
+    tray_pill: Mutex<Option<MenuItem<tauri::Wry>>>,
     /// The last recording whose transcription failed, kept so `retry_last` can run it again.
     // ponytail: only the last one, in memory; a failed-recordings folder if users need more than one retry.
     last_failed: Mutex<Option<Vec<f32>>>,
@@ -104,28 +113,13 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 // ---------- dictation ----------
 
+/// Every window hears every state, except that the pill keeps a more important notice still on
+/// screen (D2): then only the settings window gets the new one. The pill loop does the rest.
 fn emit_state(app: &AppHandle, s: DictationState) {
-    let busy = matches!(s.state, "recording" | "transcribing" | "cleaning");
-    // A hint can come with no recording before it ("Nothing to paste yet"), so anything but idle shows.
-    let show = s.state != "idle";
-    // A chip is a second thing to read, so the result stays up longer.
-    let linger = Duration::from_millis(if s.chip.is_some() { 2500 } else { 1200 });
-    let _ = app.emit("dictation-state", s);
     let st = state(app);
-    let generation = st.overlay_gen.fetch_add(1, Ordering::SeqCst) + 1;
-    let Some(overlay) = app.get_webview_window("overlay") else { return };
-    if show {
-        let _ = overlay.show();
-    }
-    if !busy {
-        let app = app.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(linger);
-            if state(&app).overlay_gen.load(Ordering::SeqCst) == generation {
-                let _ = overlay.hide();
-            }
-        });
-    }
+    let to_pill = lock(&st.pill).on_state(&s, Instant::now());
+    let _ = if to_pill { app.emit("dictation-state", &s) } else { app.emit_to("main", "dictation-state", &s) };
+    let _ = st.pill_wake.send(());
 }
 
 fn simple(state: &'static str) -> DictationState {
@@ -344,6 +338,7 @@ fn start_recording(app: &AppHandle, s: &Settings, id: u64) -> Result<Live, Dicta
     let (a, st, lost2, started, sent) = (app.clone(), stats.clone(), lost.clone(), Instant::now(), AtomicBool::new(false));
     let rec = audio::Recorder::start(s.input_device.clone(), move |db, gone| {
         let level = lock(&st).push(db);
+        lock(&state(&a).pill).set_muted(level.muted);
         let _ = a.emit("audio-level", level);
         if gone && !lost2.swap(true, Ordering::SeqCst) {
             send(&a, Cmd::Lost(id));
@@ -625,6 +620,12 @@ fn show_main(app: &AppHandle) {
     }
 }
 
+/// Opens the settings window on `page` (pill menu, notice actions).
+fn open_page(app: &AppHandle, page: &str) {
+    show_main(app);
+    let _ = app.emit_to("main", "navigate", page);
+}
+
 // ---------- commands (the UI contract) ----------
 
 type R<T> = Result<T, String>;
@@ -715,6 +716,7 @@ fn commit_settings(app: &AppHandle, change: impl FnOnce(&Settings) -> Settings) 
         apply_talk_key(app, &new);
     }
     let _ = app.emit("settings-changed", &new);
+    let _ = state(app).pill_wake.send(());
     apply_local_api(app, &new)?;
     Ok(warning)
 }
@@ -853,6 +855,37 @@ async fn toggle_dictation(app: AppHandle) -> R<()> {
     state(&app).dictation.send(Cmd::Key(Ev::Toggle)).map_err(|e| e.to_string())
 }
 
+// ---------- the pill (the only commands the overlay may call) ----------
+
+/// A click on the idle pill starts a hands-free recording; on a recording (or ✓) it finishes.
+#[tauri::command]
+async fn pill_click(app: AppHandle) -> R<()> {
+    if lock(&state(&app).clicks).accept(Instant::now()) {
+        send(&app, Cmd::Key(Ev::Toggle));
+    }
+    Ok(())
+}
+
+/// ✕ on the recording pill.
+#[tauri::command]
+async fn pill_cancel(app: AppHandle) -> R<()> {
+    send(&app, Cmd::Key(Ev::Cancel));
+    Ok(())
+}
+
+/// A notice with an action: Home shows it with the button that fixes it.
+#[tauri::command]
+async fn pill_open(app: AppHandle) -> R<()> {
+    open_page(&app, "home");
+    Ok(())
+}
+
+/// Right-click on the idle pill: the native menu, built and handled in Rust.
+#[tauri::command]
+async fn pill_menu(app: AppHandle, window: tauri::WebviewWindow) -> R<()> {
+    pill::show_menu(&app, &window).map_err(|e| e.to_string())
+}
+
 /// Talk key and shortcut health for Settings and onboarding, re-checked each time it is asked
 /// (on window focus and when Settings opens), so a grant or a Globe-key change applies at once.
 #[tauri::command]
@@ -961,40 +994,21 @@ async fn cloud_logout() -> R<()> {
 
 // ---------- app ----------
 
-fn create_overlay(app: &tauri::App) -> tauri::Result<()> {
-    let (w, h) = (260.0, 32.0);
-    let overlay = WebviewWindowBuilder::new(app, "overlay", WebviewUrl::App("overlay.html".into()))
-        .title("Echotype")
-        .inner_size(w, h)
-        .decorations(false)
-        .transparent(true)
-        .shadow(false)
-        .always_on_top(true)
-        .visible_on_all_workspaces(true)
-        .skip_taskbar(true)
-        .resizable(false)
-        .focused(false)
-        .focusable(false)
-        .visible(false)
-        .build()?;
-    if let Some(m) = overlay.primary_monitor()? {
-        let scale = m.scale_factor();
-        let size = m.size().to_logical::<f64>(scale);
-        let pos = m.position().to_logical::<f64>(scale);
-        overlay.set_position(tauri::LogicalPosition::new(pos.x + (size.width - w) / 2.0, pos.y + size.height - h - 84.0))?;
-    }
-    overlay.set_ignore_cursor_events(true)?;
-    Ok(())
-}
-
 fn create_tray(app: &tauri::App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Echotype", true, None::<&str>)?;
     let toggle = MenuItem::with_id(app, "toggle", "Start/Stop dictation", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &toggle, &quit])?;
+    // The idle pill is macOS-only, and so is its hide/show item; the pill loop sets its label.
+    if cfg!(target_os = "macos") {
+        let item = MenuItem::with_id(app, "pill", "Hide pill for 1 hour", true, None::<&str>)?;
+        menu.insert_items(&[&item, &PredefinedMenuItem::separator(app)?], 2)?;
+        *lock(&state(app.handle()).tray_pill) = Some(item);
+    }
     let mut tray = TrayIconBuilder::with_id("main").tooltip("Echotype").menu(&menu).on_menu_event(|app, e| match e.id.as_ref() {
         "open" => show_main(app),
         "toggle" => send(app, Cmd::Key(Ev::Toggle)),
+        "pill" => pill::on_tray(app),
         "quit" => app.exit(0),
         _ => {}
     });
@@ -1008,7 +1022,10 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     stt::quiet_whisper_logs();
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_nspanel::init());
+    let app = builder
         .plugin(tauri_plugin_single_instance::init(|app, _, _| show_main(app)))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
@@ -1034,19 +1051,24 @@ pub fn run() {
         )
         .setup(|app| {
             let s = Settings::load();
+            let (pill_wake, woken) = mpsc::channel();
             app.manage(AppState {
                 settings: Mutex::new(s.clone()),
                 dictation: spawn_dictation(app.handle().clone()),
                 api: Mutex::new(None),
-                overlay_gen: AtomicU64::new(0),
+                pill: Mutex::new(pill::Pill::default()),
+                pill_wake,
+                main_key: AtomicBool::new(false),
+                clicks: Mutex::new(pill::Debounce::default()),
+                tray_pill: Mutex::new(None),
                 last_failed: Mutex::new(None),
                 last_output: Mutex::new(None),
                 downloads: Mutex::new(HashMap::new()),
                 shortcut_errors: Mutex::new(vec![]),
                 recording: AtomicBool::new(false),
             });
-            create_overlay(app)?;
             create_tray(app)?;
+            pill::run(app.handle().clone(), pill::create(app, &s)?, woken);
             for key in shortcuts(&s).iter().filter(|k| !k.is_empty()) {
                 if let Err(e) = swap_hotkey(app.handle(), "", key) {
                     eprintln!("echotype: {e}");
@@ -1080,13 +1102,18 @@ pub fn run() {
             std::thread::spawn(move || stt::warm_up(&s));
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event
-                && window.label() == "main"
-            {
+        .on_menu_event(|app, e| pill::on_menu(app, e.id.as_ref()))
+        .on_window_event(|window, event| match event {
+            WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
                 api.prevent_close();
                 let _ = window.hide();
             }
+            WindowEvent::Focused(on) if window.label() == "main" => {
+                let st = state(window.app_handle());
+                st.main_key.store(*on, Ordering::SeqCst);
+                let _ = st.pill_wake.send(());
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,
@@ -1116,6 +1143,10 @@ pub fn run() {
             cloud_checkout,
             cloud_portal,
             cloud_logout,
+            pill_click,
+            pill_cancel,
+            pill_open,
+            pill_menu,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Echotype");
@@ -1198,7 +1229,7 @@ mod tests {
     /// Under the app manifest a command missing from a capability fails only at runtime, in the
     /// window, so check generate_handler!, build.rs COMMANDS and both capability files agree.
     #[test]
-    fn capabilities_list_every_command_and_the_overlay_none() {
+    fn capabilities_list_every_command_and_the_overlay_only_the_pill() {
         let lib = include_str!("lib.rs");
         let block = lib.split("tauri::generate_handler![").nth(1).unwrap().split(']').next().unwrap();
         let handler: Vec<&str> = block.split(',').map(str::trim).filter(|c| !c.is_empty()).collect();
@@ -1210,12 +1241,14 @@ mod tests {
             let v: serde_json::Value = serde_json::from_str(json).unwrap();
             v["permissions"].as_array().unwrap().iter().filter_map(|p| p.as_str().map(String::from)).collect()
         };
-        let main = perms(include_str!("../capabilities/default.json"));
+        let (main, overlay) = (perms(include_str!("../capabilities/default.json")), perms(include_str!("../capabilities/overlay.json")));
         for c in &handler {
-            assert!(main.contains(&format!("allow-{}", c.replace('_', "-"))), "capabilities/default.json misses {c}");
+            let p = format!("allow-{}", c.replace('_', "-"));
+            // F3: the pill's commands go to the overlay only, everything else to the settings window only.
+            let (to, not) = if c.starts_with("pill_") { (&overlay, &main) } else { (&main, &overlay) };
+            assert!(to.contains(&p) && !not.contains(&p), "{c} is in the wrong capability file");
         }
-        let overlay = perms(include_str!("../capabilities/overlay.json"));
-        assert!(overlay.iter().all(|p| p.starts_with("core:event:")), "the overlay may only listen to events: {overlay:?}");
+        assert!(overlay.iter().all(|p| p.starts_with("core:event:") || p.starts_with("allow-pill-")), "the overlay may only listen and call pill commands: {overlay:?}");
     }
 
     #[test]

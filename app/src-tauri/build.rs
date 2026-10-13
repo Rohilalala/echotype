@@ -1,6 +1,6 @@
 /// Every app command. With an app manifest, a window can call only the commands its capability
 /// file allows: capabilities/default.json grants these to the settings window, and the overlay
-/// gets none. lib.rs tests keep this list, generate_handler! and the capability files in sync.
+/// gets only the pill_* ones. lib.rs tests keep this list, generate_handler! and the capability files in sync.
 const COMMANDS: &[&str] = &[
     "get_settings",
     "save_settings",
@@ -29,6 +29,10 @@ const COMMANDS: &[&str] = &[
     "cloud_checkout",
     "cloud_portal",
     "cloud_logout",
+    "pill_click",
+    "pill_cancel",
+    "pill_open",
+    "pill_menu",
 ];
 
 fn main() {
