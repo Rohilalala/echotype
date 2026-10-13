@@ -126,6 +126,7 @@ function changed(p) {
   if (p === 'cleanup.enabled') { setCleanupInert(); renderCloud(); refreshCloud(); }
   if (p.startsWith('local_api')) refreshApi();
   if (p === 'history_enabled') renderHistory();
+  if (p === 'pill_idle') renderPill();
 }
 
 // ---------- navigation ----------
@@ -840,7 +841,26 @@ function renderStartup() {
   $('#autostartDesc').textContent = ok ? 'Echotype starts quietly in the menu bar.' : 'Move Echotype to your Applications folder first.';
   $('#obAutostartRow').hidden = !ok;
   $('#talkRow').hidden = $('#obTalkRow').hidden = $('#soundsRow').hidden = !isMac; // talk keys and sounds are macOS-only
+  $('#pillTitle').hidden = $('#pillGroup').hidden = !isMac; // so is the idle pill
 }
+
+// "Hide for 1 hour" shows until when (D12); the hour ends by itself, so re-render then.
+let pillTimer;
+function renderPill() {
+  const until = S.pill_hidden_until || 0, hidden = until > Date.now();
+  const at = new Date(until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  $('#pillHidden').textContent = !S.pill_idle ? 'The pill shows only while you dictate.'
+    : hidden ? `Hidden until ${at}. It still shows while you dictate.` : 'The pill still shows while you dictate.';
+  $('#pillHide').textContent = hidden ? 'Show now' : 'Hide';
+  $('#pillHide').disabled = !S.pill_idle;
+  clearTimeout(pillTimer);
+  if (hidden) pillTimer = setTimeout(renderPill, Math.min(until - Date.now() + 500, 2 ** 31 - 1));
+}
+$('#pillHide').addEventListener('click', () => {
+  S.pill_hidden_until = S.pill_hidden_until > Date.now() ? 0 : Date.now() + 3600 * 1000;
+  save();
+  renderPill();
+});
 
 async function refreshApi() {
   $('#apiBody').hidden = !S.local_api.enabled;
@@ -1028,6 +1048,9 @@ listen('model-download', ({ payload: p }) => {
   renderObModel();
 });
 
+// The pill's menu (History, Settings) and its notices open a page here.
+listen('navigate', ({ payload }) => { if ($('#onboard').hidden) go(payload); });
+
 listen('tauri://drag-enter', () => $('#drop').classList.add('over'));
 listen('tauri://drag-leave', () => $('#drop').classList.remove('over'));
 listen('tauri://drag-drop', ({ payload }) => {
@@ -1054,6 +1077,7 @@ recent = await invoke('get_history', { limit: 3 }).catch(() => []);
 
 function renderAll() {
   renderHotkey();
+  renderPill();
   renderRaw();
   renderUpgrade();
   renderStartup();

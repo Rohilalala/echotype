@@ -209,6 +209,16 @@
           <span class="actions"><button class="hotkey" data-shortcut="copy_last_hotkey" type="button" aria-labelledby="copyLabel"></button><button class="icon-btn" data-clear="copy_last_hotkey" type="button" aria-label="Turn off the copy last shortcut"></button></span></div>
       </div>
 
+      <h2 class="group-title" id="pillTitle">Pill</h2>
+      <div class="group" id="pillGroup">
+        <label class="row"><span class="row-text"><span class="row-title">Show pill when idle</span><span class="row-desc">A thin bar at the bottom of the screen. Click it to dictate, right-click for options.</span></span>
+          <input type="checkbox" class="switch" data-bind="pill_idle" /></label>
+        <div class="row" id="pillHideRow"><span class="row-text"><span class="row-title">Hide for 1 hour</span><span class="row-desc" id="pillHidden" role="status"></span></span>
+          <button class="btn" id="pillHide" type="button"></button></div>
+        <label class="row"><span class="row-text"><span class="row-title">Show pill in screen recordings</span><span class="row-desc">Off keeps it out of screenshots and screen sharing. Some screen-sharing apps may still show it.</span></span>
+          <input type="checkbox" class="switch" data-bind="pill_in_recordings" /></label>
+      </div>
+
       <h2 class="group-title">Audio and text</h2>
       <div class="group">
         <label class="row"><span class="row-text"><span class="row-title">Microphone <span class="info" id="btInfo" hidden tabindex="0" role="img" aria-label="Bluetooth microphone" title="Bluetooth microphones such as AirPods switch to a low-quality mode while recording, which makes quiet speech harder to catch. A built-in or USB mic works better."></span></span><span class="row-desc error" id="micError" role="alert" hidden></span></span>

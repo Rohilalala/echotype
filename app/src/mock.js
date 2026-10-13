@@ -19,6 +19,7 @@ const settings = {
   paste_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+V',
   copy_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+C',
   autostart: !q.has('upgrade'), sounds: true,
+  pill_idle: !q.has('pilloff'), pill_hidden_until: q.has('pillhidden') ? now + 42 * 60000 : 0, pill_in_recordings: false,
   dismissed: q.has('upgrade') || q.has('onboarding') ? [] : ['upgrade_offer'],
 };
 if (q.has('bt')) settings.input_device = 'AirPods Pro';
@@ -122,6 +123,10 @@ const commands = {
     busy = false;
     return null;
   },
+  pill_click: () => (busy ? null : commands.toggle_dictation()),
+  pill_cancel: () => null,
+  pill_open: () => null,
+  pill_menu: () => null,
   check_permissions: () => ({ microphone: 'granted', accessibility: !q.has('noaccess') }),
   open_permission_settings: () => null,
   cloud_start_login: async ({ email }) => {
@@ -174,6 +179,11 @@ addEventListener('drop', e => {
   e.preventDefault();
   emit('tauri://drag-drop', { paths: [...e.dataTransfer.files].map(f => `/Users/you/Downloads/${f.name}`) });
 });
+
+// overlay.html?view=idle|hint and &hover=1: what pill.rs would send (the idle bar, its hint, ✕/✓ on hover).
+if (q.has('view') || q.has('hover')) {
+  setTimeout(() => emit('pill', { active: q.has('state'), hover: q.has('hover'), expand: q.get('view') === 'hint', hint: 'Hold ⌥ Space or click to dictate' }), 60);
+}
 
 // overlay.html?state=<state>&chip=<chip> (and index.html?state=... for the Home hero) renders any
 // dictation state through the real overlay/Home code: state = recording|transcribing|cleaning|done|error|hint,
