@@ -1248,7 +1248,8 @@ mod tests {
             let (to, not) = if c.starts_with("pill_") { (&overlay, &main) } else { (&main, &overlay) };
             assert!(to.contains(&p) && !not.contains(&p), "{c} is in the wrong capability file");
         }
-        assert!(overlay.iter().all(|p| p.starts_with("core:event:") || p.starts_with("allow-pill-")), "the overlay may only listen and call pill commands: {overlay:?}");
+        // Listen only: emitting would let the overlay forge events (drag-drop, navigate) at the settings window.
+        assert!(overlay.iter().all(|p| ["core:event:allow-listen", "core:event:allow-unlisten"].contains(&p.as_str()) || p.starts_with("allow-pill-")), "the overlay may only listen and call pill commands: {overlay:?}");
     }
 
     #[test]

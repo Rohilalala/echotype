@@ -6,7 +6,8 @@
     "overlay"
   ],
   "permissions": [
-    "core:event:default",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
     "allow-pill-click",
     "allow-pill-cancel",
     "allow-pill-open",

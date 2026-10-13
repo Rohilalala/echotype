@@ -2,7 +2,7 @@ if (!window.__TAURI__) await import('./mock.js');
 const { listen } = window.__TAURI__.event;
 const { invoke } = window.__TAURI__.core;
 const pill = document.getElementById('pill'), label = document.getElementById('label');
-const chipEl = document.getElementById('chip'), time = document.getElementById('time');
+const chipEl = document.getElementById('chip'), time = document.getElementById('time'), secs = document.getElementById('secs');
 const bars = [...pill.querySelectorAll('.wave i')];
 const WEIGHT = [0.35, 0.55, 0.75, 0.9, 1, 0.95, 1, 0.9, 0.75, 0.55, 0.35];
 const CHIP = { too_quiet: 'Too quiet, move the mic closer', quiet: 'Quiet voice', no_cleanup: 'No cleanup' };
@@ -26,8 +26,8 @@ function primary(p) {
 function tick() {
   const s = Math.floor((Date.now() - since) / 1000);
   if (cur.state === 'recording') time.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-  // D11: transcribing and cleaning show their seconds once they pass 3.
-  else if (!muted) label.textContent = primary(cur) + (s >= 3 ? ` ${s}s` : '');
+  // D11: transcribing and cleaning show their seconds once they pass 3 (outside the live region).
+  else secs.textContent = s >= 3 ? `${s}s` : '';
 }
 
 function render() {
@@ -57,6 +57,7 @@ listen('dictation-state', ({ payload: p }) => {
   if (p.state !== was) {
     clearInterval(clock);
     since = Date.now();
+    secs.textContent = '';
     if (['recording', 'transcribing', 'cleaning'].includes(p.state)) clock = setInterval(tick, 250);
   }
   render();
@@ -77,21 +78,23 @@ listen('audio-level', ({ payload }) => {
   });
 });
 
-// A click counts only when the button goes down and up on the capsule (D1). The window takes
-// the mouse only over the capsule, and never focus, so the app being dictated into keeps it.
+// A click counts only when the button goes down and up on the capsule (D1). pill.rs lets the
+// mouse through to this window only over the capsule's hit area (48x14 around the 4 px idle
+// bar), so anywhere in the window counts as the capsule; never focus, so the app being
+// dictated into keeps it.
 let downOn = null;
-pill.addEventListener('mousedown', e => { if (e.button === 0) downOn = e.target.closest('[data-act]') || pill; });
+addEventListener('mousedown', e => { if (e.button === 0) downOn = e.target.closest('[data-act]') || pill; });
 addEventListener('mouseup', e => {
   const target = downOn;
   downOn = null;
-  if (e.button !== 0 || !target || !pill.contains(e.target) || (e.target.closest('[data-act]') || pill) !== target) return;
+  if (e.button !== 0 || !target || (e.target.closest('[data-act]') || pill) !== target) return;
   const act = target.dataset?.act;
   const active = pill.classList.contains('active');
   if (act === 'cancel') invoke('pill_cancel');
   else if (active && cur.action && cur.state !== 'recording') invoke('pill_open');
   else if (!active || ['recording', 'done', 'hint'].includes(cur.state)) invoke('pill_click');
 });
-pill.addEventListener('contextmenu', e => {
+addEventListener('contextmenu', e => {
   e.preventDefault();
   if (!pill.classList.contains('active')) invoke('pill_menu');
 });

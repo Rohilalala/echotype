@@ -846,9 +846,10 @@ function renderStartup() {
 
 // "Hide for 1 hour" shows until when (D12); the hour ends by itself, so re-render then.
 let pillTimer;
+const HIDE_MS = 3600 * 1000; // pill.rs HIDE_FOR
 function renderPill() {
   const until = S.pill_hidden_until || 0, hidden = until > Date.now();
-  const at = new Date(until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const at = new Date(until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); // as the tray says it
   $('#pillHidden').textContent = !S.pill_idle ? 'The pill shows only while you dictate.'
     : hidden ? `Hidden until ${at}. It still shows while you dictate.` : 'The pill still shows while you dictate.';
   $('#pillHide').textContent = hidden ? 'Show now' : 'Hide';
@@ -857,7 +858,7 @@ function renderPill() {
   if (hidden) pillTimer = setTimeout(renderPill, Math.min(until - Date.now() + 500, 2 ** 31 - 1));
 }
 $('#pillHide').addEventListener('click', () => {
-  S.pill_hidden_until = S.pill_hidden_until > Date.now() ? 0 : Date.now() + 3600 * 1000;
+  S.pill_hidden_until = S.pill_hidden_until > Date.now() ? 0 : Date.now() + HIDE_MS;
   save();
   renderPill();
 });

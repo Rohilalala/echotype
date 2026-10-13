@@ -34,7 +34,6 @@
     color: rgba(255, 255, 255, 0.94);
     box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18), 0 1px 4px rgba(0, 0, 0, 0.12);
     overflow: hidden;
-    transition: width 0.14s ease-out, height 0.14s ease-out, padding 0.14s ease-out;
   }
   .pill > * { display: none; }
   /* Idle, hovered for 200 ms: the hint. */
@@ -42,14 +41,15 @@
   .pill.expand .label { display: block; }
   /* Any dictation state: a line of text plus at most one chip. */
   .pill.active { width: auto; height: 22px; padding: 0 10px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.16); }
-  .pill.active .label { display: block; }
+  .pill.active .label, .pill.active .secs { display: block; }
+  .secs { white-space: nowrap; flex: none; color: rgba(255, 255, 255, 0.62); font-variant-numeric: tabular-nums; }
   .pill.active .chip:not([hidden]) { display: block; }
   /* Listening: ✕, waveform, timer (a lock glyph in front once hands-free), ✓. */
   .pill.active[data-state="recording"] { width: 100px; height: 20px; padding: 0 2px; gap: 0; justify-content: space-between; border-radius: 10px; }
   .pill.active[data-state="recording"].locked { width: 112px; }
   .pill.active[data-state="recording"] .label, .pill.active[data-state="recording"] .chip { display: none; }
   .pill.active[data-state="recording"] :is(.btn, .wave, .meta) { display: flex; }
-  .pill.active[data-state="recording"].muted { width: auto; height: 22px; gap: 4px; }
+  .pill.active[data-state="recording"].muted { width: auto; height: 22px; gap: 4px; padding: 0 10px; }
   .pill.active[data-state="recording"].muted .wave, .pill.active[data-state="recording"].muted .meta { display: none; }
   .pill.active[data-state="recording"].muted .label { display: block; }
 
@@ -82,16 +82,17 @@
   .pill[data-state="transcribing"] .label, .pill[data-state="cleaning"] .label { color: rgba(255, 255, 255, 0.8); }
 
   @media (prefers-reduced-motion: reduce) {
-    .pill, .btn, .wave i { transition: none; }
+    .btn, .wave i { transition: none; }
   }
 </style>
 </head>
 <body>
-  <div class="pill" id="pill" data-state="idle" role="button" aria-label="Start dictation">
+  <div class="pill" id="pill" data-state="idle" role="group" aria-label="Start dictation">
     <button class="btn x" type="button" data-act="cancel" aria-label="Cancel dictation" title="Cancel"><svg viewBox="0 0 8 8"><path d="M1 1l6 6M7 1L1 7"/></svg></button>
     <span class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
     <span class="meta"><span class="lock" role="img" aria-label="Locked, hands-free"><svg viewBox="0 0 10 10"><rect x="1.5" y="4.5" width="7" height="4.5" rx="1"/><path d="M3 4.5V3a2 2 0 0 1 4 0v1.5"/></svg></span><span class="time" id="time"></span></span>
     <span class="label" id="label" role="status" aria-live="polite"></span>
+    <span class="secs" id="secs" aria-hidden="true"></span>
     <span class="chip" id="chip" hidden></span>
     <button class="btn ok" type="button" data-act="finish" aria-label="Finish dictation" title="Finish"><svg viewBox="0 0 8 8"><path d="M1 4.2l2 2L7 1.8"/></svg></button>
   </div>

@@ -384,6 +384,8 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
         let (mut at, mut placed_on): ((f64, f64), Option<Rect>) = ((0.0, 0.0), None);
         let (mut emitted, mut protected, mut tray_text): (Option<View>, Option<bool>, String) = (None, None, String::new());
         let mut monitors: Option<(Instant, Vec<Screen>, f64)> = None;
+        // The Dock's settings cost three `defaults` processes, so they are re-read once a minute at most.
+        let mut dock: Option<(Instant, f64)> = None;
         loop {
             let now = Instant::now();
             let s = crate::current_settings(&app);
@@ -414,7 +416,10 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
                     && (!shown || (!active && !expanded))
                     && placed_on != Some(t.work)
                 {
-                    at = place(t.work, read_dock());
+                    if dock.is_none_or(|(t, _)| now.duration_since(t) > Duration::from_secs(60)) {
+                        dock = Some((now, read_dock()));
+                    }
+                    at = place(t.work, dock.map_or(0.0, |(_, d)| d));
                     let _ = win.set_position(LogicalPosition::new(at.0, at.1));
                     placed_on = Some(t.work);
                 }
@@ -726,6 +731,14 @@ mod tests {
         assert_eq!(dock_offset(true, Some("left"), Some(49.0)), 0.0);
         let work = Rect { x: 0.0, y: 25.0, w: 1512.0, h: 957.0 };
         assert_eq!(place(work, 65.0).1, place(work, 0.0).1 - 65.0);
+    }
+
+    #[test]
+    fn the_menu_offers_the_languages_settings_offers() {
+        let js = include_str!("../../src/main.js");
+        let list = js.split("const LANGS = [").nth(1).unwrap().split("];").next().unwrap();
+        let codes: Vec<&str> = list.split("['").skip(1).map(|e| e.split('\'').next().unwrap()).collect();
+        assert_eq!(codes, LANGS.map(|(c, _)| c).to_vec());
     }
 
     #[test]
