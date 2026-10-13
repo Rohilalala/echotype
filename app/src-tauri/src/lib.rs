@@ -99,15 +99,18 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 fn emit_state(app: &AppHandle, s: DictationState) {
     let busy = matches!(s.state, "recording" | "transcribing" | "cleaning");
+    // A hint can come with no recording before it ("Nothing to paste yet"), so anything but idle shows.
+    let show = s.state != "idle";
     // A chip is a second thing to read, so the result stays up longer.
     let linger = Duration::from_millis(if s.chip.is_some() { 2500 } else { 1200 });
     let _ = app.emit("dictation-state", s);
     let st = state(app);
     let generation = st.overlay_gen.fetch_add(1, Ordering::SeqCst) + 1;
     let Some(overlay) = app.get_webview_window("overlay") else { return };
-    if busy {
+    if show {
         let _ = overlay.show();
-    } else {
+    }
+    if !busy {
         let app = app.clone();
         std::thread::spawn(move || {
             std::thread::sleep(linger);

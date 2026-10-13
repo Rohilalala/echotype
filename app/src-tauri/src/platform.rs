@@ -135,6 +135,7 @@ pub fn settings_url(kind: &str) -> Option<&'static str> {
         ("macos", "microphone") => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"),
         ("macos", "accessibility") => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
         ("macos", "input_monitoring") => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"),
+        ("macos", "keyboard") => Some("x-apple.systempreferences:com.apple.Keyboard-Settings.extension"),
         ("windows", "microphone") => Some("ms-settings:privacy-microphone"),
         _ => None,
     }
