@@ -875,10 +875,14 @@ async fn pill_cancel(app: AppHandle) -> R<()> {
     Ok(())
 }
 
-/// A notice with an action: Home shows it with the button that fixes it.
+/// A notice with an action: Home shows it with the button that fixes it. Shares the click
+/// debounce, so the second half of a double-click that started dictation and got an error
+/// notice back never opens the settings window.
 #[tauri::command]
 async fn pill_open(app: AppHandle) -> R<()> {
-    open_page(&app, "home");
+    if lock(&state(&app).clicks).accept(Instant::now()) {
+        open_page(&app, "home");
+    }
     Ok(())
 }
 
