@@ -10,8 +10,7 @@
   <script type="module" src="main.js"></script>
 </head>
 <body>
-  <aside class="sidebar">
-    <div class="brand"><img src="icon.svg" alt="" width="22" height="22" /><span>Echotype</span></div>
+  <aside class="sidebar" data-tauri-drag-region>
     <nav aria-label="Sections" id="nav">
       <button data-page="home"><svg viewBox="0 0 16 16"><path d="M2.5 7.2 8 2.5l5.5 4.7V13a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1Z"/><path d="M6.3 14v-3.6h3.4V14"/></svg>Home</button>
       <button data-page="speech"><svg viewBox="0 0 16 16"><path d="M2.5 6.5v3M5.25 4v8M8 2v12M10.75 5v6M13.5 7v2"/></svg>Speech model</button>
@@ -19,11 +18,12 @@
       <button data-page="language"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.75"/><ellipse cx="8" cy="8" rx="2.4" ry="5.75"/><path d="M2.4 8h11.2"/></svg>Language</button>
       <button data-page="dictionary"><svg viewBox="0 0 16 16"><path d="M3 12V4a1.5 1.5 0 0 1 1.5-1.5H13v9H4.5A1.5 1.5 0 0 0 3 13a1.5 1.5 0 0 0 1.5 1.5H13"/></svg>Dictionary</button>
       <button data-page="history"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.75"/><path d="M8 4.8v3.4l2.2 1.4"/></svg>History</button>
-      <button data-page="settings"><svg viewBox="0 0 16 16"><path d="M2.5 5h6M11.5 5h2M2.5 11h2M7.5 11h6"/><circle cx="10" cy="5" r="1.5"/><circle cx="6" cy="11" r="1.5"/></svg>Settings</button>
+      <button data-page="settings" class="nav-foot"><svg viewBox="0 0 16 16"><path d="M2.5 5h6M11.5 5h2M2.5 11h2M7.5 11h6"/><circle cx="10" cy="5" r="1.5"/><circle cx="6" cy="11" r="1.5"/></svg>Settings</button>
     </nav>
   </aside>
 
   <main id="main" tabindex="-1">
+    <div class="pane-drag" data-tauri-drag-region aria-hidden="true"></div>
     <p class="saved" id="saved" role="status" aria-live="polite"></p>
 
     <!-- Home -->
@@ -34,23 +34,38 @@
         <p class="hero-sub" id="heroSub"></p>
       </div>
 
+      <!-- The composer card: a drop zone for voice notes and, while dictating, the live waveform. -->
+      <div class="composer drop" id="drop">
+        <div class="composer-body">
+          <div class="drop-idle">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5v8M4.75 7.25 8 10.5l3.25-3.25"/><path d="M2.75 10.5v1.25a1.75 1.75 0 0 0 1.75 1.75h7a1.75 1.75 0 0 0 1.75-1.75V10.5"/></svg>
+            <span><strong>Drop a voice note here</strong>
+              <span>WhatsApp .opus, .m4a, .mp3 or .wav. You get a clean transcript to copy.</span></span>
+          </div>
+          <div class="drop-live"><span class="meter" id="heroMeter" aria-hidden="true"></span></div>
+        </div>
+        <div class="composer-foot">
+          <span class="chip-bar">
+            <button class="chip-btn" type="button" data-go="speech" title="Speech model"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 6.5v3M5.25 4v8M8 2v12M10.75 5v6M13.5 7v2"/></svg><span id="chipModel"></span></button>
+            <button class="chip-btn" type="button" data-go="language" title="Language"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.75"/><ellipse cx="8" cy="8" rx="2.4" ry="5.75"/><path d="M2.4 8h11.2"/></svg><span id="chipLang"></span></button>
+            <button class="chip-btn" type="button" data-go="cleanup" title="Cleanup style"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.4 2.6l3 3L6 13H3v-3z"/><path d="M8.6 4.4l3 3"/></svg><span id="chipStyle"></span></button>
+          </span>
+          <button class="mic" id="heroMic" type="button" aria-label="Start dictation">
+            <svg class="i-mic" viewBox="0 0 16 16" aria-hidden="true"><rect x="5.75" y="2" width="4.5" height="7.5" rx="2.25"/><path d="M3.5 8a4.5 4.5 0 0 0 9 0M8 12.5V14"/></svg>
+            <svg class="i-done" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7"/></svg>
+          </button>
+        </div>
+      </div>
+      <div id="dropResults" class="drop-results"></div>
+
       <div class="banner" id="rawBanner" hidden>
         <span>Dictation is pasted the way you said it, with no cleanup.</span>
         <button class="btn" id="rawSetup" type="button">Set up cleanup</button>
         <button class="icon-btn" id="rawDismiss" type="button" aria-label="Dismiss"></button>
       </div>
 
-      <div class="drop" id="drop">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5"/><path d="M4.5 15.5v2A2.5 2.5 0 0 0 7 20h10a2.5 2.5 0 0 0 2.5-2.5v-2"/></svg>
-        <div>
-          <strong>Drop a voice note here</strong>
-          <span>WhatsApp .opus, .m4a, .mp3 or .wav. You get a clean transcript to copy.</span>
-        </div>
-      </div>
-      <div id="dropResults" class="drop-results"></div>
-
       <h2 class="group-title" id="recentTitle">Recent</h2>
-      <div class="group" id="recent"></div>
+      <div class="list" id="recent"></div>
     </section>
 
     <!-- Speech model -->
@@ -61,7 +76,7 @@
 
       <div id="sttLocal">
         <p class="memline" id="memline"></p>
-        <div class="group" id="modelList"></div>
+        <div class="list" id="modelList"></div>
       </div>
 
       <div id="sttRemote" class="group" hidden>
@@ -75,7 +90,7 @@
       <div id="cloudBox" hidden>
         <h2 class="group-title">Echotype Cloud account</h2>
         <p class="lede small">Free includes 2,000 words a week. Pro has unlimited words for $6 a month or $60 a year. Echotype Cloud keeps word and audio-time counts, not your audio or text.</p>
-        <div class="group" id="cloudAccount"></div>
+        <div class="group elev" id="cloudAccount"></div>
       </div>
     </section>
 
@@ -157,7 +172,7 @@
       <div class="group">
         <div class="rep-head" aria-hidden="true"><span>When you say</span><span>Type</span><span></span></div>
         <div id="reps"></div>
-        <div class="row"><button class="btn quiet" id="addRep" type="button">Add replacement</button></div>
+        <div class="row"><button class="btn" id="addRep" type="button">Add replacement</button></div>
       </div>
     </section>
 
@@ -165,9 +180,9 @@
     <section data-page="history" hidden>
       <div class="page-head">
         <h1>History</h1>
-        <button class="btn" id="clearHistory" type="button">Clear history</button>
+        <button class="btn quiet danger" id="clearHistory" type="button">Clear history</button>
         <span class="confirm" id="clearConfirm" hidden>Delete every entry?
-          <button class="btn" id="clearCancel" type="button">Cancel</button>
+          <button class="btn quiet" id="clearCancel" type="button">Cancel</button>
           <button class="btn danger" id="clearYes" type="button">Clear history</button>
         </span>
       </div>
@@ -219,7 +234,7 @@
           <input type="checkbox" class="switch" data-bind="pill_in_recordings" /></label>
       </div>
 
-      <h2 class="group-title">Audio and text</h2>
+      <h2 class="group-title">Audio</h2>
       <div class="group">
         <label class="row"><span class="row-text"><span class="row-title">Microphone <span class="info" id="btInfo" hidden tabindex="0" role="img" aria-label="Bluetooth microphone" title="Bluetooth microphones such as AirPods switch to a low-quality mode while recording, which makes quiet speech harder to catch. A built-in or USB mic works better."></span></span><span class="row-desc error" id="micError" role="alert" hidden></span></span>
           <select id="mic" data-bind="input_device" data-null></select></label>
@@ -227,10 +242,6 @@
           <button class="btn" id="btTipOk" type="button">Got it</button></div>
         <label class="row" id="soundsRow"><span class="row-text"><span class="row-title">Sounds</span><span class="row-desc">A short tone when dictation starts, stops or locks.</span></span>
           <input type="checkbox" class="switch" data-bind="sounds" /></label>
-        <label class="row"><span class="row-text"><span class="row-title">Restore clipboard</span><span class="row-desc">Put back what you had copied after Echotype pastes.</span></span>
-          <input type="checkbox" class="switch" data-bind="restore_clipboard" /></label>
-        <label class="row"><span class="row-text"><span class="row-title">Keep history</span><span class="row-desc">Stored on this Mac only.</span></span>
-          <input type="checkbox" class="switch" data-bind="history_enabled" /></label>
       </div>
 
       <h2 class="group-title">Startup</h2>
@@ -239,10 +250,13 @@
           <input type="checkbox" class="switch" id="autostart" data-bind="autostart" /></label>
       </div>
 
-      <h2 class="group-title">Local API</h2>
-      <p class="lede small">Scripts and agents on this computer can send audio to Echotype and get text back through the same pipeline. OpenAI-compatible.</p>
+      <h2 class="group-title">Privacy</h2>
       <div class="group">
-        <label class="row"><span class="row-text"><span class="row-title">Serve on 127.0.0.1</span></span>
+        <label class="row"><span class="row-text"><span class="row-title">Keep history</span><span class="row-desc">Stored on this Mac only.</span></span>
+          <input type="checkbox" class="switch" data-bind="history_enabled" /></label>
+        <label class="row"><span class="row-text"><span class="row-title">Restore clipboard</span><span class="row-desc">Put back what you had copied after Echotype pastes.</span></span>
+          <input type="checkbox" class="switch" data-bind="restore_clipboard" /></label>
+        <label class="row"><span class="row-text"><span class="row-title">Local API on 127.0.0.1</span><span class="row-desc">Scripts and agents on this computer can send audio to Echotype and get text back through the same pipeline. OpenAI-compatible.</span></span>
           <input type="checkbox" class="switch" data-bind="local_api.enabled" /></label>
         <div id="apiBody">
           <label class="row"><span class="row-text"><span class="row-title">Port</span></span>
@@ -260,7 +274,7 @@
   </main>
 
   <!-- First run -->
-  <div class="onboard" id="onboard" role="dialog" aria-modal="true" aria-labelledby="obTitle" hidden>
+  <div class="onboard" id="onboard" data-tauri-drag-region role="dialog" aria-modal="true" aria-labelledby="obTitle" hidden>
     <div class="ob-card">
       <div class="ob-top">
         <ol class="ob-steps" id="obSteps"><li>Microphone</li><li>Try it</li><li>Paste</li><li>Extras</li></ol>

@@ -1,5 +1,6 @@
 // Echotype settings window. Talks to the Rust core through Tauri commands and events.
-if (!window.__TAURI__) await import('./mock.js'); // browser preview for design QA
+const preview = !window.__TAURI__;
+if (preview) await import('./mock.js'); // browser preview for design QA
 
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -127,6 +128,7 @@ function changed(p) {
   if (p.startsWith('local_api')) refreshApi();
   if (p === 'history_enabled') renderHistory();
   if (p === 'pill_idle') renderPill();
+  renderChips();
 }
 
 // ---------- navigation ----------
@@ -288,7 +290,8 @@ const ACTIONS = {
 };
 const actionBtn = kind => ACTIONS[kind] && h('button', { className: 'btn', type: 'button', onclick: ACTIONS[kind][1] }, ACTIONS[kind][0]);
 let muted = false;
-const METER = [0.5, 0.75, 0.95, 1, 0.8, 0.95, 0.7, 0.5];
+// Per-bar gain of the Home waveform: a soft envelope, tallest in the middle.
+const METER = Array.from({ length: 28 }, (_, i) => 0.35 + 0.65 * Math.sin(Math.PI * (i + 0.5) / 28));
 
 // What stops dictation from working right now, with the one action that fixes it.
 let perms = null, sttKeySaved = true;
@@ -299,7 +302,9 @@ function blocker() {
   if (S.stt.provider === 'cloud') {
     if (cloud.status === 'out' || cloud.status === 'code') return { text: 'Sign in to Echotype Cloud to transcribe.', label: 'Sign in', act: () => go('speech') };
   } else if (S.stt.provider === 'local') {
-    if (!models.find(m => m.id === S.stt.local_model)?.downloaded) return { text: 'No speech model is downloaded yet.', label: 'Choose a model', act: () => go('speech') };
+    const m = models.find(x => x.id === S.stt.local_model);
+    if (m && progress[m.id] != null) return { text: `Downloading ${m.label}: ${Math.round(progress[m.id] * 100)}%. You can dictate when it finishes.`, label: 'Speech model', act: () => go('speech') };
+    if (!m?.downloaded) return { text: 'No speech model is downloaded yet.', label: 'Choose a model', act: () => go('speech') };
   } else if (p?.needs_key && !sttKeySaved) return { text: `Add your ${p.label} API key to transcribe.`, label: 'Add key', act: () => go('speech') };
   return null;
 }
@@ -313,9 +318,12 @@ function renderHero() {
   $('#heroState span').textContent = b ? 'Not ready' : dictation.copied ? 'Copied' : STATE_LABEL[st] ?? 'Ready';
   const chip = dictation.chip && h('span', { className: 'tag' }, CHIP[dictation.chip]);
   const line = $('#heroLine'), sub = $('#heroSub');
-  const start = h('button', { className: 'btn quiet', type: 'button', onclick: () => invoke('toggle_dictation') }, 'Start with a click');
+  const mic = $('#heroMic');
+  mic.ariaLabel = st === 'recording' ? 'Finish dictation' : 'Start dictation';
+  mic.disabled = st === 'transcribing' || st === 'cleaning';
+  renderChips();
   if (st === 'recording') {
-    line.replaceChildren(muted ? 'Is your mic muted?' : 'Listening', h('span', { className: 'meter', id: 'heroMeter', 'aria-hidden': 'true' }, METER.map(() => h('i'))));
+    line.replaceChildren(muted ? 'Is your mic muted?' : 'Listening');
     fill(sub, muted ? 'Echotype hears nothing from the microphone. It keeps recording.'
       : dictation.locked || S.mode === 'toggle' ? 'Press the key again to finish. Esc cancels.' : 'Let go to paste. Esc cancels.');
   } else if (st === 'transcribing' || st === 'cleaning') {
@@ -325,13 +333,26 @@ function renderHero() {
     line.replaceChildren(verb(), ...talkCaps(), 'to dictate');
     const cleanupFix = dictation.warning?.startsWith('Cleanup failed') && actionBtn('cleanup');
     if (b) fill(sub, h('span', {}, b.text), h('button', { className: 'btn', type: 'button', onclick: b.act }, b.label));
-    else if (st === 'error') fill(sub, h('span', {}, `${dictation.error || 'Dictation stopped.'}`), ...keptText(), dictation.retry && retryBtn(), actionBtn(dictation.action), start);
-    else if (st === 'hint') fill(sub, h('span', { className: 'notice-inline' }, dictation.message), actionBtn(dictation.action), start);
-    else if (st === 'done' && dictation.copied) fill(sub, h('span', {}, dictation.warning || 'Copied. Press ⌘V to paste it.'), chip, ...keptText(), actionBtn(dictation.action), start);
-    else if (st === 'done' && dictation.warning) fill(sub, h('span', {}, dictation.warning), chip, cleanupFix, start);
-    else fill(sub, h('span', {}, 'Text appears wherever your cursor is.'), chip, start);
+    else if (st === 'error') fill(sub, h('span', {}, `${dictation.error || 'Dictation stopped.'}`), ...keptText(), dictation.retry && retryBtn(), actionBtn(dictation.action));
+    else if (st === 'hint') fill(sub, h('span', { className: 'notice-inline' }, dictation.message), actionBtn(dictation.action));
+    else if (st === 'done' && dictation.copied) fill(sub, h('span', {}, dictation.warning || 'Copied. Press ⌘V to paste it.'), chip, ...keptText(), actionBtn(dictation.action));
+    else if (st === 'done' && dictation.warning) fill(sub, h('span', {}, dictation.warning), chip, cleanupFix);
+    else fill(sub, h('span', {}, 'Text appears wherever your cursor is.'), chip);
   }
 }
+
+// The composer's chips (D15): what Echotype will use right now; each opens its page.
+const STYLE_LABEL = { default: 'Default style', casual: 'Casual', formal: 'Formal', verbatim: 'Verbatim' };
+function renderChips() {
+  const local = S.stt.provider === 'local';
+  $('#chipModel').textContent = local ? models.find(m => m.id === S.stt.local_model)?.label ?? 'No model' : preset(S.stt.provider)?.label ?? S.stt.provider;
+  const lang = LANGS.find(([v]) => v === S.language)?.[1] ?? S.language;
+  $('#chipLang').textContent = S.translate_to_english ? `${lang} to English` : lang;
+  $('#chipStyle').textContent = noCleanup() ? 'No cleanup' : STYLE_LABEL[S.cleanup.style] ?? S.cleanup.style;
+}
+for (const b of $$('[data-go]')) b.addEventListener('click', () => go(b.dataset.go));
+$('#heroMic').addEventListener('click', () => invoke('toggle_dictation'));
+$('#heroMeter').append(...METER.map(() => h('i')));
 
 // "No cleanup" (D4): cleanup is off, or on with no key. A dismissible Home banner offers the setup.
 let cleanupKeySaved = true;
@@ -377,11 +398,11 @@ const retryBtn = () => h('button', { className: 'btn primary', type: 'button', o
 
 function renderRecent() {
   const box = $('#recent');
-  $('#recentTitle').hidden = box.hidden = !recent.length;
+  if (!recent.length) return box.replaceChildren(h('p', { className: 'empty' }, 'Your dictations show up here.'));
   box.replaceChildren(...recent.slice(0, 3).map(r => {
-    const copy = h('button', { className: 'btn', type: 'button' }, 'Copy');
+    const copy = h('button', { className: 'btn quiet', type: 'button' }, 'Copy');
     copy.onclick = () => copyText(r.text, copy);
-    return h('div', { className: 'row entry' }, h('span', { className: 'when' }, fmtTime(r.ts, true)), h('span', { className: 'text' }, r.text), copy);
+    return h('div', { className: 'row entry' }, h('span', { className: 'text' }, r.text), h('time', { className: 'when', title: fmtTime(r.ts).replace('\n', ' ') }, fmtAgo(r.ts)), copy);
   }));
 }
 
@@ -757,6 +778,17 @@ function fmtTime(ts, short) {
   return short ? day : `${day}\n${time}`;
 }
 
+// "2m", "1h" under a day, then a date (D15).
+function fmtAgo(ts) {
+  const d = new Date(typeof ts === 'number' && ts < 1e12 ? ts * 1000 : ts);
+  if (isNaN(d)) return '';
+  const min = Math.max(0, Math.floor((Date.now() - d) / 60000));
+  if (min < 1) return 'now';
+  if (min < 60) return `${min}m`;
+  if (min < 1440) return `${Math.floor(min / 60)}h`;
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
 async function renderHistory() {
   const list = $('#historyList');
   if (!list.children.length) list.replaceChildren(h('p', { className: 'empty' }, 'Loading history…'));
@@ -775,10 +807,10 @@ async function renderHistory() {
     return;
   }
   list.replaceChildren(...items.map(it => {
-    const copy = h('button', { className: 'btn', type: 'button' }, 'Copy');
+    const copy = h('button', { className: 'btn quiet', type: 'button' }, 'Copy');
     copy.onclick = e => { e.preventDefault(); copyText(it.text, copy); };
     return h('details', {},
-      h('summary', {}, h('span', { className: 'when' }, fmtTime(it.ts)), h('span', { className: 'text' }, it.text), it.no_cleanup && h('span', { className: 'tag' }, 'No cleanup'), copy),
+      h('summary', {}, h('span', { className: 'text' }, it.text), it.no_cleanup && h('span', { className: 'tag' }, 'No cleanup'), h('time', { className: 'when', title: fmtTime(it.ts).replace('\n', ' ') }, fmtAgo(it.ts)), copy),
       h('div', { className: 'detail' },
         it.raw !== it.text && h('p', { className: 'raw text' }, h('b', {}, 'Heard: '), it.raw),
         h('span', { className: 'timing' },
@@ -1048,6 +1080,7 @@ listen('model-download', ({ payload: p }) => {
   bars.forEach(b => { b.firstChild.style.transform = `scaleX(${frac})`; b.setAttribute('aria-valuenow', Math.round(frac * 100)); });
   $$(`[data-pct="${p.id}"]`).forEach(el => (el.textContent = `${Math.round(frac * 100)}%`));
   renderObModel();
+  renderHero(); // the readiness line counts the download
 });
 
 // The pill's menu (History, Settings) and its notices open a page here.
@@ -1071,6 +1104,9 @@ try {
   throw e;
 }
 isMac = /mac|darwin/i.test(sys.os);
+// macOS gets the translucent sidebar (windowEffects in tauri.conf.json); elsewhere it stays opaque (D19).
+document.documentElement.dataset.os = isMac ? 'mac' : 'other';
+if (isMac && !preview) document.documentElement.dataset.vibrant = '';
 S.dictionary ??= [];
 S.replacements ??= [];
 S.dismissed ??= [];
