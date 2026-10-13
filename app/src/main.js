@@ -64,12 +64,15 @@ function merge3(theirs, old, mine) {
 async function saveNow(quiet) {
   const settings = { ...S, replacements: S.replacements.filter(r => r.from.trim()) };
   const sentBase = base;
-  base = clone(settings); // from here on these values are Rust's to confirm or correct
+  const sentCopy = base = clone(settings); // from here on these values are Rust's to confirm or correct
   try {
     await invoke('save_settings', { settings, base: sentBase });
     flash();
     return null;
   } catch (e) {
+    // Nothing was saved unless Rust confirmed with settings-changed (which replaces `base`):
+    // put the old base back so this edit still counts as unsaved next time.
+    if (base === sentCopy) base = sentBase;
     if (!quiet) flash(String(e));
     return String(e);
   }
@@ -116,7 +119,7 @@ function syncBound() {
 }
 function changed(p) {
   if (p === 'mode' || p === 'hotkey') renderHotkey();
-  if (p === 'talk_key') refreshStatus();
+  if (p === 'talk_key') saving.then(refreshStatus); // after the save, or the check re-applies the old key
   if (p === 'input_device') renderMicNote();
   if (p === 'cleanup.enabled') renderRaw();
   if (p === 'translate_to_english') renderLangNote();
@@ -169,7 +172,9 @@ function accelFrom(e) {
 const TALK = { fn: ['fn'], right_option: ['Right', '⌥'], right_command: ['Right', '⌘'], right_control: ['Right', '⌃'] };
 const talkCaps = () => status.talk_key_active && TALK[S.talk_key] ? [h('kbd', {}, TALK[S.talk_key].join(' '))] : keycaps(S.hotkey);
 const verb = () => (S.mode === 'toggle' ? 'Press' : 'Hold');
-const DEFAULT_LAST = () => isMac ? ['CommandOrControl+Control+V', 'CommandOrControl+Control+C'] : ['Control+Alt+V', 'Control+Alt+C'];
+// ponytail: macOS only. Elsewhere the paste keystroke itself would be Ctrl+V while Ctrl+Alt is still
+// held (no modifier wait off macOS), re-firing the shortcut; users can bind their own there.
+const DEFAULT_LAST = () => isMac ? ['CommandOrControl+Control+V', 'CommandOrControl+Control+C'] : ['', ''];
 
 function renderHotkey() {
   for (const btn of $$('[data-shortcut]')) {
@@ -194,7 +199,7 @@ function stopRecording() {
   recording = null;
   renderHotkey();
 }
-const errEl = field => field === 'hotkey' ? $('#hotkeyError') : $(`#${field}Error`);
+const errEl = field => $(`#${field}Error`);
 for (const btn of $$('[data-shortcut]')) {
   const field = btn.dataset.shortcut;
   btn.addEventListener('click', () => {
@@ -241,6 +246,7 @@ async function refreshStatus() {
   try { status = await invoke('shortcut_status'); } catch { status = {}; }
   renderTalk();
   renderHotkey();
+  refreshPerms(); // the Input Monitoring row reads `status`
 }
 function talkLines() {
   if (S.talk_key === 'accelerator') return [];
@@ -811,11 +817,11 @@ $('#btTipOk').addEventListener('click', () => dismiss('bluetooth_tip'));
 // Upgraders: the new shortcuts and launch at login are offered once, never switched on silently.
 function renderUpgrade() {
   const box = $('#upgradeOffer');
-  box.hidden = !S.onboarded || S.dismissed.includes('upgrade_offer');
-  if (box.hidden) return;
   const [p, c] = DEFAULT_LAST();
-  box.querySelector('.notice-text').replaceChildren(h('b', {}, 'New: '), 'paste your last dictation again with ', ...keycaps(p), ', copy it with ', ...keycaps(c),
-    sys.can_autostart ? ', and start Echotype at login.' : '.');
+  box.hidden = !S.onboarded || S.dismissed.includes('upgrade_offer') || (!p && !sys.can_autostart);
+  if (box.hidden) return;
+  fill(box.querySelector('.notice-text'), h('b', {}, 'New: '),
+    p ? ['paste your last dictation again with ', ...keycaps(p), ', copy it with ', ...keycaps(c), sys.can_autostart ? ', and start Echotype at login.' : '.'] : 'start Echotype at login.');
 }
 $('#upgradeYes').addEventListener('click', () => {
   const [p, c] = DEFAULT_LAST();
@@ -857,6 +863,7 @@ $('#copyCurl').addEventListener('click', e => copyText(curl(apiStatus?.port || S
 // [badge, badge style, show the Open Settings button]
 const MIC = { granted: ['Allowed', '', false], denied: ['Blocked', 'bad', true], unknown: ['Asked on first use', 'muted', false] };
 async function refreshPerms() {
+  if (!S) return; // a focus event can land before boot finishes
   let failed = false;
   try { perms = await invoke('check_permissions'); }
   catch { failed = true; perms = null; }

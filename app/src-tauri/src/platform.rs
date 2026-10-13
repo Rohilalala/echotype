@@ -37,7 +37,7 @@ pub fn paste(app: &AppHandle, text: &str, restore: bool) -> Result<(), (String, 
     Ok(())
 }
 
-/// Waits (up to `max`) until Control and Option are up, so a ⌘V sent now is not ⌘⌃V.
+/// Waits (up to `max`) until Control, Option and Shift are up, so a ⌘V sent now is not ⌘⌃V.
 /// False when they are still down after `max`.
 pub fn wait_for_modifiers_up(max: Duration) -> bool {
     #[cfg(target_os = "macos")]
@@ -224,10 +224,11 @@ mod mac {
         fn CGEventSourceFlagsState(state: i32) -> u64;
     }
 
-    /// Control or Option physically held (HID state, so our own synthetic events don't count).
+    /// Control, Option or Shift physically held (HID state, so our own synthetic events don't
+    /// count). ⌘ may stay down: ⌘V is what we send anyway.
     pub fn control_or_option_down() -> bool {
         // SAFETY: plain query; 1 = kCGEventSourceStateHIDSystemState.
-        unsafe { CGEventSourceFlagsState(1) & (0x0004_0000 | 0x0008_0000) != 0 }
+        unsafe { CGEventSourceFlagsState(1) & (0x0002_0000 | 0x0004_0000 | 0x0008_0000) != 0 }
     }
 
     /// One NSSound per name, created on first use and kept (three tiny sounds, no release needed).

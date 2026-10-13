@@ -166,7 +166,7 @@ mod tests {
             s.cleanup.enabled = true;
             s.cleanup.provider = "cloud".into();
             let pcm = crate::audio::decode(std::fs::read(wav).unwrap(), Some("wav")).unwrap();
-            let out = crate::cleanup::run(&s, &pcm, || {}).unwrap();
+            let out = crate::cleanup::run(&s, &pcm, false, || {}).unwrap();
             println!("pipeline: raw {:?}, text {:?}, warning {:?}", out.raw, out.text, out.warning);
             assert_eq!(out.raw, "hello world");
             let after = account().unwrap();

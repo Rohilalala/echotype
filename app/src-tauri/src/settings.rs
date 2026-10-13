@@ -183,8 +183,9 @@ impl Settings {
 }
 
 /// Three-way merge for a writer holding a stale copy: every field `incoming` changed relative
-/// to `base` (what that writer last saw) wins; everything else keeps `current`. So a save from the
-/// settings window never reverts a value Rust wrote after the window last loaded its copy.
+/// to `base` (what that writer last saw) wins; everything else keeps `current`. So a queued or
+/// stale save from the settings window only applies that window's own edits and never reverts a
+/// change committed since it loaded (another save, or an R2 Rust-side writer such as the pill menu).
 pub fn merge(current: &Settings, base: &Settings, incoming: &Settings) -> Settings {
     use serde_json::Value;
     fn walk(cur: &mut Value, base: &Value, inc: &Value) {

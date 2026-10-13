@@ -176,8 +176,9 @@ pub fn keyless(s: &Settings) -> bool {
 }
 
 /// STT → replacements → cleanup. Cleanup failure never loses text: the raw (replaced)
-/// transcript is returned with a warning. `on_cleaning` fires before the LLM call.
-pub fn run(s: &Settings, pcm: &[f32], on_cleaning: impl FnOnce()) -> Result<Output, String> {
+/// transcript is returned with a warning. `on_cleaning` fires before the LLM call. `dictated`:
+/// live dictation, where spoken "new line" is a command; a voice note or API upload keeps its words.
+pub fn run(s: &Settings, pcm: &[f32], dictated: bool, on_cleaning: impl FnOnce()) -> Result<Output, String> {
     let t = Instant::now();
     let prompt = stt::prompt(&s.dictionary);
     let (raw, warning) = if s.stt.provider == "local" {
@@ -189,15 +190,17 @@ pub fn run(s: &Settings, pcm: &[f32], on_cleaning: impl FnOnce()) -> Result<Outp
     };
     let stt_ms = t.elapsed().as_millis() as u64;
     let keyless = s.cleanup.enabled && keyless(s);
-    Ok(after_stt(s, raw, stt_ms, warning, keyless, on_cleaning, cleanup))
+    Ok(after_stt(s, raw, stt_ms, warning, keyless, dictated, on_cleaning, cleanup))
 }
 
 /// Everything after STT, with the LLM call passed in so tests never touch the network.
-fn after_stt(s: &Settings, raw: String, stt_ms: u64, mut warning: Option<String>, keyless: bool, on_cleaning: impl FnOnce(), llm: impl Fn(&Settings, &str) -> Result<String, String>) -> Output {
+#[allow(clippy::too_many_arguments)]
+fn after_stt(s: &Settings, raw: String, stt_ms: u64, mut warning: Option<String>, keyless: bool, dictated: bool, on_cleaning: impl FnOnce(), llm: impl Fn(&Settings, &str) -> Result<String, String>) -> Output {
     if !has_speech(&raw) {
-        return Output { raw: String::new(), text: String::new(), stt_ms, cleanup_ms: 0, warning: None, no_cleanup: false };
+        return Output { raw: String::new(), text: String::new(), stt_ms, cleanup_ms: 0, warning, no_cleanup: false };
     }
-    let mut text = spoken_breaks(&apply_replacements(&raw, &s.replacements));
+    let replaced = apply_replacements(&raw, &s.replacements);
+    let mut text = if dictated { spoken_breaks(&replaced) } else { replaced };
     let mut cleanup_ms = 0;
     // "No cleanup": switched off, or on with no key to call the provider. Verbatim is a choice, not raw.
     let no_cleanup = !s.cleanup.enabled || keyless;
@@ -281,13 +284,15 @@ mod tests {
     }
 
     fn post(s: &Settings, raw: &str) -> Output {
-        after_stt(s, raw.into(), 1, None, false, || {}, |_, t| Ok(format!("clean:{t}")))
+        after_stt(s, raw.into(), 1, None, false, true, || {}, |_, t| Ok(format!("clean:{t}")))
     }
 
     #[test]
     fn transcripts_without_letters_or_digits_are_empty() {
         let mut s = Settings::default();
         s.cleanup.enabled = true;
+        let w = after_stt(&s, ".".into(), 1, Some("medium was used".into()), false, true, || {}, |_, _| unreachable!());
+        assert_eq!(w.warning.as_deref(), Some("medium was used"), "a model-fallback note survives an empty result");
         for noise in [".", " , ", "...", "", " - ! "] {
             let o = post(&s, noise);
             assert_eq!((o.text.as_str(), o.raw.as_str(), o.no_cleanup), ("", "", false), "{noise:?}");
@@ -305,9 +310,21 @@ mod tests {
         assert_eq!(spoken_breaks("New Paragraph, next"), "\n\nnext");
         assert_eq!(spoken_breaks("renewal linen"), "renewal linen");
         assert_eq!(spoken_breaks("a newline b"), "a newline b");
-        // replacements run first, then the break rule, then the LLM sees the breaks
-        let s = Settings::default();
-        assert_eq!(post(&s, "Hi new line there").text, "Hi\nthere");
+        // Replacements run first (so a replacement can produce the phrase), then the break rule,
+        // and the LLM receives the breaks.
+        let mut s = Settings::default();
+        s.cleanup.enabled = true;
+        s.replacements = vec![Replacement { from: "next".into(), to: "new line".into() }];
+        let seen = std::cell::RefCell::new(String::new());
+        let out = after_stt(&s, "Hi next there".into(), 1, None, false, true, || {}, |_, t| {
+            *seen.borrow_mut() = t.to_string();
+            Ok(t.to_string())
+        });
+        assert_eq!(seen.into_inner(), "Hi\nthere");
+        assert_eq!(out.text, "Hi\nthere");
+        // A voice note or API upload keeps "new line" as words.
+        let file = after_stt(&Settings::default(), "our new line of products".into(), 1, None, false, false, || {}, |_, t| Ok(t.into()));
+        assert_eq!(file.text, "our new line of products");
     }
 
     #[test]
@@ -316,13 +333,13 @@ mod tests {
         let off = post(&s, "hello");
         assert!(off.no_cleanup && off.text == "hello");
         s.cleanup.enabled = true;
-        let keyless = after_stt(&s, "hello".into(), 1, None, true, || panic!("called the LLM"), |_, _| panic!("called the LLM"));
+        let keyless = after_stt(&s, "hello".into(), 1, None, true, true, || panic!("called the LLM"), |_, _| panic!("called the LLM"));
         assert!(keyless.no_cleanup && keyless.text == "hello");
         s.cleanup.style = "verbatim".into();
         assert!(!post(&s, "hello").no_cleanup);
         s.cleanup.style = "default".into();
         s.cleanup.provider = "groq".into();
-        let failed = after_stt(&s, "hello".into(), 1, None, false, || {}, |_, _| Err("401 Unauthorized: bad key\nmore".into()));
+        let failed = after_stt(&s, "hello".into(), 1, None, false, true, || {}, |_, _| Err("401 Unauthorized: bad key\nmore".into()));
         assert!(!failed.no_cleanup && failed.text == "hello");
         assert_eq!(failed.warning.unwrap(), "Cleanup failed: Groq: 401 Unauthorized: bad key. Pasted the raw transcript instead.");
     }

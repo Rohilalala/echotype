@@ -243,6 +243,8 @@ const WINDOWS_PER_SEC: usize = 20;
 /// Below this a window counts as silence for the muted-mic check.
 pub const MUTED_DB: f32 = -70.0;
 const FLOOR_MIN_DB: f32 = -90.0;
+/// The meter spans this many dB above the running floor.
+const METER_RANGE_DB: f32 = 30.0;
 
 /// dBFS of a window, not clamped (digital zero reads -120).
 pub fn dbfs(samples: &[f32]) -> f32 {
@@ -307,7 +309,7 @@ impl LevelStats {
         }
         let muted = !self.heard && self.windows >= 2 * WINDOWS_PER_SEC;
         self.muted_seen |= muted;
-        self.level = Level { meter: ((db - floor) / 30.0).clamp(0.0, 1.0), muted };
+        self.level = Level { meter: ((db - floor) / METER_RANGE_DB).clamp(0.0, 1.0), muted };
         self.level
     }
 
@@ -559,6 +561,12 @@ mod tests {
         assert!(levels[50].muted && !levels.last().unwrap().muted && !st.silent());
         let (st, levels) = stats(&clip(-60.0, Some(-20.0), 3.0));
         assert!(levels.iter().all(|l| !l.muted) && !st.silent());
+    }
+
+    #[test]
+    fn bluetooth_name_fallback() {
+        assert!(bluetooth_by_name("Aditya's AirPods Pro") && bluetooth_by_name("Jabra Bluetooth Headset"));
+        assert!(!bluetooth_by_name("MacBook Pro Microphone") && !bluetooth_by_name("Shure MV7"));
     }
 
     #[test]
