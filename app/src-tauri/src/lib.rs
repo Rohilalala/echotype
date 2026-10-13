@@ -1104,6 +1104,29 @@ mod tests {
     use crate::audio::Quality;
     use std::cell::RefCell;
 
+    /// Under the app manifest a command missing from a capability fails only at runtime, in the
+    /// window, so check generate_handler!, build.rs COMMANDS and both capability files agree.
+    #[test]
+    fn capabilities_list_every_command_and_the_overlay_none() {
+        let lib = include_str!("lib.rs");
+        let block = lib.split("tauri::generate_handler![").nth(1).unwrap().split(']').next().unwrap();
+        let handler: Vec<&str> = block.split(',').map(str::trim).filter(|c| !c.is_empty()).collect();
+        let build = include_str!("../build.rs");
+        let listed = build.split("const COMMANDS: &[&str] = &[").nth(1).unwrap().split("];").next().unwrap();
+        let manifest: Vec<&str> = listed.split(',').map(|c| c.trim().trim_matches('"')).filter(|c| !c.is_empty()).collect();
+        assert_eq!(handler, manifest, "build.rs COMMANDS must match generate_handler!");
+        let perms = |json: &str| -> Vec<String> {
+            let v: serde_json::Value = serde_json::from_str(json).unwrap();
+            v["permissions"].as_array().unwrap().iter().filter_map(|p| p.as_str().map(String::from)).collect()
+        };
+        let main = perms(include_str!("../capabilities/default.json"));
+        for c in &handler {
+            assert!(main.contains(&format!("allow-{}", c.replace('_', "-"))), "capabilities/default.json misses {c}");
+        }
+        let overlay = perms(include_str!("../capabilities/overlay.json"));
+        assert!(overlay.iter().all(|p| p.starts_with("core:event:")), "the overlay may only listen to events: {overlay:?}");
+    }
+
     #[test]
     fn one_chip_wins_too_quiet_then_quiet_voice_then_no_cleanup() {
         // Copied (Accessibility off) + no cleanup + too quiet: the primary line says Copied, the chip says too quiet.

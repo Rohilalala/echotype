@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Settings window",
+  "description": "Settings window: core window controls plus every Echotype command",
   "windows": [
     "main"
   ],
@@ -13,6 +13,33 @@
     "core:window:allow-minimize",
     "core:window:allow-set-focus",
     "core:window:allow-start-dragging",
-    "opener:default"
+    "opener:default",
+    "allow-get-settings",
+    "allow-save-settings",
+    "allow-get-presets",
+    "allow-set-secret",
+    "allow-has-secret",
+    "allow-delete-secret",
+    "allow-list-models",
+    "allow-download-model",
+    "allow-delete-model",
+    "allow-list-input-devices",
+    "allow-get-history",
+    "allow-clear-history",
+    "allow-transcribe-file",
+    "allow-get-system-info",
+    "allow-local-api-status",
+    "allow-toggle-dictation",
+    "allow-shortcut-status",
+    "allow-relaunch",
+    "allow-retry-last",
+    "allow-check-permissions",
+    "allow-open-permission-settings",
+    "allow-cloud-start-login",
+    "allow-cloud-verify",
+    "allow-cloud-account",
+    "allow-cloud-checkout",
+    "allow-cloud-portal",
+    "allow-cloud-logout"
   ]
 }

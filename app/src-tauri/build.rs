@@ -1,3 +1,36 @@
+/// Every app command. With an app manifest, a window can call only the commands its capability
+/// file allows: capabilities/default.json grants these to the settings window, and the overlay
+/// gets none. lib.rs tests keep this list, generate_handler! and the capability files in sync.
+const COMMANDS: &[&str] = &[
+    "get_settings",
+    "save_settings",
+    "get_presets",
+    "set_secret",
+    "has_secret",
+    "delete_secret",
+    "list_models",
+    "download_model",
+    "delete_model",
+    "list_input_devices",
+    "get_history",
+    "clear_history",
+    "transcribe_file",
+    "get_system_info",
+    "local_api_status",
+    "toggle_dictation",
+    "shortcut_status",
+    "relaunch",
+    "retry_last",
+    "check_permissions",
+    "open_permission_settings",
+    "cloud_start_login",
+    "cloud_verify",
+    "cloud_account",
+    "cloud_checkout",
+    "cloud_portal",
+    "cloud_logout",
+];
+
 fn main() {
     // whisper.cpp's Metal code uses @available checks, which clang lowers to
     // ___isPlatformVersionAtLeast from compiler-rt. rustc links with
@@ -11,5 +44,5 @@ fn main() {
         println!("cargo:rustc-link-search=native={}/lib/darwin", dir.trim());
         println!("cargo:rustc-link-lib=static=clang_rt.osx");
     }
-    tauri_build::build()
+    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(COMMANDS))).expect("tauri-build failed");
 }
