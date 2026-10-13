@@ -39,8 +39,10 @@ pub struct Ctx {
     pub idle_on: bool,
     pub hidden_until: u64,
     pub now_ms: u64,
-    /// Echotype's own window is the key window: Home shows the live state instead (D14).
+    /// Echotype's own window is the key window (D14).
     pub main_key: bool,
+    /// ...showing Home or onboarding, which show the live state themselves.
+    pub main_home: bool,
 }
 
 impl Ctx {
@@ -49,10 +51,14 @@ impl Ctx {
     }
 }
 
-/// On screen: never over Echotype's own focused window; otherwise while dictating or showing a
-/// notice, and when idle only if the idle pill is on, onboarding is done and it isn't hidden for the hour.
+/// On screen while dictating or showing a notice, and when idle only if the idle pill is on,
+/// onboarding is done and it isn't hidden for the hour. Over Echotype's own focused window only
+/// the live states show, and not on Home or onboarding, which show them already (D14).
 pub fn visible(c: &Ctx, active: bool) -> bool {
-    !c.main_key && (active || (c.mac && c.onboarded && c.idle_on && !c.hidden_for_now()))
+    if c.main_key {
+        return active && !c.main_home;
+    }
+    active || (c.mac && c.onboarded && c.idle_on && !c.hidden_for_now())
 }
 
 /// What the tray's pill item does now (D12/X5).
@@ -370,6 +376,7 @@ fn ctx(app: &AppHandle, s: &Settings) -> Ctx {
         hidden_until: s.pill_hidden_until,
         now_ms: now_ms(),
         main_key: state(app).main_key.load(std::sync::atomic::Ordering::SeqCst),
+        main_home: state(app).main_home.load(std::sync::atomic::Ordering::SeqCst) || !s.onboarded,
     }
 }
 
@@ -613,7 +620,7 @@ mod tests {
     }
 
     fn ctx() -> Ctx {
-        Ctx { mac: true, onboarded: true, idle_on: true, hidden_until: 0, now_ms: 1_000_000, main_key: false }
+        Ctx { mac: true, onboarded: true, idle_on: true, hidden_until: 0, now_ms: 1_000_000, main_key: false, main_home: false }
     }
 
     #[test]
@@ -625,7 +632,11 @@ mod tests {
         let hidden = Ctx { hidden_until: c.now_ms + 1, ..c };
         assert!(!visible(&hidden, false) && visible(&hidden, true), "hide for an hour hides the idle pill only");
         assert!(visible(&Ctx { now_ms: c.now_ms + 1, ..hidden }, false), "and the hour ends by itself");
-        assert!(!visible(&Ctx { main_key: true, ..c }, false) && !visible(&Ctx { main_key: true, ..c }, true), "never over Echotype's own window (D14)");
+        let home = Ctx { main_key: true, main_home: true, ..c };
+        assert!(!visible(&home, false) && !visible(&home, true), "Echotype's Home shows the live state itself (D14)");
+        let page = Ctx { main_key: true, ..c };
+        assert!(!visible(&page, false), "no idle bar over Echotype's own window");
+        assert!(visible(&page, true), "but a recording or notice still shows over its other pages");
         assert!(!visible(&Ctx { onboarded: false, ..c }, false), "no idle pill before onboarding finishes");
         assert!(!visible(&Ctx { mac: false, ..c }, false) && visible(&Ctx { mac: false, ..c }, true), "elsewhere only while dictating");
     }

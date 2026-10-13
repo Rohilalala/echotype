@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
+use tauri::{AppHandle, Emitter, Listener, Manager, RunEvent, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
 
@@ -44,6 +44,8 @@ struct AppState {
     pill_wake: mpsc::Sender<()>,
     /// Echotype's settings window is the key window (D14: the pill steps aside).
     main_key: AtomicBool,
+    /// The settings window shows Home (main.js emits `main-page` on every page change).
+    main_home: AtomicBool,
     clicks: Mutex<pill::Debounce>,
     /// The tray's hide/show pill item (macOS), relabelled by the pill loop.
     tray_pill: Mutex<Option<MenuItem<tauri::Wry>>>,
@@ -1059,6 +1061,7 @@ pub fn run() {
                 pill: Mutex::new(pill::Pill::default()),
                 pill_wake,
                 main_key: AtomicBool::new(false),
+                main_home: AtomicBool::new(true),
                 clicks: Mutex::new(pill::Debounce::default()),
                 tray_pill: Mutex::new(None),
                 last_failed: Mutex::new(None),
@@ -1068,6 +1071,12 @@ pub fn run() {
                 recording: AtomicBool::new(false),
             });
             create_tray(app)?;
+            let h = app.handle().clone();
+            app.listen_any("main-page", move |e| {
+                let st = state(&h);
+                st.main_home.store(e.payload() == "\"home\"", Ordering::SeqCst);
+                let _ = st.pill_wake.send(());
+            });
             pill::run(app.handle().clone(), pill::create(app, &s)?, woken);
             for key in shortcuts(&s).iter().filter(|k| !k.is_empty()) {
                 if let Err(e) = swap_hotkey(app.handle(), "", key) {
