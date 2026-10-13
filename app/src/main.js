@@ -320,7 +320,7 @@ function renderHero() {
   const line = $('#heroLine'), sub = $('#heroSub');
   const mic = $('#heroMic');
   mic.ariaLabel = st === 'recording' ? 'Finish dictation' : 'Start dictation';
-  mic.disabled = st === 'transcribing' || st === 'cleaning';
+  mic.ariaDisabled = st === 'transcribing' || st === 'cleaning'; // not `disabled`: focus stays on it
   renderChips();
   if (st === 'recording') {
     line.replaceChildren(muted ? 'Is your mic muted?' : 'Listening');
@@ -335,7 +335,7 @@ function renderHero() {
     if (b) fill(sub, h('span', {}, b.text), h('button', { className: 'btn', type: 'button', onclick: b.act }, b.label));
     else if (st === 'error') fill(sub, h('span', {}, `${dictation.error || 'Dictation stopped.'}`), ...keptText(), dictation.retry && retryBtn(), actionBtn(dictation.action));
     else if (st === 'hint') fill(sub, h('span', { className: 'notice-inline' }, dictation.message), actionBtn(dictation.action));
-    else if (st === 'done' && dictation.copied) fill(sub, h('span', {}, dictation.warning || 'Copied. Press ⌘V to paste it.'), chip, ...keptText(), actionBtn(dictation.action));
+    else if (st === 'done' && dictation.copied) fill(sub, h('span', {}, dictation.warning || 'Press ⌘V to paste it.'), chip, ...keptText(), actionBtn(dictation.action));
     else if (st === 'done' && dictation.warning) fill(sub, h('span', {}, dictation.warning), chip, cleanupFix);
     else fill(sub, h('span', {}, 'Text appears wherever your cursor is.'), chip);
   }
@@ -349,9 +349,10 @@ function renderChips() {
   const lang = LANGS.find(([v]) => v === S.language)?.[1] ?? S.language;
   $('#chipLang').textContent = S.translate_to_english ? `${lang} to English` : lang;
   $('#chipStyle').textContent = noCleanup() ? 'No cleanup' : STYLE_LABEL[S.cleanup.style] ?? S.cleanup.style;
+  for (const b of $$('[data-go]')) b.ariaLabel = `${b.title}: ${b.textContent}`; // the chip opens that page
 }
 for (const b of $$('[data-go]')) b.addEventListener('click', () => go(b.dataset.go));
-$('#heroMic').addEventListener('click', () => invoke('toggle_dictation'));
+$('#heroMic').addEventListener('click', e => e.currentTarget.ariaDisabled !== 'true' && invoke('toggle_dictation'));
 $('#heroMeter').append(...METER.map(() => h('i')));
 
 // "No cleanup" (D4): cleanup is off, or on with no key. A dismissible Home banner offers the setup.
@@ -402,7 +403,7 @@ function renderRecent() {
   box.replaceChildren(...recent.slice(0, 3).map(r => {
     const copy = h('button', { className: 'btn quiet', type: 'button' }, 'Copy');
     copy.onclick = () => copyText(r.text, copy);
-    return h('div', { className: 'row entry' }, h('span', { className: 'text' }, r.text), h('time', { className: 'when', title: fmtTime(r.ts).replace('\n', ' ') }, fmtAgo(r.ts)), copy);
+    return h('div', { className: 'row entry' }, h('span', { className: 'text' }, r.text.replace(/\s*\n\s*[-*•]?\s*/g, ' · ')), h('time', { className: 'when', title: fmtTime(r.ts).replace('\n', ' ') }, fmtAgo(r.ts)), copy);
   }));
 }
 
@@ -537,22 +538,28 @@ function modelRow(m) {
       h('span', { className: 'ring', role: 'progressbar', 'aria-label': `Downloading ${m.label}`, 'aria-valuenow': Math.round(p * 100), 'data-progress': m.id, style: `--p:${p}` })];
   } else if (!m.downloaded) {
     actions = [err ? h('button', { className: 'btn', type: 'button', onclick: () => download(m.id) }, 'Retry')
+      : !m.fits ? h('button', { className: 'btn', type: 'button', onclick: () => download(m.id) }, 'Download anyway')
       : h('button', { className: 'round', type: 'button', title: 'Download', 'aria-label': `Download ${m.label}, ${fmtMB(m.size_mb)}`, onclick: () => download(m.id) }, svg(DOWN))];
   } else if (inUse) {
     actions = [h('span', { className: 'in-use' }, svg(CHECK), 'In use')];
   } else {
-    const menu = h('div', { id: `menu-${m.id}`, className: 'menu', popover: 'auto', role: 'menu', onbeforetoggle: e => {
+    // Delete asks twice: the model can be gigabytes to download again.
+    const canPop = 'popover' in HTMLElement.prototype; // older WebViews get the button in the row instead
+    const del = h('button', { className: canPop ? 'menu-item danger' : 'btn quiet danger', type: 'button' }, 'Delete model');
+    del.onclick = async () => {
+      if (!del.dataset.armed) { del.dataset.armed = 1; del.textContent = 'Click again to delete'; return setTimeout(() => { del.textContent = 'Delete model'; delete del.dataset.armed; }, 3000); }
+      if (menu) menu.hidePopover();
+      try { await invoke('delete_model', { id: m.id }); } catch (e) { modelErr[m.id] = String(e); }
+      await refreshModels();
+    };
+    const menu = canPop && h('div', { id: `menu-${m.id}`, className: 'menu', popover: 'auto', onbeforetoggle: e => {
       if (e.newState !== 'open') return;
       const r = more.getBoundingClientRect();
       menu.style.top = `${r.bottom + 4}px`;
       menu.style.right = `${innerWidth - r.right}px`;
-    } }, h('button', { className: 'menu-item danger', type: 'button', role: 'menuitem', onclick: async () => {
-      menu.hidePopover();
-      try { await invoke('delete_model', { id: m.id }); } catch (e) { modelErr[m.id] = String(e); }
-      await refreshModels();
-    } }, 'Delete model'));
-    const more = h('button', { className: 'icon-btn', type: 'button', popovertarget: menu.id, 'aria-haspopup': 'menu', 'aria-label': `More for ${m.label}` }, svg(MORE));
-    actions = [h('button', { className: 'btn', type: 'button', onclick: () => useModel(m.id) }, 'Use'), more, menu];
+    } }, del);
+    const more = canPop && h('button', { className: 'icon-btn', type: 'button', popovertarget: menu.id, 'aria-label': `More for ${m.label}` }, svg(MORE));
+    actions = [h('button', { className: 'btn', type: 'button', onclick: () => useModel(m.id) }, 'Use'), ...(canPop ? [more, menu] : [del])];
   }
   return h('div', { className: 'row model' },
     h('span', { className: 'tile', 'aria-hidden': 'true' }, svg(WAVE)),
@@ -604,8 +611,7 @@ function useModel(id) {
 // ---------- cleanup ----------
 function setCleanupInert() {
   const off = !S.cleanup.enabled;
-  $('#cleanupBody').classList.toggle('disabled', off);
-  $('#cleanupBody').inert = off; // off means not focusable either, not just dimmed
+  $('#cleanupBody').hidden = off; // nothing to configure until cleanup is on
 }
 function renderCleanup() {
   $('#cleanupProvider').replaceChildren(...presets.filter(p => p.cleanup).map(p => h('option', { value: p.id, selected: p.id === S.cleanup.provider }, p.label)));
@@ -696,8 +702,8 @@ function cloudPanel() {
     ];
   }
   const a = cloud.account, pro = a.plan === 'pro';
-  const billing = (label, cmd, args) => {
-    const btn = h('button', { className: 'btn', type: 'button' }, label);
+  const billing = (label, cmd, args, primary) => {
+    const btn = h('button', { className: primary ? 'btn primary' : 'btn', type: 'button' }, label);
     btn.onclick = async () => {
       btn.disabled = true;
       cloud.error = cloud.note = null;
@@ -706,7 +712,7 @@ function cloudPanel() {
     };
     return btn;
   };
-  const signOut = h('button', { className: 'btn', type: 'button', onclick: async () => {
+  const signOut = h('button', { className: 'btn quiet', type: 'button', onclick: async () => {
     try { await invoke('cloud_logout'); cloud = { status: 'out' }; renderCloud(); } catch (e) { cloudFailed(e); }
   } }, 'Sign out');
   const free = !pro && a.words_limit > 0;
@@ -717,7 +723,7 @@ function cloudPanel() {
       free && [h('span', { className: 'bar', role: 'progressbar', 'aria-label': 'Words used this week', 'aria-valuenow': Math.round(Math.min(1, a.words_used / a.words_limit) * 100) }, h('i', { style: `transform:scaleX(${Math.min(1, a.words_used / a.words_limit)})` }))]),
     pro
       ? cloudRow('Billing', 'Change your plan, update your card or cancel.', [billing('Manage billing', 'cloud_portal')], ...status)
-      : cloudRow('Upgrade to Pro', 'Unlimited words, with a fair-use limit of 40 audio hours a month.', [billing('$6 a month', 'cloud_checkout', { plan: 'pro_monthly' }), billing('$60 a year', 'cloud_checkout', { plan: 'pro_yearly' })], ...status),
+      : cloudRow('Upgrade to Pro', 'Unlimited words, with a fair-use limit of 40 audio hours a month.', [billing('$6 a month', 'cloud_checkout', { plan: 'pro_monthly' }), billing('$60 a year', 'cloud_checkout', { plan: 'pro_yearly' }, true)], ...status),
   ];
 }
 
@@ -741,6 +747,7 @@ function renderCloud() {
   renderHero();
 }
 window.addEventListener('focus', refreshCloud); // back from the browser after checkout
+window.addEventListener('focus', () => S && renderRecent()); // relative times move on while the window is away
 
 // ---------- language ----------
 const LANGS = [['auto', 'Auto-detect'], ['en', 'English'], ['hi', 'Hindi'], ['ar', 'Arabic'], ['bn', 'Bengali'], ['zh', 'Chinese'], ['nl', 'Dutch'], ['fr', 'French'], ['de', 'German'], ['gu', 'Gujarati'], ['id', 'Indonesian'], ['it', 'Italian'], ['ja', 'Japanese'], ['kn', 'Kannada'], ['ko', 'Korean'], ['ml', 'Malayalam'], ['mr', 'Marathi'], ['pa', 'Punjabi'], ['pl', 'Polish'], ['pt', 'Portuguese'], ['ru', 'Russian'], ['es', 'Spanish'], ['ta', 'Tamil'], ['te', 'Telugu'], ['tr', 'Turkish'], ['uk', 'Ukrainian'], ['ur', 'Urdu'], ['vi', 'Vietnamese']];
@@ -782,13 +789,13 @@ $('#addRep').addEventListener('click', () => {
 });
 
 // ---------- history ----------
-function fmtTime(ts, short) {
+function fmtTime(ts) {
   const d = new Date(typeof ts === 'number' && ts < 1e12 ? ts * 1000 : ts);
   if (isNaN(d)) return '';
   const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   if (d.toDateString() === new Date().toDateString()) return time;
   const day = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
-  return short ? day : `${day}\n${time}`;
+  return `${day}\n${time}`;
 }
 
 // "2m", "1h" under a day, then a date (D15).
@@ -868,7 +875,7 @@ function renderUpgrade() {
   box.hidden = !S.onboarded || S.dismissed.includes('upgrade_offer') || (!p && !sys.can_autostart);
   if (box.hidden) return;
   fill(box.querySelector('.notice-text'), h('b', {}, 'New: '),
-    p ? ['paste your last dictation again with ', ...keycaps(p), ', copy it with ', ...keycaps(c), sys.can_autostart ? ', and start Echotype at login.' : '.'] : 'start Echotype at login.');
+    p ? ['paste your last dictation again with ', h('span', { className: 'keys' }, keycaps(p)), ', copy it with ', h('span', { className: 'keys' }, keycaps(c)), sys.can_autostart ? ', and start Echotype at login.' : '.'] : 'start Echotype at login.');
 }
 $('#upgradeYes').addEventListener('click', () => {
   const [p, c] = DEFAULT_LAST();
@@ -1089,7 +1096,7 @@ listen('model-download', ({ payload: p }) => {
   const had = progress[p.id] != null;
   progress[p.id] = frac;
   const bars = $$(`[data-progress="${p.id}"]`);
-  if (!had || !bars.length) return renderModels();
+  if (!had || !bars.length) { renderModels(); return renderHero(); }
   bars.forEach(b => { b.style.setProperty('--p', frac); b.setAttribute('aria-valuenow', Math.round(frac * 100)); });
   $$(`[data-pct="${p.id}"]`).forEach(el => (el.textContent = `${Math.round(frac * 100)}%`));
   renderObModel();

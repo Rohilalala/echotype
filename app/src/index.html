@@ -10,7 +10,7 @@
   <script type="module" src="main.js"></script>
 </head>
 <body>
-  <aside class="sidebar" data-tauri-drag-region>
+  <aside class="sidebar" data-tauri-drag-region="deep">
     <nav aria-label="Sections" id="nav">
       <button data-page="home"><svg viewBox="0 0 16 16"><path d="M2.5 7.2 8 2.5l5.5 4.7V13a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1Z"/><path d="M6.3 14v-3.6h3.4V14"/></svg>Home</button>
       <button data-page="speech"><svg viewBox="0 0 16 16"><path d="M2.5 6.5v3M5.25 4v8M8 2v12M10.75 5v6M13.5 7v2"/></svg>Speech model</button>
@@ -71,7 +71,7 @@
     <!-- Speech model -->
     <section data-page="speech" hidden>
       <h1>Speech model</h1>
-      <p class="lede">Turns your voice into text. A local model runs on this Mac and nothing leaves it.</p>
+      <p class="lede">Turns your voice into text. A local model runs on this Mac and nothing leaves it; a service gets your audio to transcribe it.</p>
       <div class="seg" id="sttProvider" role="radiogroup" aria-label="Speech provider"></div>
 
       <div id="sttLocal">
