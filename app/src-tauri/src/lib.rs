@@ -2,24 +2,32 @@ mod api;
 mod audio;
 mod cleanup;
 mod cloud;
+mod hotkey;
 mod platform;
 mod settings;
 mod stt;
 
+use audio::{LevelStats, Quality};
+use hotkey::{Act, Ev};
 use serde::Serialize;
 use settings::{HistoryEntry, Settings};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
 
-const MIN_SAMPLES: usize = audio::RATE as usize * 3 / 10; // recordings under 0.3 s are taps
+const MIN_SAMPLES: usize = audio::RATE as usize * 3 / 10; // under 0.3 s there is nothing to transcribe
 /// A recording this long stops itself and is transcribed as usual (toggle mode left on, a stuck key).
+// ponytail: the whole clip stays in memory, ~460 MB at 30 min of 48 kHz f32 plus the 16 kHz copy;
+// stream-resample into the 16 kHz buffer if hands-free recordings get that long in practice.
 const MAX_RECORDING: Duration = Duration::from_secs(30 * 60);
+/// Windows (50 ms) of level stats skipped after Echotype's own start/lock sound (<= 120 ms plus output latency).
+const SOUND_WINDOWS: u32 = 4;
 
 struct AppState {
     settings: Mutex<Settings>,
@@ -30,16 +38,20 @@ struct AppState {
     /// The last recording whose transcription failed, kept so `retry_last` can run it again.
     // ponytail: only the last one, in memory; a failed-recordings folder if users need more than one retry.
     last_failed: Mutex<Option<Vec<f32>>>,
+    /// The last dictated text, for paste-last and copy-last. Memory only, so it works with history
+    /// off; cleared with history and when history is switched off.
+    last_output: Mutex<Option<String>>,
+    /// Model downloads in flight: id → fraction done, so a press can say "Model downloading 42%".
+    downloads: Mutex<HashMap<String, f64>>,
+    /// Shortcuts that failed to register at launch, shown in Settings.
+    shortcut_errors: Mutex<Vec<String>>,
 }
 
 enum Cmd {
-    Press,
-    Release,
-    Toggle,
-    Cancel,
+    Key(Ev),
     Retry,
-    /// Sent by recording `n` when it reaches MAX_RECORDING.
-    AutoStop(u64),
+    /// Recording `n`'s microphone went away: transcribe what it captured.
+    Lost(u64),
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -54,9 +66,21 @@ struct DictationState {
     /// The recording is kept and `retry_last` can transcribe it again.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     retry: bool,
-    /// `text` went to the clipboard instead of being pasted (a retry started from this window).
+    /// `text` went to the clipboard instead of being pasted.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     copied: bool,
+    /// State "hint": a short notice ("Didn't catch that", "Hold ⌥ Space to dictate", ...).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    /// Secondary chip, one at most: "too_quiet" > "quiet" > "no_cleanup".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chip: Option<&'static str>,
+    /// A hold-mode recording locked hands-free (double-tap or click).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    locked: bool,
+    /// What the settings window offers to fix it: "microphone" | "accessibility" | "model" | "cleanup" | "settings".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action: Option<&'static str>,
 }
 
 fn state(app: &AppHandle) -> tauri::State<'_, AppState> {
@@ -67,10 +91,16 @@ pub(crate) fn current_settings(app: &AppHandle) -> Settings {
     state(app).settings.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 // ---------- dictation ----------
 
 fn emit_state(app: &AppHandle, s: DictationState) {
     let busy = matches!(s.state, "recording" | "transcribing" | "cleaning");
+    // A chip is a second thing to read, so the result stays up longer.
+    let linger = Duration::from_millis(if s.chip.is_some() { 2500 } else { 1200 });
     let _ = app.emit("dictation-state", s);
     let st = state(app);
     let generation = st.overlay_gen.fetch_add(1, Ordering::SeqCst) + 1;
@@ -80,7 +110,7 @@ fn emit_state(app: &AppHandle, s: DictationState) {
     } else {
         let app = app.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(1200));
+            std::thread::sleep(linger);
             if state(&app).overlay_gen.load(Ordering::SeqCst) == generation {
                 let _ = overlay.hide();
             }
@@ -92,63 +122,212 @@ fn simple(state: &'static str) -> DictationState {
     DictationState { state, ..Default::default() }
 }
 
+fn hint(message: impl Into<String>, action: Option<&'static str>) -> DictationState {
+    DictationState { state: "hint", message: Some(message.into()), action, ..Default::default() }
+}
+
+/// The D2 secondary chip: too quiet beats quiet voice beats no cleanup.
+fn chip(quality: Option<Quality>, no_cleanup: bool) -> Option<&'static str> {
+    match quality {
+        Some(Quality::TooQuiet) => Some("too_quiet"),
+        Some(Quality::Quiet) => Some("quiet"),
+        None => no_cleanup.then_some("no_cleanup"),
+    }
+}
+
+/// Which window page fixes an error, from the error text the pipeline produced.
+fn error_action(e: &str) -> Option<&'static str> {
+    if e.starts_with("Not enough free memory") || e.contains("could not load") || e.contains("Choose a speech model") || e.contains("multilingual model") {
+        Some("model")
+    } else {
+        None
+    }
+}
+
+/// "⌥ Space", "fn", "Right ⌘", "Ctrl+Alt+K": how copy names the key the user dictates with.
+fn key_label(s: &Settings, mac: bool) -> String {
+    let side = |k: &str| format!("Right {k}");
+    match (mac, s.talk_key.as_str()) {
+        (true, "fn") if hotkey::read_globe_setting() && talk_tap_active() => return "fn".into(),
+        (true, "right_option") if talk_tap_active() => return side("⌥"),
+        (true, "right_command") if talk_tap_active() => return side("⌘"),
+        (true, "right_control") if talk_tap_active() => return side("⌃"),
+        _ => {}
+    }
+    accel_label(&s.hotkey, mac)
+}
+
+fn accel_label(accel: &str, mac: bool) -> String {
+    let part = |k: &str| -> String {
+        let k = k.strip_prefix("Key").or_else(|| k.strip_prefix("Digit")).unwrap_or(k);
+        match (mac, k) {
+            (true, "CommandOrControl" | "CmdOrCtrl" | "Command" | "Cmd" | "Super" | "Meta") => "⌘".into(),
+            (true, "Control" | "Ctrl") => "⌃".into(),
+            (true, "Alt" | "Option") => "⌥".into(),
+            (true, "Shift") => "⇧".into(),
+            (false, "CommandOrControl" | "CmdOrCtrl" | "Control") => "Ctrl".into(),
+            (false, "Super" | "Meta") => "Win".into(),
+            _ => k.to_string(),
+        }
+    };
+    accel.split('+').map(part).collect::<Vec<_>>().join(if mac { " " } else { "+" })
+}
+
+fn talk_tap_active() -> bool {
+    #[cfg(target_os = "macos")]
+    return hotkey::tap::active();
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
 fn escape() -> Shortcut {
     Shortcut::new(None, Code::Escape)
 }
 
-/// One thread owns the recorder so press/release/toggle/cancel are handled strictly in order.
+fn send(app: &AppHandle, cmd: Cmd) {
+    let _ = state(app).dictation.send(cmd);
+}
+
+/// A live recording and its level statistics.
+struct Live {
+    rec: audio::Recorder,
+    stats: Arc<Mutex<LevelStats>>,
+    lost: Arc<AtomicBool>,
+}
+
+/// One thread owns the recorder and the talk-key state machine, so every key, click, Esc and
+/// timer is handled strictly in order.
 fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
     let (tx, rx) = mpsc::channel::<Cmd>();
     std::thread::spawn(move || {
         let busy = Arc::new(AtomicBool::new(false));
-        let mut rec: Option<audio::Recorder> = None;
-        let mut rec_id = 0u64;
+        let mut fsm = hotkey::Fsm::default();
+        let mut live: Option<Live> = None;
         for cmd in rx {
-            let toggle_mode = current_settings(&app).mode == "toggle";
-            match (cmd, rec.is_some()) {
-                (Cmd::Cancel, true) => {
-                    rec.take().expect("checked").stop();
+            let s = current_settings(&app);
+            let ev = match cmd {
+                Cmd::Key(ev) => ev,
+                Cmd::Lost(id) => Ev::AutoStop(id),
+                Cmd::Retry => {
+                    if live.is_none() && !busy.load(Ordering::SeqCst) {
+                        if let Some(pcm) = lock(&state(&app).last_failed).take() {
+                            process(&app, pcm, busy.clone(), Clip::default(), false);
+                        }
+                    }
+                    continue;
+                }
+            };
+            let toggle_mode = s.mode == "toggle";
+            let act = fsm.step(ev, Instant::now(), busy.load(Ordering::SeqCst), toggle_mode);
+            #[cfg(debug_assertions)]
+            if act != Act::None {
+                eprintln!("echotype: talk key {ev:?} -> {act:?}");
+            }
+            match act {
+                Act::None => {}
+                Act::Start { id, locked } => match start_recording(&app, &s, id) {
+                    Ok(l) => {
+                        let _ = app.global_shortcut().register(escape());
+                        if s.sounds {
+                            lock(&l.stats).exclude(SOUND_WINDOWS);
+                            platform::play_sound(&app, "start");
+                        }
+                        live = Some(l);
+                        emit_state(&app, DictationState { state: "recording", locked: locked && !toggle_mode, ..Default::default() });
+                    }
+                    Err(e) => {
+                        fsm.start_failed();
+                        emit_state(&app, e);
+                    }
+                },
+                Act::Lock => {
+                    if let Some(l) = &live
+                        && s.sounds
+                    {
+                        lock(&l.stats).exclude(SOUND_WINDOWS);
+                        platform::play_sound(&app, "lock");
+                    }
+                    emit_state(&app, DictationState { state: "recording", locked: true, ..Default::default() });
+                }
+                Act::ArmTap { id, seq } => {
+                    let a = app.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(hotkey::DOUBLE_TAP);
+                        send(&a, Cmd::Key(Ev::TapExpired(id, seq)));
+                    });
+                }
+                Act::Discard { hint: show } => {
+                    if let Some(l) = live.take() {
+                        l.rec.stop();
+                    }
                     let _ = app.global_shortcut().unregister(escape());
-                    emit_state(&app, simple("idle"));
+                    let verb = if toggle_mode { "Press" } else { "Hold" };
+                    emit_state(&app, if show { hint(format!("{verb} {} to dictate", key_label(&s, cfg!(target_os = "macos"))), None) } else { simple("idle") });
                 }
-                (Cmd::Toggle, true) => finish(&app, &mut rec, &busy),
-                (Cmd::AutoStop(id), true) if id == rec_id => finish(&app, &mut rec, &busy),
-                (Cmd::Press, true) if toggle_mode => finish(&app, &mut rec, &busy),
-                (Cmd::Release, true) if !toggle_mode => finish(&app, &mut rec, &busy),
-                (Cmd::Retry, false) if !busy.load(Ordering::SeqCst) => {
-                    let pcm = state(&app).last_failed.lock().unwrap_or_else(|e| e.into_inner()).take();
-                    if let Some(pcm) = pcm {
-                        process(&app, pcm, busy.clone(), false);
+                Act::Finish => {
+                    let Some(l) = live.take() else { continue };
+                    let pcm = l.rec.stop();
+                    let _ = app.global_shortcut().unregister(escape());
+                    if s.sounds {
+                        platform::play_sound(&app, "stop");
                     }
-                }
-                (Cmd::Press | Cmd::Toggle, false) if !busy.load(Ordering::SeqCst) => {
-                    rec_id += 1;
-                    let (a, id, started, sent) = (app.clone(), rec_id, std::time::Instant::now(), AtomicBool::new(false));
-                    match audio::Recorder::start(current_settings(&app).input_device, move |level| {
-                        let _ = a.emit("audio-level", serde_json::json!({ "level": level }));
-                        if started.elapsed() >= MAX_RECORDING && !sent.swap(true, Ordering::SeqCst) {
-                            let _ = state(&a).dictation.send(Cmd::AutoStop(id));
-                        }
-                    }) {
-                        Ok(r) => {
-                            rec = Some(r);
-                            let _ = app.global_shortcut().register(escape());
-                            emit_state(&app, simple("recording"));
-                        }
-                        Err(e) => emit_state(&app, DictationState { state: "error", error: Some(e), ..Default::default() }),
+                    let st = lock(&l.stats);
+                    if st.silent() {
+                        // Nothing above -70 dBFS for the whole clip: Whisper would only invent text.
+                        emit_state(&app, hint("No audio. Check your mic", Some("microphone")));
+                        continue;
                     }
+                    let warning = l.lost.load(Ordering::SeqCst).then(|| "Microphone disconnected. Transcribed what was captured.".to_string());
+                    let clip = Clip { quality: st.quality(), muted_seen: st.muted_seen(), warning };
+                    drop(st);
+                    process(&app, pcm, busy.clone(), clip, true);
                 }
-                _ => {}
             }
         }
     });
     tx
 }
 
-fn finish(app: &AppHandle, rec: &mut Option<audio::Recorder>, busy: &Arc<AtomicBool>) {
-    let pcm = rec.take().map(audio::Recorder::stop).unwrap_or_default();
-    let _ = app.global_shortcut().unregister(escape());
-    process(app, pcm, busy.clone(), true);
+/// Opens the mic for recording `id`, after checking a model or key is ready (no point recording
+/// what can't be transcribed). The error is the state to show.
+fn start_recording(app: &AppHandle, s: &Settings, id: u64) -> Result<Live, DictationState> {
+    if let Err(e) = stt::ready(s) {
+        let downloading = lock(&state(app).downloads).get(&stt::model_id(&s.stt.local_model)).copied();
+        let msg = match downloading {
+            Some(f) if s.stt.provider == "local" => format!("Model downloading {}%", (f * 100.0).round()),
+            _ => e,
+        };
+        let action = if s.stt.provider == "local" { "model" } else { "settings" };
+        return Err(hint(msg, Some(action)));
+    }
+    let stats = Arc::new(Mutex::new(LevelStats::default()));
+    let lost = Arc::new(AtomicBool::new(false));
+    let (a, st, lost2, started, sent) = (app.clone(), stats.clone(), lost.clone(), Instant::now(), AtomicBool::new(false));
+    let rec = audio::Recorder::start(s.input_device.clone(), move |db, gone| {
+        let level = lock(&st).push(db);
+        let _ = a.emit("audio-level", level);
+        if gone && !lost2.swap(true, Ordering::SeqCst) {
+            send(&a, Cmd::Lost(id));
+        }
+        if started.elapsed() >= MAX_RECORDING && !sent.swap(true, Ordering::SeqCst) {
+            send(&a, Cmd::Key(Ev::AutoStop(id)));
+        }
+    });
+    match rec {
+        Ok(rec) => Ok(Live { rec, stats, lost }),
+        Err(_) if platform::microphone_status() == "denied" => {
+            Err(DictationState { state: "error", error: Some("Microphone access is off".into()), action: Some("microphone"), ..Default::default() })
+        }
+        Err(e) => Err(DictationState { state: "error", error: Some(e), action: Some("microphone"), ..Default::default() }),
+    }
+}
+
+/// What the recording itself said about the clip, carried to the done state.
+#[derive(Default)]
+struct Clip {
+    quality: Option<Quality>,
+    muted_seen: bool,
+    warning: Option<String>,
 }
 
 /// Clears the busy flag when dropped, so even a panicking worker can't leave dictation stuck.
@@ -160,12 +339,17 @@ impl Drop for Busy {
     }
 }
 
+fn main_window_focused(app: &AppHandle) -> bool {
+    app.get_webview_window("main").is_some_and(|w| w.is_focused().unwrap_or(false))
+}
+
 /// STT + cleanup + paste + history on a worker thread, so the hotkey stays responsive.
-/// `paste` is false for a retry from Echotype's own window: pasting there would type into
-/// Echotype itself, so the text goes to the clipboard instead.
-fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, paste: bool) {
+/// Paste vs copy is decided here, when the text is ready: with Echotype's own window in front
+/// (or onboarding not finished, or a retry from the window) pasting would type into Echotype,
+/// so the text goes to the clipboard instead.
+fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, paste: bool) {
     if pcm.len() < MIN_SAMPLES {
-        emit_state(app, simple("idle"));
+        emit_state(app, hint("Didn't catch that", None));
         return;
     }
     busy.store(true, Ordering::SeqCst);
@@ -173,22 +357,41 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, paste: bool) {
     std::thread::spawn(move || {
         let guard = Busy(busy);
         let s = current_settings(&app);
-        emit_state(&app, simple("transcribing"));
+        let chip_q = chip(clip.quality, false);
+        emit_state(&app, DictationState { state: "transcribing", chip: chip_q, ..Default::default() });
         // A panic in a decoder, whisper-rs or the HTTP stack becomes an error state, not a silent loss.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cleanup::run(&s, &pcm, || emit_state(&app, simple("cleaning")))))
-            .unwrap_or_else(|_| Err("Transcription crashed unexpectedly".into()));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cleanup::run(&s, &pcm, || emit_state(&app, DictationState { state: "cleaning", chip: chip_q, ..Default::default() }))
+        }))
+        .unwrap_or_else(|_| Err("Transcription crashed unexpectedly".into()));
         let failed = result.is_err();
         // Keep the audio of a failed transcription for retry_last; a success frees the old one.
-        *state(&app).last_failed.lock().unwrap_or_else(|e| e.into_inner()) = failed.then_some(pcm);
+        *lock(&state(&app).last_failed) = failed.then_some(pcm);
         let ev = match result {
-            Err(e) => DictationState { state: "error", error: Some(e), retry: true, ..Default::default() },
-            Ok(out) if out.text.trim().is_empty() => simple("idle"),
+            Err(e) => DictationState { state: "error", action: error_action(&e), error: Some(e), retry: true, ..Default::default() },
+            Ok(out) if out.text.is_empty() => {
+                hint(if clip.muted_seen { "No audio. Check your mic" } else { "Didn't catch that" }, clip.muted_seen.then_some("microphone"))
+            }
             Ok(out) => {
                 record_history(&s, &out);
-                let res = if paste { platform::paste(&app, &out.text, s.restore_clipboard) } else { platform::copy(&out.text) };
+                *lock(&state(&app).last_output) = Some(out.text.clone());
+                let paste = paste && s.onboarded && !main_window_focused(&app);
+                let warning = out.warning.clone().or(clip.warning);
+                let chip = chip(clip.quality, out.no_cleanup && out.warning.is_none());
+                let res = if paste { platform::paste(&app, &out.text, s.restore_clipboard) } else { platform::copy(&out.text).map_err(|e| (e, false)) };
                 match res {
-                    Ok(()) => DictationState { state: "done", text: Some(out.text), warning: out.warning, copied: !paste, ..Default::default() },
-                    Err(e) => DictationState { state: "error", text: Some(out.text), error: Some(e), warning: out.warning, ..Default::default() },
+                    Ok(()) => DictationState { state: "done", text: Some(out.text), warning, copied: !paste, chip, ..Default::default() },
+                    // Accessibility off or the keystroke blocked (secure input): the text is on the clipboard.
+                    Err((e, true)) => DictationState {
+                        state: "done",
+                        text: Some(out.text),
+                        warning: Some(e),
+                        copied: true,
+                        chip,
+                        action: (!platform::accessibility_granted()).then_some("accessibility"),
+                        ..Default::default()
+                    },
+                    Err((e, false)) => DictationState { state: "error", text: Some(out.text), error: Some(e), warning, ..Default::default() },
                 }
             }
         };
@@ -197,11 +400,31 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, paste: bool) {
     });
 }
 
+/// Paste-last / copy-last: the last dictated text again, after the shortcut's own keys are up so
+/// the synthetic ⌘V is not read as ⌘⌃V (which would be this shortcut again).
+fn paste_last(app: &AppHandle, paste: bool) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let Some(text) = lock(&state(&app).last_output).clone() else {
+            emit_state(&app, hint("Nothing to paste yet", None));
+            return;
+        };
+        let s = current_settings(&app);
+        let paste = paste && !main_window_focused(&app) && platform::wait_for_modifiers_up(Duration::from_millis(500));
+        let res = if paste { platform::paste(&app, &text, s.restore_clipboard) } else { platform::copy(&text).map_err(|e| (e, false)) };
+        emit_state(&app, match res {
+            Ok(()) if paste => hint("Pasted", None),
+            Ok(()) | Err((_, true)) => hint("Copied, ⌘V to paste", None),
+            Err((e, false)) => DictationState { state: "error", error: Some(e), ..Default::default() },
+        });
+    });
+}
+
 fn record_history(s: &Settings, out: &cleanup::Output) {
     if !s.history_enabled {
         return;
     }
-    let cleaned = cleanup::wants_cleanup(s, &out.raw);
+    let cleaned = cleanup::wants_cleanup(s, &out.raw) && !out.no_cleanup;
     let entry = HistoryEntry {
         ts: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64),
         raw: out.raw.clone(),
@@ -210,9 +433,42 @@ fn record_history(s: &Settings, out: &cleanup::Output) {
         cleanup_ms: out.cleanup_ms,
         stt_provider: if s.stt.provider == "local" { format!("local:{}", stt::model_id(&s.stt.local_model)) } else { s.stt.provider.clone() },
         cleanup_provider: cleaned.then(|| s.cleanup.provider.clone()),
+        no_cleanup: out.no_cleanup,
     };
     if let Err(e) = settings::append_history(&entry) {
         eprintln!("echotype: could not write history: {e}");
+    }
+}
+
+/// Installs, retargets or removes the fn / right-modifier tap for `s.talk_key`. Returns why the
+/// talk key is not active when it was asked for; the shortcut keeps working either way.
+fn apply_talk_key(app: &AppHandle, s: &Settings) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let code = hotkey::keycode(&s.talk_key);
+        let blocked = match code {
+            Some(63) if !hotkey::read_globe_setting() => Some("Set “Press 🌐 key to” to “Do Nothing” in System Settings, Keyboard, to use fn".to_string()),
+            Some(_) if !hotkey::tap::allowed() => Some(format!("Using {}: this talk key needs Input Monitoring", accel_label(&s.hotkey, true))),
+            _ => None,
+        };
+        let tx = state(app).dictation.clone();
+        let res = hotkey::tap::set(code.filter(|_| blocked.is_none()), move |e| {
+            let ev = match e {
+                hotkey::TapEv::Down => Ev::Press,
+                hotkey::TapEv::Up => Ev::Release,
+                hotkey::TapEv::Other => Ev::OtherKey,
+            };
+            let _ = tx.send(Cmd::Key(ev));
+        });
+        if blocked.is_some() || res.is_err() {
+            eprintln!("echotype: talk key {} inactive: {}", s.talk_key, blocked.clone().or(res.clone().err()).unwrap_or_default());
+        }
+        blocked.or(res.err())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, s);
+        None
     }
 }
 
@@ -385,6 +641,12 @@ fn commit_settings(app: &AppHandle, change: impl FnOnce(&Settings) -> Settings) 
         let s = new.clone();
         std::thread::spawn(move || stt::warm_up(&s));
     }
+    if !new.history_enabled {
+        *lock(&state(app).last_output) = None;
+    }
+    if new.talk_key != old.talk_key {
+        apply_talk_key(app, &new);
+    }
     let _ = app.emit("settings-changed", &new);
     apply_local_api(app, &new)?;
     Ok(warning)
@@ -429,6 +691,15 @@ async fn list_models() -> R<Vec<stt::ModelStatus>> {
 async fn download_model(app: AppHandle, id: String) -> R<()> {
     let job = tauri::async_runtime::spawn_blocking(move || {
         let emit = |downloaded: u64, total: Option<u64>, done: bool, error: Option<&str>| {
+            {
+                let st = state(&app);
+                let mut dl = lock(&st.downloads);
+                if done {
+                    dl.remove(&id);
+                } else {
+                    dl.insert(id.clone(), total.map_or(0.0, |t| downloaded as f64 / t.max(1) as f64));
+                }
+            }
             let _ = app.emit("model-download", serde_json::json!({ "id": id, "downloaded": downloaded, "total": total, "done": done, "error": error }));
         };
         let res = stt::download(&id, |d, t| emit(d, t, false, None));
@@ -447,7 +718,7 @@ async fn delete_model(id: String) -> R<()> {
 }
 
 #[tauri::command]
-async fn list_input_devices() -> R<Vec<String>> {
+async fn list_input_devices() -> R<Vec<audio::InputDevice>> {
     Ok(audio::input_devices())
 }
 
@@ -457,7 +728,8 @@ async fn get_history(limit: Option<usize>) -> R<Vec<HistoryEntry>> {
 }
 
 #[tauri::command]
-async fn clear_history() -> R<()> {
+async fn clear_history(app: AppHandle) -> R<()> {
+    *lock(&state(&app).last_output) = None;
     settings::clear_history()
 }
 
@@ -486,13 +758,15 @@ struct SystemInfo {
     available_ram_gb: f64,
     os: &'static str,
     arch: &'static str,
+    /// Launch at login can be offered (running from /Applications, not translocated).
+    can_autostart: bool,
 }
 
 #[tauri::command]
 async fn get_system_info() -> R<SystemInfo> {
     let (total, avail) = stt::ram_mb();
     let gb = |mb: u64| (mb as f64 / 1024.0 * 10.0).round() / 10.0;
-    Ok(SystemInfo { total_ram_gb: gb(total), available_ram_gb: gb(avail), os: std::env::consts::OS, arch: std::env::consts::ARCH })
+    Ok(SystemInfo { total_ram_gb: gb(total), available_ram_gb: gb(avail), os: std::env::consts::OS, arch: std::env::consts::ARCH, can_autostart: can_autostart() })
 }
 
 #[tauri::command]
@@ -509,7 +783,34 @@ async fn local_api_status(app: AppHandle) -> R<serde_json::Value> {
 
 #[tauri::command]
 async fn toggle_dictation(app: AppHandle) -> R<()> {
-    state(&app).dictation.send(Cmd::Toggle).map_err(|e| e.to_string())
+    state(&app).dictation.send(Cmd::Key(Ev::Toggle)).map_err(|e| e.to_string())
+}
+
+/// Talk key and shortcut health for Settings and onboarding, re-checked each time it is asked
+/// (on window focus and when Settings opens), so a grant or a Globe-key change applies at once.
+#[tauri::command]
+async fn shortcut_status(app: AppHandle) -> R<serde_json::Value> {
+    let s = current_settings(&app);
+    let talk_key_error = apply_talk_key(&app, &s);
+    #[cfg(target_os = "macos")]
+    let input_monitoring = hotkey::tap::allowed();
+    #[cfg(not(target_os = "macos"))]
+    let input_monitoring = true;
+    Ok(serde_json::json!({
+        "talk_key_active": talk_tap_active(),
+        "talk_key_error": talk_key_error,
+        "input_monitoring": input_monitoring,
+        "globe_does_nothing": cfg!(target_os = "macos") && hotkey::read_globe_setting(),
+        "needs_relaunch": input_monitoring && hotkey::keycode(&s.talk_key).is_some() && !talk_tap_active() && talk_key_error.is_some(),
+        "shortcut_errors": lock(&state(&app).shortcut_errors).clone(),
+        "key_label": key_label(&s, cfg!(target_os = "macos")),
+    }))
+}
+
+/// Restarts Echotype: a fresh Input Monitoring grant only takes effect in a new process.
+#[tauri::command]
+async fn relaunch(app: AppHandle) -> R<()> {
+    app.restart()
 }
 
 /// Runs the last failed recording through STT and cleanup again. It is started from the UI,
@@ -530,7 +831,7 @@ async fn check_permissions() -> R<serde_json::Value> {
 
 #[tauri::command]
 async fn open_permission_settings(app: AppHandle, kind: String) -> R<()> {
-    if !matches!(kind.as_str(), "microphone" | "accessibility") {
+    if !matches!(kind.as_str(), "microphone" | "accessibility" | "input_monitoring") {
         return Err(format!("Unknown permission '{kind}'"));
     }
     let k = kind.clone();
@@ -615,9 +916,7 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
     let menu = Menu::with_items(app, &[&open, &toggle, &quit])?;
     let mut tray = TrayIconBuilder::with_id("main").tooltip("Echotype").menu(&menu).on_menu_event(|app, e| match e.id.as_ref() {
         "open" => show_main(app),
-        "toggle" => {
-            let _ = state(app).dictation.send(Cmd::Toggle);
-        }
+        "toggle" => send(app, Cmd::Key(Ev::Toggle)),
         "quit" => app.exit(0),
         _ => {}
     });
@@ -638,16 +937,19 @@ pub fn run() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, sc, ev| {
-                    let st = state(app);
-                    let cmd = if sc.id() == escape().id() {
-                        (ev.state == ShortcutState::Pressed).then_some(Cmd::Cancel)
-                    } else if parse_hotkey(&current_settings(app).hotkey).is_ok_and(|h| h.id() == sc.id()) {
-                        Some(if ev.state == ShortcutState::Pressed { Cmd::Press } else { Cmd::Release })
-                    } else {
-                        None
-                    };
-                    if let Some(c) = cmd {
-                        let _ = st.dictation.send(c);
+                    let s = current_settings(app);
+                    let is = |k: &str| !k.is_empty() && parse_hotkey(k).is_ok_and(|h| h.id() == sc.id());
+                    let pressed = ev.state == ShortcutState::Pressed;
+                    if sc.id() == escape().id() {
+                        if pressed {
+                            send(app, Cmd::Key(Ev::Cancel));
+                        }
+                    } else if is(&s.hotkey) {
+                        send(app, Cmd::Key(if pressed { Ev::Press } else { Ev::Release }));
+                    } else if is(&s.paste_last_hotkey) && !pressed {
+                        paste_last(app, true);
+                    } else if is(&s.copy_last_hotkey) && !pressed {
+                        paste_last(app, false);
                     }
                 })
                 .build(),
@@ -660,14 +962,19 @@ pub fn run() {
                 api: Mutex::new(None),
                 overlay_gen: AtomicU64::new(0),
                 last_failed: Mutex::new(None),
+                last_output: Mutex::new(None),
+                downloads: Mutex::new(HashMap::new()),
+                shortcut_errors: Mutex::new(vec![]),
             });
             create_overlay(app)?;
             create_tray(app)?;
             for key in shortcuts(&s).iter().filter(|k| !k.is_empty()) {
                 if let Err(e) = swap_hotkey(app.handle(), "", key) {
                     eprintln!("echotype: {e}");
+                    lock(&state(app.handle()).shortcut_errors).push(e);
                 }
             }
+            apply_talk_key(app.handle(), &s);
             // Off the main thread: the keychain read can wait on an access prompt (an unsigned
             // rebuild is a new identity to macOS), which must not freeze startup.
             let (handle, api_settings) = (app.handle().clone(), s.clone());
@@ -707,6 +1014,8 @@ pub fn run() {
             get_system_info,
             local_api_status,
             toggle_dictation,
+            shortcut_status,
+            relaunch,
             retry_last,
             check_permissions,
             open_permission_settings,
@@ -791,8 +1100,25 @@ fn cli_report(result: R<cleanup::Output>, total_ms: u128) -> (String, String, i3
 
 #[cfg(test)]
 mod tests {
-    use super::{Settings, cli_report, commit, parse_hotkey};
+    use super::{Settings, accel_label, chip, cli_report, commit, parse_hotkey};
+    use crate::audio::Quality;
     use std::cell::RefCell;
+
+    #[test]
+    fn one_chip_wins_too_quiet_then_quiet_voice_then_no_cleanup() {
+        // Copied (Accessibility off) + no cleanup + too quiet: the primary line says Copied, the chip says too quiet.
+        assert_eq!(chip(Some(Quality::TooQuiet), true), Some("too_quiet"));
+        assert_eq!(chip(Some(Quality::Quiet), true), Some("quiet"));
+        assert_eq!(chip(None, true), Some("no_cleanup"));
+        assert_eq!(chip(None, false), None);
+    }
+
+    #[test]
+    fn shortcut_labels_read_like_keycaps() {
+        assert_eq!(accel_label("Alt+Space", true), "⌥ Space");
+        assert_eq!(accel_label("CommandOrControl+Control+V", true), "⌘ ⌃ V");
+        assert_eq!(accel_label("Control+Alt+KeyK", false), "Ctrl+Alt+K");
+    }
 
     #[test]
     fn cli_prints_nothing_and_exits_zero_when_no_speech_was_found() {

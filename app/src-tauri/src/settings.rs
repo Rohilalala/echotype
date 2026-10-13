@@ -340,6 +340,9 @@ pub struct HistoryEntry {
     pub cleanup_ms: u64,
     pub stt_provider: String,
     pub cleanup_provider: Option<String>,
+    /// Cleanup was off or had no key, so this is the raw transcript ("No cleanup").
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_cleanup: bool,
 }
 
 fn history_path() -> PathBuf {
@@ -487,7 +490,7 @@ mod tests {
                 let path = path.clone();
                 std::thread::spawn(move || {
                     for i in 0..25u64 {
-                        let e = HistoryEntry { ts: t * 1000 + i, raw: "r".into(), text: "t".into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None };
+                        let e = HistoryEntry { ts: t * 1000 + i, raw: "r".into(), text: "t".into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false };
                         append_history_to(&path, &e).unwrap();
                     }
                 })

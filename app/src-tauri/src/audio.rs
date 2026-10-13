@@ -141,9 +141,219 @@ pub fn decode(bytes: Vec<u8>, ext: Option<&str>) -> Result<Vec<f32>, String> {
 
 // ---------- microphone ----------
 
-pub fn input_devices() -> Vec<String> {
+#[derive(serde::Serialize, Debug, Clone, PartialEq)]
+pub struct InputDevice {
+    pub name: String,
+    /// AirPods and other Bluetooth mics switch to a narrowband codec that hurts quiet speech.
+    pub bluetooth: bool,
+    /// The system default input, what "System default" records from.
+    pub default: bool,
+}
+
+pub fn input_devices() -> Vec<InputDevice> {
     let host = cpal::default_host();
-    host.input_devices().map(|ds| ds.filter_map(|d| d.name().ok()).collect()).unwrap_or_default()
+    let default = host.default_input_device().and_then(|d| d.name().ok());
+    #[cfg(target_os = "macos")]
+    let transports = mac::bluetooth_names();
+    let names: Vec<String> = host.input_devices().map(|ds| ds.filter_map(|d| d.name().ok()).collect()).unwrap_or_default();
+    names
+        .into_iter()
+        .map(|name| {
+            #[cfg(target_os = "macos")]
+            let bluetooth = transports.as_ref().map_or_else(|| bluetooth_by_name(&name), |t| t.contains(&name));
+            #[cfg(not(target_os = "macos"))]
+            let bluetooth = bluetooth_by_name(&name);
+            InputDevice { default: default.as_deref() == Some(name.as_str()), name, bluetooth }
+        })
+        .collect()
+}
+
+/// Fallback when the OS can't say how a device is connected.
+fn bluetooth_by_name(name: &str) -> bool {
+    let n = name.to_lowercase();
+    ["airpods", "bluetooth", "beats", "buds"].iter().any(|w| n.contains(w))
+}
+
+#[cfg(target_os = "macos")]
+mod mac {
+    use core_foundation::base::TCFType;
+    use core_foundation::string::{CFString, CFStringRef};
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    struct Address {
+        selector: u32,
+        scope: u32,
+        element: u32,
+    }
+
+    #[link(name = "CoreAudio", kind = "framework")]
+    unsafe extern "C" {
+        fn AudioObjectGetPropertyDataSize(id: u32, addr: *const Address, qsize: u32, q: *const c_void, size: *mut u32) -> i32;
+        fn AudioObjectGetPropertyData(id: u32, addr: *const Address, qsize: u32, q: *const c_void, size: *mut u32, data: *mut c_void) -> i32;
+    }
+
+    const fn cc(s: &[u8; 4]) -> u32 {
+        u32::from_be_bytes(*s)
+    }
+    const SYSTEM: u32 = 1;
+    const GLOBAL: u32 = cc(b"glob");
+
+    fn addr(selector: &[u8; 4]) -> Address {
+        Address { selector: cc(selector), scope: GLOBAL, element: 0 }
+    }
+
+    /// Names of every audio device whose CoreAudio transport is Bluetooth or Bluetooth LE.
+    /// None when CoreAudio can't be read; callers fall back to the device name.
+    pub fn bluetooth_names() -> Option<Vec<String>> {
+        // SAFETY: each call gets a valid address and an out-buffer of exactly the size it reports or expects.
+        unsafe {
+            let devs = addr(b"dev#");
+            let mut size = 0u32;
+            if AudioObjectGetPropertyDataSize(SYSTEM, &devs, 0, std::ptr::null(), &mut size) != 0 {
+                return None;
+            }
+            let mut ids = vec![0u32; size as usize / 4];
+            if AudioObjectGetPropertyData(SYSTEM, &devs, 0, std::ptr::null(), &mut size, ids.as_mut_ptr().cast()) != 0 {
+                return None;
+            }
+            let mut out = vec![];
+            for id in ids {
+                let (mut transport, mut tsize) = (0u32, 4u32);
+                if AudioObjectGetPropertyData(id, &addr(b"tran"), 0, std::ptr::null(), &mut tsize, (&mut transport as *mut u32).cast()) != 0 {
+                    continue;
+                }
+                if transport != cc(b"blue") && transport != cc(b"blea") {
+                    continue;
+                }
+                let (mut name, mut nsize): (CFStringRef, u32) = (std::ptr::null(), std::mem::size_of::<CFStringRef>() as u32);
+                if AudioObjectGetPropertyData(id, &addr(b"lnam"), 0, std::ptr::null(), &mut nsize, (&mut name as *mut CFStringRef).cast()) == 0 && !name.is_null() {
+                    out.push(CFString::wrap_under_create_rule(name).to_string());
+                }
+            }
+            Some(out)
+        }
+    }
+}
+
+// ---------- level statistics ----------
+
+/// Windows are the recorder callback's 50 ms; 20 make a second.
+const WINDOWS_PER_SEC: usize = 20;
+/// Below this a window counts as silence for the muted-mic check.
+pub const MUTED_DB: f32 = -70.0;
+const FLOOR_MIN_DB: f32 = -90.0;
+
+/// dBFS of a window, not clamped (digital zero reads -120).
+pub fn dbfs(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return -120.0;
+    }
+    let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
+    20.0 * rms.max(1e-6).log10()
+}
+
+/// What the overlay meter gets each window.
+#[derive(serde::Serialize, Debug, Clone, Copy, Default, PartialEq)]
+pub struct Level {
+    /// 0..1 above the room's noise floor, so whispers visibly move it.
+    pub meter: f32,
+    /// Every window so far (at least 2 s) was below -70 dBFS: "Is your mic muted?".
+    pub muted: bool,
+}
+
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Quality {
+    /// Spoken softly but clearly above the room: "Quiet voice".
+    Quiet,
+    /// Barely above the room: "Too quiet, move the mic closer".
+    TooQuiet,
+}
+
+/// Live meter and per-clip stats over 50 ms windows, all in dBFS.
+#[derive(Default)]
+pub struct LevelStats {
+    recent: std::collections::VecDeque<f32>,
+    clip: Vec<f32>,
+    windows: usize,
+    skip: u32,
+    heard: bool,
+    muted_seen: bool,
+    level: Level,
+}
+
+impl LevelStats {
+    /// Ignore the next `n` windows: Echotype's own start/lock sound must not count as the room or as speech.
+    pub fn exclude(&mut self, n: u32) {
+        self.skip = self.skip.max(n);
+    }
+
+    pub fn push(&mut self, db: f32) -> Level {
+        self.windows += 1;
+        if self.skip > 0 {
+            self.skip -= 1;
+            return self.level;
+        }
+        // Running floor: the quietest window of the last 3 s, never below -90 dBFS.
+        self.recent.push_back(db);
+        if self.recent.len() > 3 * WINDOWS_PER_SEC {
+            self.recent.pop_front();
+        }
+        let floor = self.recent.iter().copied().fold(f32::INFINITY, f32::min).max(FLOOR_MIN_DB);
+        self.clip.push(db);
+        if db >= MUTED_DB {
+            self.heard = true;
+        }
+        let muted = !self.heard && self.windows >= 2 * WINDOWS_PER_SEC;
+        self.muted_seen |= muted;
+        self.level = Level { meter: ((db - floor) / 30.0).clamp(0.0, 1.0), muted };
+        self.level
+    }
+
+    /// The whole clip stayed under -70 dBFS: skip STT and say "No audio. Check your mic".
+    pub fn silent(&self) -> bool {
+        !self.heard && self.windows >= 2 * WINDOWS_PER_SEC
+    }
+
+    /// The muted notice showed at some point in this recording.
+    pub fn muted_seen(&self) -> bool {
+        self.muted_seen
+    }
+
+    /// (floor, speech level) of the clip: 10th and 95th percentile window, floor clamped at -90.
+    pub fn floor_and_speech(&self) -> Option<(f32, f32)> {
+        if self.clip.is_empty() {
+            return None;
+        }
+        let mut v = self.clip.clone();
+        v.sort_by(f32::total_cmp);
+        let pct = |p: usize| v[(v.len() - 1) * p / 100];
+        Some((pct(10).max(FLOOR_MIN_DB), pct(95)))
+    }
+
+    /// Label for clips of 1 s or longer. Thresholds measured on TTS whispers (whisper-mode.md):
+    // ponytail: re-check -40/-50 dBFS and 12/10 dB SNR on owner-recorded whispers (ECHOTYPE_WHISPER_FIXTURES test).
+    pub fn quality(&self) -> Option<Quality> {
+        if self.windows < WINDOWS_PER_SEC {
+            return None;
+        }
+        let (floor, speech) = self.floor_and_speech()?;
+        let snr = speech - floor;
+        if speech < -50.0 && snr < 10.0 {
+            Some(Quality::TooQuiet)
+        } else if speech < -40.0 && snr >= 12.0 {
+            Some(Quality::Quiet)
+        } else {
+            None
+        }
+    }
+}
+
+/// 50 ms window dBFS of a whole clip, the same windows the recorder reports live.
+#[cfg(test)]
+pub fn windows_db(pcm: &[f32], rate: u32) -> Vec<f32> {
+    pcm.chunks((rate as usize / WINDOWS_PER_SEC).max(1)).map(dbfs).collect()
 }
 
 /// A running capture. The cpal stream lives on its own thread (it is !Send on macOS).
@@ -153,13 +363,15 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// Opens `device` (or the default input) and starts recording. `on_level` gets 0..1 at ~20 Hz.
-    pub fn start(device: Option<String>, on_level: impl Fn(f32) + Send + 'static) -> Result<Self, String> {
+    /// Opens `device` (or the default input) and starts recording. Every 50 ms `on_window` gets the
+    /// dBFS of the last 50 ms (unclamped) and whether the device has gone away (unplugged, Bluetooth dropped).
+    pub fn start(device: Option<String>, mut on_window: impl FnMut(f32, bool) + Send + 'static) -> Result<Self, String> {
         let (stop, stop_rx) = mpsc::channel::<()>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
         let handle = std::thread::spawn(move || {
             let buf = Arc::new(Mutex::new(Vec::<f32>::with_capacity(48_000 * 30)));
-            let (stream, rate) = match open_stream(device, buf.clone()) {
+            let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (stream, rate) = match open_stream(device, buf.clone(), lost.clone()) {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = ready_tx.send(Err(e));
@@ -167,11 +379,13 @@ impl Recorder {
                 }
             };
             let _ = ready_tx.send(Ok(()));
-            let window = (rate / 20) as usize;
+            let window = (rate as usize / WINDOWS_PER_SEC).max(1);
             while let Err(mpsc::RecvTimeoutError::Timeout) = stop_rx.recv_timeout(Duration::from_millis(50)) {
-                let b = buf.lock().unwrap_or_else(|e| e.into_inner());
-                let tail = &b[b.len().saturating_sub(window)..];
-                on_level(level(tail));
+                let db = {
+                    let b = buf.lock().unwrap_or_else(|e| e.into_inner());
+                    dbfs(&b[b.len().saturating_sub(window)..])
+                };
+                on_window(db, lost.load(std::sync::atomic::Ordering::SeqCst));
             }
             drop(stream);
             let samples = std::mem::take(&mut *buf.lock().unwrap_or_else(|e| e.into_inner()));
@@ -192,16 +406,7 @@ impl Recorder {
     }
 }
 
-/// RMS mapped from -60..0 dBFS onto 0..1 for the overlay meter.
-pub fn level(samples: &[f32]) -> f32 {
-    if samples.is_empty() {
-        return 0.0;
-    }
-    let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
-    ((20.0 * rms.max(1e-6).log10() + 60.0) / 60.0).clamp(0.0, 1.0)
-}
-
-fn open_stream(device: Option<String>, buf: Arc<Mutex<Vec<f32>>>) -> Result<(cpal::Stream, u32), String> {
+fn open_stream(device: Option<String>, buf: Arc<Mutex<Vec<f32>>>, lost: Arc<std::sync::atomic::AtomicBool>) -> Result<(cpal::Stream, u32), String> {
     let host = cpal::default_host();
     let dev = device
         .and_then(|name| host.input_devices().ok()?.find(|d| d.name().ok().as_deref() == Some(name.as_str())))
@@ -212,13 +417,13 @@ fn open_stream(device: Option<String>, buf: Arc<Mutex<Vec<f32>>>) -> Result<(cpa
     let sc: cpal::StreamConfig = cfg.clone().into();
     use cpal::SampleFormat as F;
     let stream = match cfg.sample_format() {
-        F::F32 => build::<f32>(&dev, &sc, buf),
-        F::I16 => build::<i16>(&dev, &sc, buf),
-        F::U16 => build::<u16>(&dev, &sc, buf),
-        F::I32 => build::<i32>(&dev, &sc, buf),
-        F::I8 => build::<i8>(&dev, &sc, buf),
-        F::U8 => build::<u8>(&dev, &sc, buf),
-        F::F64 => build::<f64>(&dev, &sc, buf),
+        F::F32 => build::<f32>(&dev, &sc, buf, lost),
+        F::I16 => build::<i16>(&dev, &sc, buf, lost),
+        F::U16 => build::<u16>(&dev, &sc, buf, lost),
+        F::I32 => build::<i32>(&dev, &sc, buf, lost),
+        F::I8 => build::<i8>(&dev, &sc, buf, lost),
+        F::U8 => build::<u8>(&dev, &sc, buf, lost),
+        F::F64 => build::<f64>(&dev, &sc, buf, lost),
         f => return Err(format!("Unsupported microphone sample format {f}")),
     }
     .map_err(|e| format!("Could not open the microphone: {e}"))?;
@@ -226,7 +431,7 @@ fn open_stream(device: Option<String>, buf: Arc<Mutex<Vec<f32>>>) -> Result<(cpa
     Ok((stream, rate))
 }
 
-fn build<T>(dev: &cpal::Device, cfg: &cpal::StreamConfig, buf: Arc<Mutex<Vec<f32>>>) -> Result<cpal::Stream, cpal::BuildStreamError>
+fn build<T>(dev: &cpal::Device, cfg: &cpal::StreamConfig, buf: Arc<Mutex<Vec<f32>>>, lost: Arc<std::sync::atomic::AtomicBool>) -> Result<cpal::Stream, cpal::BuildStreamError>
 where
     T: cpal::SizedSample,
     f32: cpal::FromSample<T>,
@@ -240,7 +445,12 @@ where
                 b.push(frame.iter().map(|s| s.to_sample::<f32>()).sum::<f32>() / ch as f32);
             }
         },
-        |e| eprintln!("echotype: audio stream error: {e}"),
+        move |e| {
+            eprintln!("echotype: audio stream error: {e}");
+            if matches!(e, cpal::StreamError::DeviceNotAvailable) {
+                lost.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        },
         None,
     )
 }
@@ -273,11 +483,153 @@ mod tests {
     }
 
     #[test]
-    fn mono_mix_and_level() {
+    fn mono_mix_and_unclamped_dbfs() {
         assert_eq!(to_mono(&[1.0, 0.0, 0.5, 0.5], 2), vec![0.5, 0.5]);
-        assert_eq!(level(&[0.0; 100]), 0.0);
-        assert_eq!(level(&[1.0; 100]), 1.0);
-        assert!((level(&[0.031_622_8; 100]) - 0.5).abs() < 0.01); // -30 dBFS
+        assert!(dbfs(&[1.0; 100]).abs() < 0.01);
+        assert!((dbfs(&[0.031_622_8; 100]) + 30.0).abs() < 0.01);
+        // The old meter clamped at -60; a -80 dBFS window must read about -80.
+        assert!((dbfs(&noise(0.000_1 * 2f32.sqrt(), 800)) + 80.0).abs() < 1.5, "{}", dbfs(&noise(0.000_1 * 2f32.sqrt(), 800)));
+        assert_eq!(dbfs(&[0.0; 800]), -120.0);
+        assert_eq!(dbfs(&[]), -120.0);
+    }
+
+    /// Deterministic white-ish noise with peak `amp` (rms ≈ amp / √3).
+    fn noise(amp: f32, n: usize) -> Vec<f32> {
+        let mut x = 12345u32;
+        (0..n)
+            .map(|_| {
+                x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                ((x >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0) * amp * 3f32.sqrt() / 2f32.sqrt()
+            })
+            .collect()
+    }
+
+    fn at_db(db: f32) -> f32 {
+        10f32.powf(db / 20.0) * 2f32.sqrt() // sine peak for that rms
+    }
+
+    fn stats(pcm: &[f32]) -> (LevelStats, Vec<Level>) {
+        let mut st = LevelStats::default();
+        let levels = windows_db(pcm, RATE).into_iter().map(|db| st.push(db)).collect();
+        (st, levels)
+    }
+
+    /// `secs` of room noise at `room` dBFS with a 440 Hz "voice" at `voice` dBFS from 0.5 s to the end minus 0.5 s.
+    fn clip(room: f32, voice: Option<f32>, secs: f32) -> Vec<f32> {
+        let n = (RATE as f32 * secs) as usize;
+        let mut pcm = noise(10f32.powf(room / 20.0) * 2f32.sqrt(), n);
+        if let Some(v) = voice {
+            let tone = sine(440.0, RATE, secs);
+            for (i, s) in pcm.iter_mut().enumerate().take(n - RATE as usize / 2).skip(RATE as usize / 2) {
+                *s += tone[i] * at_db(v) / 2f32.sqrt();
+            }
+        }
+        pcm
+    }
+
+    #[test]
+    fn quality_labels_quiet_voice_too_quiet_and_nothing() {
+        assert_eq!(stats(&clip(-70.0, Some(-45.0), 3.0)).0.quality(), Some(Quality::Quiet), "whisper well above a quiet room");
+        assert_eq!(stats(&clip(-58.0, Some(-54.0), 3.0)).0.quality(), Some(Quality::TooQuiet), "voice barely above the room");
+        assert_eq!(stats(&clip(-60.0, Some(-20.0), 3.0)).0.quality(), None, "normal speech");
+        assert_eq!(stats(&clip(-45.0, None, 3.0)).0.quality(), None, "room noise only");
+        assert_eq!(stats(&clip(-70.0, Some(-45.0), 0.8)).0.quality(), None, "labels need 1 s");
+    }
+
+    #[test]
+    fn meter_is_relative_to_the_room_and_the_floor_stops_at_minus_90() {
+        let (_, levels) = stats(&clip(-70.0, Some(-45.0), 3.0));
+        assert!(levels[5].meter < 0.2, "room alone {}", levels[5].meter);
+        assert!(levels[30].meter > 0.6, "a whisper 25 dB over the room fills most of the meter: {}", levels[30].meter);
+        let mut st = LevelStats::default();
+        st.push(-120.0);
+        assert!((st.push(-60.0).meter - 1.0).abs() < 1e-6, "floor clamps at -90, so -60 is 30 dB up");
+    }
+
+    #[test]
+    fn muted_mic_is_flagged_after_two_seconds_and_cleared_by_sound() {
+        for quiet in [vec![0.0f32; RATE as usize * 3], noise(at_db(-80.0), RATE as usize * 3)] {
+            let (st, levels) = stats(&quiet);
+            assert!(!levels[38].muted && levels[39].muted && levels.last().unwrap().muted);
+            assert!(st.silent());
+        }
+        let mut pcm = vec![0.0f32; RATE as usize * 3];
+        pcm.extend(clip(-60.0, Some(-20.0), 1.0));
+        let (st, levels) = stats(&pcm);
+        assert!(levels[50].muted && !levels.last().unwrap().muted && !st.silent());
+        let (st, levels) = stats(&clip(-60.0, Some(-20.0), 3.0));
+        assert!(levels.iter().all(|l| !l.muted) && !st.silent());
+    }
+
+    #[test]
+    fn excluded_windows_dont_count_as_the_room_or_as_speech() {
+        let mut st = LevelStats::default();
+        st.exclude(4);
+        for _ in 0..4 {
+            st.push(-6.0); // Echotype's own start sound
+        }
+        for _ in 0..40 {
+            st.push(-120.0);
+        }
+        assert!(st.silent(), "a loud start sound must not hide a muted mic");
+        assert_eq!(st.floor_and_speech(), Some((-90.0, -120.0)));
+    }
+
+    /// Echotype's start, stop and lock sounds: original, synthesized here, written once to
+    /// app/src-tauri/sounds and bundled. `cargo test generate_sounds -- --ignored` rewrites them.
+    #[test]
+    #[ignore = "writes the bundled sound files"]
+    fn generate_sounds() {
+        // Two soft notes per sound: (frequency Hz, start ms, length ms).
+        let tone = |notes: &[(f32, f32, f32)], total_ms: f32| -> Vec<f32> {
+            let n = (RATE as f32 * total_ms / 1000.0) as usize;
+            let mut out = vec![0.0f32; n];
+            for &(f, at, len) in notes {
+                let (s0, len_n) = ((RATE as f32 * at / 1000.0) as usize, (RATE as f32 * len / 1000.0) as usize);
+                for i in 0..len_n.min(n - s0) {
+                    let t = i as f32 / RATE as f32;
+                    let attack = (i as f32 / (RATE as f32 * 0.004)).min(1.0);
+                    let decay = (-t * 38.0).exp();
+                    let x = (2.0 * std::f32::consts::PI * f * t).sin() + 0.18 * (4.0 * std::f32::consts::PI * f * t).sin();
+                    out[s0 + i] += 0.22 * attack * decay * x;
+                }
+            }
+            out
+        };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sounds");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, pcm) in [
+            ("start", tone(&[(784.0, 0.0, 60.0), (1175.0, 45.0, 65.0)], 110.0)),
+            ("stop", tone(&[(1175.0, 0.0, 60.0), (784.0, 45.0, 65.0)], 110.0)),
+            ("lock", tone(&[(1047.0, 0.0, 50.0), (1568.0, 40.0, 50.0), (2093.0, 75.0, 40.0)], 115.0)),
+        ] {
+            assert!(pcm.len() <= RATE as usize * 120 / 1000, "{name} must be 120 ms or shorter");
+            std::fs::write(dir.join(format!("{name}.wav")), wav_bytes(&pcm)).unwrap();
+        }
+    }
+
+    #[test]
+    fn bundled_sounds_are_short_wavs() {
+        for name in ["start", "stop", "lock"] {
+            let bytes = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sounds").join(format!("{name}.wav"))).unwrap();
+            let pcm = decode(bytes, Some("wav")).unwrap();
+            assert!(pcm.len() <= RATE as usize * 120 / 1000, "{name}: {} samples", pcm.len());
+            assert!(pcm.iter().any(|s| s.abs() > 0.05), "{name} is silent");
+        }
+    }
+
+    /// Prints floor, speech level and SNR for owner-recorded clips (kept out of the repo):
+    /// `ECHOTYPE_WHISPER_FIXTURES=~/whispers cargo test whisper_fixtures -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs ECHOTYPE_WHISPER_FIXTURES, a folder of recorded .wav clips"]
+    fn whisper_fixtures() {
+        let dir = std::env::var("ECHOTYPE_WHISPER_FIXTURES").expect("set ECHOTYPE_WHISPER_FIXTURES");
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let Ok(pcm) = decode(std::fs::read(e.path()).unwrap(), e.path().extension().and_then(|x| x.to_str())) else { continue };
+            let (st, _) = stats(&pcm);
+            let (floor, speech) = st.floor_and_speech().unwrap_or_default();
+            println!("{:40} floor {floor:6.1}  speech {speech:6.1}  snr {:5.1}  label {:?}", e.file_name().to_string_lossy(), speech - floor, st.quality());
+        }
     }
 
     #[test]

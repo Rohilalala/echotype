@@ -9,16 +9,17 @@ use tauri::AppHandle;
 static CLIPBOARD: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
 
 /// Clipboard + Cmd/Ctrl+V, then restore the previous clipboard text.
-/// Never loses text: without Accessibility, or if the keystroke fails, the text stays on the clipboard.
-pub fn paste(app: &AppHandle, text: &str, restore: bool) -> Result<(), String> {
-    let mut slot = clipboard()?;
+/// Never loses text: without Accessibility, or if the keystroke fails (a secure input field),
+/// the text stays on the clipboard. The error says whether it did: `(message, on_clipboard)`.
+pub fn paste(app: &AppHandle, text: &str, restore: bool) -> Result<(), (String, bool)> {
+    let mut slot = clipboard().map_err(|e| (e, false))?;
     let cb = slot.as_mut().expect("set by clipboard()");
     if !accessibility_granted() {
-        set_private(cb, text).map_err(|e| format!("Clipboard write failed: {e}"))?;
-        return Err("Accessibility permission is off, so Echotype could not paste. The text is on your clipboard.".into());
+        set_private(cb, text).map_err(|e| (format!("Clipboard write failed: {e}"), false))?;
+        return Err(("Accessibility is off, so Echotype copied instead of pasting".into(), true));
     }
     let saved = if restore { cb.get_text().ok() } else { None };
-    set_private(cb, text).map_err(|e| format!("Clipboard write failed: {e}"))?;
+    set_private(cb, text).map_err(|e| (format!("Clipboard write failed: {e}"), false))?;
     // Delays follow Handy (MIT): 60 ms for the pasteboard to settle, 100 ms modifier hold, 60 ms before restoring.
     std::thread::sleep(Duration::from_millis(60));
     let (tx, rx) = std::sync::mpsc::channel();
@@ -26,14 +27,44 @@ pub fn paste(app: &AppHandle, text: &str, restore: bool) -> Result<(), String> {
     app.run_on_main_thread(move || {
         let _ = tx.send(send_paste_keys());
     })
-    .map_err(|e| e.to_string())?;
-    rx.recv().map_err(|e| e.to_string())?.map_err(|e| format!("{e}. The text is on your clipboard."))?;
+    .map_err(|e| (e.to_string(), true))?;
+    rx.recv().map_err(|e| (e.to_string(), true))?.map_err(|e| (format!("{e}. The text is on your clipboard"), true))?;
     std::thread::sleep(Duration::from_millis(60));
     if let Some(prev) = saved {
         let _ = set_private(cb, &prev);
     }
     // ponytail: restores text only; an image on the clipboard is replaced by the transcript. Handy's image path is the upgrade.
     Ok(())
+}
+
+/// Waits (up to `max`) until Control and Option are up, so a ⌘V sent now is not ⌘⌃V.
+/// False when they are still down after `max`.
+pub fn wait_for_modifiers_up(max: Duration) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let t = std::time::Instant::now();
+        while mac::control_or_option_down() {
+            if t.elapsed() >= max {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    let _ = max;
+    true
+}
+
+/// Plays bundled `sounds/<name>.wav` (start, stop, lock).
+// ponytail: macOS only (NSSound); Windows/Linux get sounds when someone wants them (cpal output or rodio).
+pub fn play_sound(app: &AppHandle, name: &'static str) {
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::Manager;
+        let Ok(path) = app.path().resource_dir().map(|d| d.join("sounds").join(format!("{name}.wav"))) else { return };
+        let _ = app.run_on_main_thread(move || mac::play(name, &path));
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, name);
 }
 
 fn clipboard() -> Result<std::sync::MutexGuard<'static, Option<arboard::Clipboard>>, String> {
@@ -103,6 +134,7 @@ pub fn settings_url(kind: &str) -> Option<&'static str> {
     match (std::env::consts::OS, kind) {
         ("macos", "microphone") => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"),
         ("macos", "accessibility") => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
+        ("macos", "input_monitoring") => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"),
         ("windows", "microphone") => Some("ms-settings:privacy-microphone"),
         _ => None,
     }
@@ -113,13 +145,17 @@ pub fn request(kind: &str) {
     match kind {
         // Opening an input stream triggers the one-time microphone prompt.
         "microphone" if microphone_status() == "unknown" => {
-            if let Ok(r) = crate::audio::Recorder::start(None, |_| {}) {
+            if let Ok(r) = crate::audio::Recorder::start(None, |_, _| {}) {
                 r.stop();
             }
         }
         // enigo's constructor calls AXIsProcessTrustedWithOptions(prompt: true).
         "accessibility" if !accessibility_granted() => {
             let _ = enigo::Enigo::new(&enigo::Settings::default());
+        }
+        #[cfg(target_os = "macos")]
+        "input_monitoring" if !crate::hotkey::tap::allowed() => {
+            crate::hotkey::tap::request();
         }
         _ => {}
     }
@@ -180,6 +216,56 @@ mod mac {
     unsafe extern "C" {
         fn CFDataGetBytePtr(data: *const c_void) -> *const u8;
         fn CFRelease(v: *const c_void);
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventSourceFlagsState(state: i32) -> u64;
+    }
+
+    /// Control or Option physically held (HID state, so our own synthetic events don't count).
+    pub fn control_or_option_down() -> bool {
+        // SAFETY: plain query; 1 = kCGEventSourceStateHIDSystemState.
+        unsafe { CGEventSourceFlagsState(1) & (0x0004_0000 | 0x0008_0000) != 0 }
+    }
+
+    /// One NSSound per name, created on first use and kept (three tiny sounds, no release needed).
+    /// Main thread only.
+    pub fn play(name: &'static str, path: &std::path::Path) {
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+        static SOUNDS: Mutex<Option<HashMap<&'static str, usize>>> = Mutex::new(None);
+        let mut g = SOUNDS.lock().unwrap_or_else(|e| e.into_inner());
+        let sounds = g.get_or_insert_with(HashMap::new);
+        // SAFETY: objc_msgSend is cast to each selector's exact signature: alloc/play/stop take no
+        // arguments, initWithContentsOfFile:byReference: takes an NSString and a BOOL, and
+        // stringWithUTF8String: takes a NUL-terminated C string. Every pointer is checked for null.
+        unsafe {
+            let msg0: extern "C" fn(*const c_void, *const c_void) -> *const c_void = std::mem::transmute(objc_msgSend as *const ());
+            let sel = |s: &std::ffi::CStr| sel_registerName(s.as_ptr());
+            let sound = match sounds.get(name) {
+                Some(&p) => p as *const c_void,
+                None => {
+                    let Ok(cpath) = std::ffi::CString::new(path.to_string_lossy().as_bytes()) else { return };
+                    let str_fn: extern "C" fn(*const c_void, *const c_void, *const c_char) -> *const c_void = std::mem::transmute(objc_msgSend as *const ());
+                    let ns_path = str_fn(objc_getClass(c"NSString".as_ptr()), sel(c"stringWithUTF8String:"), cpath.as_ptr());
+                    let cls = objc_getClass(c"NSSound".as_ptr());
+                    if ns_path.is_null() || cls.is_null() {
+                        return;
+                    }
+                    let init: extern "C" fn(*const c_void, *const c_void, *const c_void, bool) -> *const c_void = std::mem::transmute(objc_msgSend as *const ());
+                    let s = init(msg0(cls, sel(c"alloc")), sel(c"initWithContentsOfFile:byReference:"), ns_path, false);
+                    if s.is_null() {
+                        eprintln!("echotype: could not load sound {}", path.display());
+                        return;
+                    }
+                    sounds.insert(name, s as usize);
+                    s
+                }
+            };
+            msg0(sound, sel(c"stop"));
+            msg0(sound, sel(c"play"));
+        }
     }
 
     const ANSI_V: u16 = 9;

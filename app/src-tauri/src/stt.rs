@@ -162,6 +162,24 @@ pub fn pick_local_model(s: &Settings) -> Result<(PathBuf, Option<String>), Strin
     ))
 }
 
+/// Whether a dictation can start right now, checked before the microphone opens: a local model
+/// on disk (and a translating one when translation is on), or a key for a remote provider that needs one.
+pub fn ready(s: &Settings) -> Result<(), String> {
+    ready_with(s, |stage, provider| settings::provider_key(stage, provider).is_some())
+}
+
+fn ready_with(s: &Settings, has_key: impl Fn(&str, &str) -> bool) -> Result<(), String> {
+    if s.stt.provider == "local" {
+        resolve(&s.stt.local_model).map_err(|_| "Choose a speech model".to_string())?;
+        return pick_local_model(s).map(|_| ());
+    }
+    match settings::preset(&s.stt.provider) {
+        Some(p) if p.id == "cloud" && !has_key("stt", "cloud") => Err("Sign in to Echotype Cloud to dictate".into()),
+        Some(p) if p.needs_key && !has_key("stt", p.id) => Err(format!("Add your {} API key to dictate", p.label)),
+        _ => Ok(()),
+    }
+}
+
 // ---------- download / delete ----------
 
 pub fn download(id: &str, mut progress: impl FnMut(u64, Option<u64>)) -> Result<(), String> {
@@ -279,12 +297,12 @@ pub fn transcribe_local(model: &Path, pcm: &[f32], language: Option<&str>, trans
         // No headroom here (that is for recommendations): refuse only what would push the machine into swap.
         let (need, free) = (ram_need(model), ram_mb().1);
         if need > free {
-            return Err(format!("Not enough free memory to load {}: it needs about {need} MB and {free} MB is free. Close some apps or pick a smaller model.", model_id(&model.to_string_lossy())));
+            return Err(format!("Not enough free memory for {}: it needs about {need} MB and {free} MB is free. Close some apps or pick a smaller model.", model_id(&model.to_string_lossy())));
         }
         let path = model.to_str().ok_or("Model path is not valid UTF-8")?;
         let mut cp = WhisperContextParameters::default();
         cp.flash_attn(true); // whisper.cpp's own CLI default; faster on Metal
-        let ctx = WhisperContext::new_with_params(path, cp).map_err(|e| format!("Could not load {}: {e}", model.display()))?;
+        let ctx = WhisperContext::new_with_params(path, cp).map_err(|e| format!("{} could not load: {e}", model_id(&model.to_string_lossy())))?;
         let state = ctx.create_state().map_err(|e| format!("Could not start whisper: {e}"))?;
         *g = Some((model.to_path_buf(), state));
     }
@@ -398,6 +416,20 @@ mod tests {
     fn unknown_ids_cannot_reach_the_filesystem() {
         assert!(delete("../../etc/passwd").is_err());
         assert!(download("../x", |_, _| {}).is_err());
+    }
+
+    #[test]
+    fn ready_needs_a_local_model_or_a_remote_key() {
+        let mut s = Settings::default();
+        s.stt.local_model = "not-a-model".into();
+        assert_eq!(ready_with(&s, |_, _| true).unwrap_err(), "Choose a speech model");
+        s.stt.provider = "groq".into();
+        assert_eq!(ready_with(&s, |_, _| false).unwrap_err(), "Add your Groq API key to dictate");
+        assert!(ready_with(&s, |stage, p| (stage, p) == ("stt", "groq")).is_ok());
+        s.stt.provider = "cloud".into();
+        assert_eq!(ready_with(&s, |_, _| false).unwrap_err(), "Sign in to Echotype Cloud to dictate");
+        s.stt.provider = "custom".into();
+        assert!(ready_with(&s, |_, _| false).is_ok(), "custom servers may need no key");
     }
 
     #[test]
