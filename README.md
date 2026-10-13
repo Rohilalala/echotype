@@ -88,6 +88,12 @@ echotype --transcribe note.opus
 
 Every shortcut can be changed in Settings, and paste last and copy last can be turned off. If you upgraded from an earlier version, they start off and Settings offers them once, together with launch at login.
 
+### The pill (macOS)
+
+A thin bar waits at the bottom of the screen your cursor is on. Click it to dictate hands-free and click again (or ✓) to finish, ✕ cancels. Right-click it for the microphone, language, paste last, history, hide for 1 hour and settings. Turn it off under Settings → Pill, or hide it for an hour from the menu bar; it still shows while you dictate.
+
+The pill stays out of screenshots and screen sharing unless you turn on **Show pill in screen recordings**. This is best effort: macOS honours it for screenshots and most recorders, but some screen-sharing apps may still capture it.
+
 ### Talk key (macOS)
 
 You can also dictate with one key: **fn**, **Right Option**, **Right Command** or **Right Control**. Pick it in Settings → Shortcuts. ⌥ Space keeps working alongside it. Pressing another key while the talk key is down (fn + arrow, Right ⌘ + C) cancels the dictation, so your usual shortcuts still work.

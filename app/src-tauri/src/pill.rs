@@ -336,7 +336,6 @@ struct View {
 }
 
 struct Screen {
-    name: Option<String>,
     rect: Rect,
     work: Rect,
 }
@@ -346,7 +345,6 @@ fn screens(app: &AppHandle) -> (Vec<Screen>, f64) {
     let list = app.available_monitors().unwrap_or_default().into_iter().map(|m| {
         let (p, z, s, wa) = (m.position(), m.size(), m.scale_factor(), m.work_area());
         Screen {
-            name: m.name().cloned(),
             rect: Rect::from_phys(p.x as f64, p.y as f64, z.width as f64, z.height as f64, s),
             work: Rect::from_phys(wa.position.x as f64, wa.position.y as f64, wa.size.width as f64, wa.size.height as f64, s),
         }
@@ -377,10 +375,11 @@ fn hint(s: &Settings) -> String {
 
 /// The loop: woken by every dictation state, settings change and main-window focus change, and
 /// polling the cursor at ~15 Hz while the pill is on screen (4 Hz when the cursor is far away).
-/// `ECHOTYPE_PILL_SCREEN` (tests) pins the pill to the monitor with that name.
+/// `ECHOTYPE_PILL_SCREEN_X` (tests) pins the pill to the monitor whose left edge is at that x
+/// (global points); while that monitor is absent the pill never shows.
 pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
     std::thread::spawn(move || {
-        let pinned = std::env::var("ECHOTYPE_PILL_SCREEN").ok().filter(|n| !n.is_empty());
+        let pinned: Option<f64> = std::env::var("ECHOTYPE_PILL_SCREEN_X").ok().and_then(|x| x.parse().ok());
         let (mut shown, mut inside, mut taking_clicks) = (false, false, false);
         let (mut at, mut placed_on): ((f64, f64), Option<Rect>) = ((0.0, 0.0), None);
         let (mut emitted, mut protected, mut tray_text): (Option<View>, Option<bool>, String) = (None, None, String::new());
@@ -396,7 +395,7 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
                 let (active, expanded) = p.tick(now, inside);
                 (active, expanded, p.capsule(expanded, hint.chars().count()), p.deadline())
             };
-            let want = visible(&c, active);
+            let mut want = visible(&c, active);
             let mut near = false;
             inside = false;
             if want {
@@ -406,8 +405,8 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
                 }
                 let (_, list, primary) = monitors.as_ref().expect("just filled");
                 let cursor = app.cursor_position().ok().map(|p| cursor_pt((p.x, p.y), *primary));
-                let target = match &pinned {
-                    Some(n) => list.iter().find(|m| m.name.as_ref() == Some(n)),
+                let target = match pinned {
+                    Some(x) => list.iter().find(|m| (m.rect.x - x).abs() < 1.0),
                     None => cursor.and_then(|c| list.iter().find(|m| m.rect.contains(c))),
                 };
                 // F4: follow the cursor's display while idle; a recording or notice stays put.
@@ -419,6 +418,8 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
                     let _ = win.set_position(LogicalPosition::new(at.0, at.1));
                     placed_on = Some(t.work);
                 }
+                // Never shown where it was not placed (a pinned monitor that is gone).
+                want = placed_on.is_some();
                 let r = capsule_rect(at, size);
                 if let Some(c) = cursor {
                     inside = r.contains(c);
@@ -502,14 +503,19 @@ fn hhmm(ms: u64) -> String {
     }
 }
 
-fn set(app: &AppHandle, f: impl FnOnce(&mut Settings)) {
-    if let Err(e) = crate::commit_settings(app, |old| {
-        let mut s = old.clone();
-        f(&mut s);
-        s
-    }) {
-        eprintln!("echotype: {e}");
-    }
+/// Commits a settings change from a menu. Off the main thread, where menu events arrive, so
+/// nothing the commit does can wait on the main thread.
+fn set(app: &AppHandle, f: impl FnOnce(&mut Settings) + Send + 'static) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if let Err(e) = crate::commit_settings(&app, |old| {
+            let mut s = old.clone();
+            f(&mut s);
+            s
+        }) {
+            eprintln!("echotype: {e}");
+        }
+    });
 }
 
 pub fn on_tray(app: &AppHandle) {
@@ -563,9 +569,11 @@ pub fn show_menu(app: &AppHandle, win: &WebviewWindow) -> tauri::Result<()> {
 
 pub fn on_menu(app: &AppHandle, id: &str) {
     if let Some(name) = id.strip_prefix("pill-mic:") {
-        set(app, |s| s.input_device = (!name.is_empty()).then(|| name.to_string()));
+        let name = name.to_string();
+        set(app, move |s| s.input_device = (!name.is_empty()).then_some(name));
     } else if let Some(code) = id.strip_prefix("pill-lang:") {
-        set(app, |s| s.language = code.to_string());
+        let code = code.to_string();
+        set(app, move |s| s.language = code);
     } else {
         match id {
             "pill-paste" => crate::paste_last(app, true),
