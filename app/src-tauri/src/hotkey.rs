@@ -52,6 +52,11 @@ struct Rec {
     /// Released early in hold mode: waiting DOUBLE_TAP for a second press.
     tap: Option<u64>,
     seq: u64,
+    /// Started (or locked) by the talk-key press that is still down, so another key undoes it (fn+arrow).
+    by_press: bool,
+    /// The talk key went down on a hands-free recording: it finishes when the key comes up,
+    /// unless another key turns the press into a chord (Right ⌘+V must not end a dictation).
+    finishing: bool,
 }
 
 #[derive(Debug, Default)]
@@ -82,16 +87,17 @@ impl Fsm {
                 self.down = true;
                 match &mut self.rec {
                     None if busy => Act::None,
-                    None => self.start(now, toggle_mode, toggle_mode),
+                    None => self.start(now, toggle_mode, toggle_mode, true),
                     Some(r) if r.tap.is_some() => {
                         r.tap = None;
                         r.locked = true;
                         r.ignore_release = true;
+                        r.by_press = true;
                         Act::Lock
                     }
                     Some(r) if r.locked => {
-                        self.rec = None;
-                        Act::Finish
+                        r.finishing = true;
+                        Act::None
                     }
                     Some(_) => Act::None,
                 }
@@ -99,6 +105,11 @@ impl Fsm {
             Ev::Release => {
                 self.down = false;
                 let Some(r) = &mut self.rec else { return Act::None };
+                r.by_press = false;
+                if r.finishing {
+                    self.rec = None;
+                    return Act::Finish;
+                }
                 if r.ignore_release {
                     r.ignore_release = false;
                     return Act::None;
@@ -120,14 +131,19 @@ impl Fsm {
                     Act::Finish
                 }
                 None if busy => Act::None,
-                None => self.start(now, true, false),
+                None => self.start(now, true, false, false),
             },
             Ev::Cancel => match self.rec.take() {
                 Some(_) => Act::Discard { hint: false },
                 None => Act::None,
             },
-            Ev::OtherKey => match self.rec {
-                Some(r) if self.down && !r.locked => {
+            Ev::OtherKey => match &mut self.rec {
+                Some(r) if self.down && r.finishing => {
+                    r.finishing = false; // a chord, not a finish: keep recording, ignore its release
+                    r.ignore_release = true;
+                    Act::None
+                }
+                Some(r) if self.down && r.by_press => {
                     self.rec = None;
                     Act::Discard { hint: false }
                 }
@@ -150,9 +166,9 @@ impl Fsm {
         }
     }
 
-    fn start(&mut self, now: Instant, locked: bool, ignore_release: bool) -> Act {
+    fn start(&mut self, now: Instant, locked: bool, ignore_release: bool, by_press: bool) -> Act {
         self.next_id += 1;
-        self.rec = Some(Rec { id: self.next_id, started: now, locked, ignore_release, tap: None, seq: 0 });
+        self.rec = Some(Rec { id: self.next_id, started: now, locked, ignore_release, tap: None, seq: 0, by_press, finishing: false });
         Act::Start { id: self.next_id, locked }
     }
 }
@@ -217,9 +233,9 @@ pub mod tap {
     //! callback only turns events into talk-key signals; no key data is stored or logged.
     use super::{TapEv, classify};
     use core_foundation::base::TCFType;
-    use core_foundation::runloop::{CFRunLoop, CFRunLoopRef, CFRunLoopStop, kCFRunLoopCommonModes};
+    use core_foundation::runloop::{CFRunLoop, kCFRunLoopCommonModes, kCFRunLoopDefaultMode};
     use core_graphics::event::{CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType, CallbackResult, EventField};
-    use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     unsafe extern "C" {
@@ -242,11 +258,13 @@ pub mod tap {
 
     /// Keycode the running tap watches; 0 = none (fn chosen but the Globe key still acts).
     static CODE: AtomicU16 = AtomicU16::new(0);
-    /// The running tap's thread run loop, to stop it.
-    static RUNNING: Mutex<Option<usize>> = Mutex::new(None);
+    /// Generation of the running tap; 0 = none. A tap thread exits once its generation is no
+    /// longer current, so stopping needs no pointer to another thread's run loop.
+    static RUNNING: Mutex<u64> = Mutex::new(0);
+    static NEXT: AtomicU64 = AtomicU64::new(1);
 
     pub fn active() -> bool {
-        RUNNING.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+        *RUNNING.lock().unwrap_or_else(|e| e.into_inner()) != 0
     }
 
     /// Watches `code` (None removes the tap). Installs the tap only when it is not running yet,
@@ -256,18 +274,17 @@ pub mod tap {
         let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
         CODE.store(code.unwrap_or(0), Ordering::SeqCst);
         if code.is_none() {
-            if let Some(rl) = running.take() {
-                // SAFETY: the pointer is the run loop of the tap thread, retained by CFRunLoop for the process lifetime.
-                unsafe { CFRunLoopStop(rl as CFRunLoopRef) };
+            if *running != 0 {
+                *running = 0; // the tap thread sees this within half a second and exits
                 eprintln!("echotype: talk-key tap removed");
             }
             return Ok(());
         }
-        if running.is_some() {
+        if *running != 0 {
             return Ok(());
         }
-        let (tx, rx) = std::sync::mpsc::channel::<Result<usize, ()>>();
-        let send = Arc::new(send);
+        let generation = NEXT.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = std::sync::mpsc::channel::<bool>();
         std::thread::spawn(move || {
             let port = Arc::new(AtomicUsize::new(0));
             let held = AtomicBool::new(false);
@@ -276,7 +293,8 @@ pub mod tap {
                 CGEventTapLocation::Session,
                 CGEventTapPlacement::TailAppendEventTap,
                 CGEventTapOptions::ListenOnly,
-                vec![CGEventType::FlagsChanged, CGEventType::KeyDown],
+                // Clicks and scrolls count as "another key": Right ⌘-click or ⌃-scroll is not a dictation.
+                vec![CGEventType::FlagsChanged, CGEventType::KeyDown, CGEventType::LeftMouseDown, CGEventType::RightMouseDown, CGEventType::OtherMouseDown, CGEventType::ScrollWheel],
                 move |_, ty, ev| {
                     match ty {
                         CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
@@ -286,10 +304,10 @@ pub mod tap {
                                 unsafe { CGEventTapEnable(raw as *mut _, true) };
                             }
                         }
-                        CGEventType::FlagsChanged | CGEventType::KeyDown => {
+                        _ => {
                             let code = CODE.load(Ordering::SeqCst);
-                            let kc = ev.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
                             let flags_changed = matches!(ty, CGEventType::FlagsChanged);
+                            let kc = if flags_changed { ev.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16 } else { 0 };
                             match (code != 0).then(|| classify(flags_changed, kc, ev.get_flags().bits(), code)).flatten() {
                                 Some(TapEv::Down) if !held.swap(true, Ordering::SeqCst) => send(TapEv::Down),
                                 Some(TapEv::Up) if held.swap(false, Ordering::SeqCst) => send(TapEv::Up),
@@ -298,35 +316,38 @@ pub mod tap {
                                 _ => {}
                             }
                         }
-                        _ => {}
                     }
                     CallbackResult::Keep
                 },
             );
             let Ok(tap) = tap else {
-                let _ = tx.send(Err(()));
+                let _ = tx.send(false);
                 return;
             };
             port.store(tap.mach_port().as_concrete_TypeRef() as usize, Ordering::SeqCst);
             let Ok(src) = tap.mach_port().create_runloop_source(0) else {
-                let _ = tx.send(Err(()));
+                let _ = tx.send(false);
                 return;
             };
-            let rl = CFRunLoop::get_current();
-            // SAFETY: kCFRunLoopCommonModes is a constant CFString.
-            rl.add_source(&src, unsafe { kCFRunLoopCommonModes });
+            // SAFETY: kCFRunLoopCommonModes / kCFRunLoopDefaultMode are constant CFStrings.
+            CFRunLoop::get_current().add_source(&src, unsafe { kCFRunLoopCommonModes });
             tap.enable();
-            let _ = tx.send(Ok(rl.as_concrete_TypeRef() as usize));
-            CFRunLoop::run_current();
+            let _ = tx.send(true);
+            while *RUNNING.lock().unwrap_or_else(|e| e.into_inner()) == generation {
+                CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, std::time::Duration::from_millis(500), false);
+            }
             drop(tap); // invalidates the mach port
         });
+        *running = generation; // before the thread's first check, so it does not exit at once
         match rx.recv() {
-            Ok(Ok(rl)) => {
-                *running = Some(rl);
+            Ok(true) => {
                 eprintln!("echotype: talk-key tap installed");
                 Ok(())
             }
-            _ => Err(if allowed() { "Relaunch Echotype to finish turning on the talk key".into() } else { "Echotype needs Input Monitoring for this talk key".into() }),
+            _ => {
+                *running = 0;
+                Err(if allowed() { "Relaunch Echotype to finish turning on the talk key".into() } else { "Echotype needs Input Monitoring for this talk key".into() })
+            }
         }
     }
 }
@@ -368,8 +389,8 @@ mod tests {
         let mut t = T::toggle();
         assert_eq!(t.at(0, Ev::Press), Act::Start { id: 1, locked: true });
         assert_eq!(t.at(80, Ev::Release), Act::None);
-        assert_eq!(t.at(2000, Ev::Press), Act::Finish);
-        assert_eq!(t.at(2100, Ev::Release), Act::None);
+        assert_eq!(t.at(2000, Ev::Press), Act::None, "the second press finishes when it comes up");
+        assert_eq!(t.at(2100, Ev::Release), Act::Finish);
         // A quick toggle tap simply starts recording; no hint, no tap window.
         assert_eq!(t.at(3000, Ev::Press), Act::Start { id: 2, locked: true });
         assert_eq!(t.at(3050, Ev::Release), Act::None);
@@ -434,8 +455,8 @@ mod tests {
         assert_eq!(t.at(500, Ev::Release), Act::None, "release of the locking press");
         assert_eq!(t.at(600, Ev::TapExpired(1, 1)), Act::None, "stale expiry after the second press");
         assert!(t.f.recording());
-        assert_eq!(t.at(9000, Ev::Press), Act::Finish, "next press finishes");
-        assert_eq!(t.at(9100, Ev::Release), Act::None, "and its release is ignored");
+        assert_eq!(t.at(9000, Ev::Press), Act::None, "the next press finishes...");
+        assert_eq!(t.at(9100, Ev::Release), Act::Finish, "...on its release");
         assert_eq!(t.at(9200, Ev::Press), Act::Start { id: 2, locked: false });
     }
 
@@ -473,8 +494,8 @@ mod tests {
         assert_eq!(t.at(0, Ev::Toggle), Act::Start { id: 1, locked: true });
         assert_eq!(t.at(100, Ev::Toggle), Act::Finish, "a quick second click finishes, no hint");
         t.at(200, Ev::Toggle);
-        assert_eq!(t.at(5000, Ev::Press), Act::Finish, "the talk key finishes a clicked recording");
-        assert_eq!(t.at(5100, Ev::Release), Act::None);
+        assert_eq!(t.at(5000, Ev::Press), Act::None);
+        assert_eq!(t.at(5100, Ev::Release), Act::Finish, "the talk key finishes a clicked recording");
         assert!(!t.f.recording());
     }
 
@@ -493,10 +514,58 @@ mod tests {
         t.at(0, Ev::Press);
         assert_eq!(t.at(120, Ev::OtherKey), Act::Discard { hint: false });
         assert_eq!(t.at(200, Ev::Release), Act::None);
+        // A tap, then a chord (Right ⌘ alone, then Right ⌘+V): not a double-tap lock.
+        t.at(1000, Ev::Press);
+        t.at(1100, Ev::Release);
+        assert_eq!(t.at(1300, Ev::Press), Act::Lock);
+        assert_eq!(t.at(1350, Ev::OtherKey), Act::Discard { hint: false });
+        assert_eq!(t.at(1400, Ev::Release), Act::None);
+        assert!(!t.f.recording());
         // Typing during a locked recording (key not held) changes nothing.
         t.at(1000, Ev::Toggle);
         assert_eq!(t.at(1100, Ev::OtherKey), Act::None);
         assert!(t.f.recording());
+    }
+
+    #[test]
+    fn a_click_in_the_tap_window_finishes_and_a_failed_start_resets() {
+        let mut t = T::hold();
+        t.at(0, Ev::Press);
+        t.at(100, Ev::Release); // tap window open
+        assert_eq!(t.at(200, Ev::Toggle), Act::Finish, "the pill ✓ / tray finishes, the clip is not dropped");
+        assert_eq!(t.at(700, Ev::TapExpired(1, 1)), Act::None);
+        assert_eq!(t.at(800, Ev::Press), Act::Start { id: 2, locked: false });
+        t.f.start_failed(); // the mic did not open
+        assert_eq!(t.at(900, Ev::Release), Act::None);
+        assert_eq!(t.at(1000, Ev::Press), Act::Start { id: 3, locked: false }, "nothing is stuck");
+        t.at(1050, Ev::Release);
+        assert_eq!(t.at(1600, Ev::TapExpired(2, 1)), Act::None, "an expiry for another recording");
+        assert_eq!(t.at(1601, Ev::TapExpired(3, 1)), Act::Discard { hint: true });
+    }
+
+    #[test]
+    fn a_chord_during_a_hands_free_recording_does_not_end_it() {
+        let mut t = T::hold();
+        t.at(0, Ev::Toggle); // hands-free
+        assert_eq!(t.at(3000, Ev::Press), Act::None); // Right ⌘ down...
+        assert_eq!(t.at(3050, Ev::OtherKey), Act::None); // ...+V: a paste, not a finish
+        assert_eq!(t.at(3100, Ev::Release), Act::None);
+        assert!(t.f.recording());
+        t.at(5000, Ev::Press);
+        assert_eq!(t.at(5100, Ev::Release), Act::Finish);
+    }
+
+    #[test]
+    fn toggle_mode_chords_cancel_too() {
+        // fn+arrow in toggle mode: the fn press starts a (hands-free) recording, the arrow cancels it.
+        let mut t = T::toggle();
+        assert_eq!(t.at(0, Ev::Press), Act::Start { id: 1, locked: true });
+        assert_eq!(t.at(80, Ev::OtherKey), Act::Discard { hint: false });
+        assert_eq!(t.at(120, Ev::Release), Act::None);
+        // Once the key is up, typing during the recording is fine.
+        t.at(1000, Ev::Press);
+        t.at(1100, Ev::Release);
+        assert_eq!(t.at(1200, Ev::OtherKey), Act::None);
     }
 
     #[test]
