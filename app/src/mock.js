@@ -10,12 +10,18 @@ const settings = {
   hotkey: 'Alt+Space', mode: 'hold', input_device: null, language: 'auto', translate_to_english: false,
   local_api: { enabled: false, port: 7811 },
   stt: { provider: 'local', local_model: q.has('onboarding') ? '' : 'large-v3-turbo', model: '', base_url: '' },
-  cleanup: { enabled: true, provider: 'ollama', model: 'gemma3:4b', base_url: '', style: 'default', custom_instructions: '' },
+  cleanup: { enabled: !q.has('nocleanup'), provider: 'ollama', model: 'gemma3:4b', base_url: '', style: 'default', custom_instructions: '' },
   dictionary: ['Echotype', 'Tauri', 'Hinglish', 'Supabase'],
   replacements: [{ from: 'my email', to: 'aditya@example.com' }],
   restore_clipboard: true, history_enabled: true,
   onboarded: !q.has('onboarding'),
+  talk_key: q.get('talk') || 'accelerator',
+  paste_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+V',
+  copy_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+C',
+  autostart: !q.has('upgrade'), sounds: true,
+  dismissed: q.has('upgrade') || q.has('onboarding') ? [] : ['upgrade_offer'],
 };
+if (q.has('bt')) settings.input_device = 'AirPods Pro';
 const presets = [
   { id: 'cloud', label: 'Echotype Cloud', stt: true, cleanup: true, base_url: 'https://cloud.echotype.app/v1', default_stt_model: 'whisper-large-v3-turbo', default_cleanup_model: 'openai/gpt-oss-20b', needs_key: true },
   { id: 'openai', label: 'OpenAI', stt: true, cleanup: true, base_url: 'https://api.openai.com/v1', default_stt_model: 'gpt-4o-mini-transcribe', default_cleanup_model: 'gpt-4.1-mini', needs_key: true },
@@ -33,7 +39,7 @@ const models = [
   { id: 'large-v3-turbo', label: 'Large v3 Turbo', size_mb: 1624, ram_mb: 2300, english_only: false, translates: false, downloaded: !q.has('onboarding'), note: 'Near large-v3 accuracy at a fraction of the time. Cannot translate.' },
   { id: 'large-v3', label: 'Large v3', size_mb: 3095, ram_mb: 3900, english_only: false, translates: true, downloaded: false, note: 'Most accurate, and the slowest.' },
 ];
-const sys = { total_ram_gb: 24, available_ram_gb: 5.1, os: 'macos', arch: 'aarch64' };
+const sys = { total_ram_gb: 24, available_ram_gb: 5.1, os: 'macos', arch: 'aarch64', can_autostart: q.get('appdir') !== '0' };
 for (const m of models) m.fits = m.ram_mb + 2048 <= sys.available_ram_gb * 1024;
 models.find(m => m.id === 'large-v3-turbo').recommended = true;
 
@@ -42,7 +48,7 @@ let history = [
   { ts: ago(4), raw: 'haan toh um kal ki meeting mein we decided ki launch ko push karenge thursday tak', text: "In yesterday's meeting we decided to push the launch to Thursday.", stt_ms: 690, cleanup_ms: 540, stt_provider: 'local', cleanup_provider: 'ollama' },
   { ts: ago(38), raw: 'can you send me the uh the figma link no wait the loom link from the demo', text: 'Can you send me the Loom link from the demo?', stt_ms: 410, cleanup_ms: 610, stt_provider: 'local', cleanup_provider: 'ollama' },
   { ts: ago(95), raw: 'groceries eggs milk sourdough and two avocados', text: 'Groceries:\n- Eggs\n- Milk\n- Sourdough\n- Two avocados', stt_ms: 380, cleanup_ms: 720, stt_provider: 'local', cleanup_provider: 'ollama' },
-  { ts: ago(60 * 26), raw: 'ship it after the tauri build passes on ci', text: 'Ship it after the Tauri build passes on CI.', stt_ms: 350, cleanup_ms: null, stt_provider: 'local', cleanup_provider: null },
+  { ts: ago(60 * 26), raw: 'ship it after the tauri build passes on ci', text: 'ship it after the tauri build passes on ci', stt_ms: 350, cleanup_ms: 0, stt_provider: 'local', cleanup_provider: null, no_cleanup: true },
 ];
 const secrets = new Set(['llm:groq']);
 
@@ -61,6 +67,7 @@ const commands = {
   save_settings: ({ settings: s }) => {
     if (s.hotkey === 'CommandOrControl+Space') throw 'macOS uses this shortcut for Spotlight.';
     Object.assign(settings, structuredClone(s));
+    setTimeout(() => emit('settings-changed', structuredClone(settings)), 0);
     return null;
   },
   get_presets: () => presets,
@@ -76,7 +83,19 @@ const commands = {
     return null;
   },
   delete_model: ({ id }) => { models.find(x => x.id === id).downloaded = false; return null; },
-  list_input_devices: () => ['MacBook Pro Microphone', 'AirPods Pro', 'Shure MV7'],
+  list_input_devices: () => [
+    { name: 'MacBook Pro Microphone', bluetooth: false, default: true },
+    { name: 'AirPods Pro', bluetooth: true, default: false },
+    { name: 'Shure MV7', bluetooth: false, default: false },
+  ],
+  // ?talk=fn&globe=0|1&im=0|1&relaunch=1 shows each talk-key state.
+  shortcut_status: () => {
+    const talk = settings.talk_key !== 'accelerator', globe = q.get('globe') !== '0', im = q.get('im') !== '0', relaunch = q.has('relaunch');
+    const active = talk && (settings.talk_key !== 'fn' || globe) && im && !relaunch;
+    return { talk_key_active: active, talk_key_error: talk && !active ? 'not active' : null, input_monitoring: im, globe_does_nothing: globe,
+      needs_relaunch: talk && im && relaunch, shortcut_errors: q.has('shortcutfail') ? ["Could not register hotkey 'Alt+Space': already in use"] : [], key_label: '⌥ Space' };
+  },
+  relaunch: () => null,
   get_history: ({ limit }) => (settings.history_enabled ? history.slice(0, limit) : []),
   clear_history: () => { history = []; return null; },
   transcribe_file: async ({ path }) => {
@@ -94,7 +113,7 @@ const commands = {
     if (busy) return null;
     busy = true;
     emit('dictation-state', { state: 'recording' });
-    for (let i = 0; i < 60; i++) { await wait(50); emit('audio-level', { level: Math.abs(Math.sin(i / 4)) * 0.6 + Math.random() * 0.2 }); }
+    for (let i = 0; i < 60; i++) { await wait(50); emit('audio-level', { meter: Math.abs(Math.sin(i / 4)) * 0.6 + Math.random() * 0.2, muted: false }); }
     emit('dictation-state', { state: 'transcribing' }); await wait(700);
     emit('dictation-state', { state: 'cleaning' }); await wait(600);
     emit('dictation-state', { state: 'done', text: 'Let’s move the standup to 10:30 tomorrow.' });
@@ -156,14 +175,24 @@ addEventListener('drop', e => {
   emit('tauri://drag-drop', { paths: [...e.dataTransfer.files].map(f => `/Users/you/Downloads/${f.name}`) });
 });
 
-// overlay.html?state=recording|transcribing|cleaning|done|error shows that state.
+// overlay.html?state=<state>&chip=<chip> (and index.html?state=... for the Home hero) renders any
+// dictation state through the real overlay/Home code: state = recording|transcribing|cleaning|done|error|hint,
+// chip = quiet|too_quiet|no_cleanup, plus message=, error=, action=, copied=1, locked=1, muted=1.
 if (q.has('state')) {
   setTimeout(() => {
     const state = q.get('state');
-    emit('dictation-state', { state, text: 'Pasted', error: state === 'error' ? 'Microphone is not available' : undefined });
+    emit('dictation-state', {
+      state, text: state === 'done' ? 'Let’s move the standup to 10:30 tomorrow.' : undefined,
+      error: state === 'error' ? q.get('error') || 'Microphone access is off' : undefined,
+      message: q.get('message') || undefined, chip: q.get('chip') || undefined, action: q.get('action') || undefined,
+      warning: q.get('warning') || undefined, copied: q.has('copied'), locked: q.has('locked'), retry: q.has('retry'),
+    });
     if (state === 'recording') {
       let i = 0;
-      setInterval(() => emit('audio-level', { level: Math.abs(Math.sin(i++ / 3)) * 0.5 + Math.random() * 0.25 }), 50);
+      const muted = q.has('muted'), still = q.has('still');
+      const level = () => emit('audio-level', { meter: muted ? 0 : still ? [0.75, 1, 0.9][i++ % 3] : Math.abs(Math.sin(i++ / 3)) * 0.5 + Math.random() * 0.25, muted });
+      for (let k = 0; k < 4; k++) level(); // at once, so a screenshot never depends on (throttled) timers
+      setInterval(level, 50);
     }
   }, 50);
 }

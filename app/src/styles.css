@@ -489,6 +489,30 @@ body[data-state="error"] .hero-sub span:first-child { color: var(--bad); }
   .working::after { animation: none; border-top-color: var(--line-strong); }
 }
 
+/* Notices: the one-time upgrade offer, the Home "No cleanup" banner and persistent status lines. */
+.notice, .banner { display: flex; align-items: center; gap: 10px; padding: 10px 12px 10px 14px; margin: 14px 0 0; border-radius: var(--r-lg); background: var(--group); border: 1px solid var(--line); font-size: 12.5px; }
+.notice-text, .banner > span { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 3px; }
+.notice { border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }
+.banner { margin: 0 0 14px; color: var(--text-2); }
+.notice kbd, .banner kbd { font-size: 0.9em; }
+.status-line { display: flex; align-items: center; gap: 10px; margin: 12px 2px 0; font-size: 12.5px; color: var(--warn); }
+.status-line span { flex: 1; }
+.row-desc.warn { color: var(--warn); }
+#talkStatus, #obTalkStatus { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 2px; }
+#talkStatus .btn, #obTalkStatus .btn { height: 22px; }
+.hotkey .none { color: var(--text-2); font-size: 12.5px; padding: 0 4px; }
+.info { display: inline-grid; place-items: center; width: 14px; height: 14px; margin-left: 4px; border-radius: 50%; border: 1px solid var(--line-strong); color: var(--text-2); font: 600 9px/1 var(--font); vertical-align: 1px; }
+.info::before { content: "i"; }
+.row.tip { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.notice-inline { color: var(--text); }
+#cleanupSetup + .group { margin-top: 16px; }
+.ob-model { margin: 10px 2px 0; font-size: 12px; color: var(--text-2); font-variant-numeric: tabular-nums; min-height: 1.4em; }
+.ob-result { min-height: 64px; }
+.ob-result:empty::before { content: attr(data-empty); color: var(--text-3); }
+.hero-sub .tag { margin-left: 2px; }
+.history summary .tag { flex: none; margin-top: 1px; }
+.history .detail .hint { color: var(--text-2); font-size: 12px; margin: 0; }
+
 /* Echotype Cloud account: same grouped rows; fields sized for an email and a 6-digit code. */
 #cloudAccount input { width: 200px; }
 #cloudAccount input.code { width: 96px; font-variant-numeric: tabular-nums; }

@@ -34,6 +34,12 @@
         <p class="hero-sub" id="heroSub"></p>
       </div>
 
+      <div class="banner" id="rawBanner" hidden>
+        <span>Dictation is pasted the way you said it, with no cleanup.</span>
+        <button class="btn" id="rawSetup" type="button">Set up cleanup</button>
+        <button class="icon-btn" id="rawDismiss" type="button" aria-label="Dismiss"></button>
+      </div>
+
       <div class="drop" id="drop">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5"/><path d="M4.5 15.5v2A2.5 2.5 0 0 0 7 20h10a2.5 2.5 0 0 0 2.5-2.5v-2"/></svg>
         <div>
@@ -77,6 +83,19 @@
     <section data-page="cleanup" hidden>
       <h1>Cleanup</h1>
       <p class="lede">A language model removes fillers, applies “no wait, I meant…” corrections and formats spoken lists. If it fails, you still get the raw text.</p>
+      <div id="cleanupSetup" hidden>
+        <h2 class="group-title" id="cleanupSetupTitle">Turn on cleanup</h2>
+        <p class="lede small">Pick any one. None is required, and nothing leaves this computer with a local server.</p>
+        <div class="group">
+          <div class="row"><span class="row-text"><span class="row-title">Echotype Cloud</span><span class="row-desc">Sign in with your email. Free includes 2,000 words a week.</span></span>
+            <button class="btn" type="button" data-setup="cloud">Use Echotype Cloud</button></div>
+          <div class="row"><span class="row-text"><span class="row-title">Your own API key</span><span class="row-desc">OpenAI, Groq or OpenRouter. Stored in your keychain.</span></span>
+            <button class="btn" type="button" data-setup="key">Add a key</button></div>
+          <div class="row"><span class="row-text"><span class="row-title">A local server</span><span class="row-desc">Ollama or LM Studio running on this computer.</span></span>
+            <button class="btn" type="button" data-setup="local">Use a local server</button></div>
+        </div>
+      </div>
+
       <div class="group">
         <label class="row"><span class="row-text"><span class="row-title">Clean up dictation</span></span>
           <input type="checkbox" class="switch" data-bind="cleanup.enabled" /></label>
@@ -159,24 +178,55 @@
     <!-- Settings -->
     <section data-page="settings" hidden>
       <h1>Settings</h1>
+      <div class="notice" id="upgradeOffer" hidden>
+        <span class="notice-text"></span>
+        <span class="actions"><button class="btn quiet" id="upgradeNo" type="button">Not now</button><button class="btn primary" id="upgradeYes" type="button">Turn on</button></span>
+      </div>
+      <p class="status-line" id="axLine" hidden><span>Accessibility is off, so Echotype copies your text instead of pasting it.</span>
+        <button class="btn" type="button" data-perm="accessibility">Allow pasting</button></p>
+
+      <h2 class="group-title" id="shortcuts">Shortcuts</h2>
       <div class="group">
         <div class="row"><span class="row-text"><span class="row-title" id="hotkeyLabel">Dictation shortcut</span><span class="row-desc" id="hotkeyDesc">Click, then press the keys you want. Esc cancels.</span><span class="row-desc error" id="hotkeyError" role="alert" hidden></span></span>
-          <button class="hotkey" id="hotkeyBtn" type="button" aria-describedby="hotkeyDesc" aria-labelledby="hotkeyLabel hotkeyBtn"></button></div>
+          <button class="hotkey" id="hotkeyBtn" data-shortcut="hotkey" type="button" aria-describedby="hotkeyDesc" aria-labelledby="hotkeyLabel hotkeyBtn"></button></div>
+        <label class="row" id="talkRow"><span class="row-text"><span class="row-title">Talk key</span><span class="row-desc">Also dictate with a single key. The shortcut keeps working.</span>
+            <span class="row-desc" id="talkStatus" role="status"></span></span>
+          <select id="talkKey" data-bind="talk_key">
+            <option value="accelerator">Shortcut only</option>
+            <option value="fn">fn (Globe)</option>
+            <option value="right_option">Right Option ⌥</option>
+            <option value="right_command">Right Command ⌘</option>
+            <option value="right_control">Right Control ⌃</option>
+          </select></label>
         <div class="row"><span class="row-text"><span class="row-title" id="modeLabel">Mode</span><span class="row-desc" id="modeDesc"></span></span>
           <span class="seg" role="radiogroup" aria-labelledby="modeLabel">
             <label><input type="radio" name="mode" value="hold" data-bind="mode" /><span>Hold to talk</span></label>
             <label><input type="radio" name="mode" value="toggle" data-bind="mode" /><span>Toggle</span></label>
           </span></div>
+        <div class="row"><span class="row-text"><span class="row-title" id="pasteLabel">Paste last</span><span class="row-desc">Pastes your last dictation again.</span><span class="row-desc error" id="paste_last_hotkeyError" role="alert" hidden></span></span>
+          <span class="actions"><button class="hotkey" data-shortcut="paste_last_hotkey" type="button" aria-labelledby="pasteLabel"></button><button class="icon-btn" data-clear="paste_last_hotkey" type="button" aria-label="Turn off the paste last shortcut"></button></span></div>
+        <div class="row"><span class="row-text"><span class="row-title" id="copyLabel">Copy last</span><span class="row-desc">Puts your last dictation on the clipboard.</span><span class="row-desc error" id="copy_last_hotkeyError" role="alert" hidden></span></span>
+          <span class="actions"><button class="hotkey" data-shortcut="copy_last_hotkey" type="button" aria-labelledby="copyLabel"></button><button class="icon-btn" data-clear="copy_last_hotkey" type="button" aria-label="Turn off the copy last shortcut"></button></span></div>
       </div>
 
       <h2 class="group-title">Audio and text</h2>
       <div class="group">
-        <label class="row"><span class="row-text"><span class="row-title">Microphone</span><span class="row-desc error" id="micError" role="alert" hidden></span></span>
+        <label class="row"><span class="row-text"><span class="row-title">Microphone <span class="info" id="btInfo" hidden tabindex="0" role="img" aria-label="Bluetooth microphone" title="Bluetooth microphones such as AirPods switch to a low-quality mode while recording, which makes quiet speech harder to catch. A built-in or USB mic works better."></span></span><span class="row-desc error" id="micError" role="alert" hidden></span></span>
           <select id="mic" data-bind="input_device" data-null></select></label>
+        <div class="row tip" id="btTip" hidden><span class="row-text"><span class="row-desc">This is a Bluetooth mic. Bluetooth drops to a low-quality mode while it records, so quiet speech is harder to catch. The built-in mic works better for whispering.</span></span>
+          <button class="btn" id="btTipOk" type="button">Got it</button></div>
+        <label class="row" id="soundsRow"><span class="row-text"><span class="row-title">Sounds</span><span class="row-desc">A short tone when dictation starts, stops or locks.</span></span>
+          <input type="checkbox" class="switch" data-bind="sounds" /></label>
         <label class="row"><span class="row-text"><span class="row-title">Restore clipboard</span><span class="row-desc">Put back what you had copied after Echotype pastes.</span></span>
           <input type="checkbox" class="switch" data-bind="restore_clipboard" /></label>
         <label class="row"><span class="row-text"><span class="row-title">Keep history</span><span class="row-desc">Stored on this Mac only.</span></span>
           <input type="checkbox" class="switch" data-bind="history_enabled" /></label>
+      </div>
+
+      <h2 class="group-title">Startup</h2>
+      <div class="group">
+        <label class="row"><span class="row-text"><span class="row-title">Launch at login</span><span class="row-desc" id="autostartDesc">Echotype starts quietly in the menu bar.</span></span>
+          <input type="checkbox" class="switch" id="autostart" data-bind="autostart" /></label>
       </div>
 
       <h2 class="group-title">Local API</h2>
@@ -203,29 +253,55 @@
   <div class="onboard" id="onboard" role="dialog" aria-modal="true" aria-labelledby="obTitle" hidden>
     <div class="ob-card">
       <div class="ob-top">
-        <ol class="ob-steps" id="obSteps"><li>Permissions</li><li>Model</li><li>Try it</li></ol>
+        <ol class="ob-steps" id="obSteps"><li>Microphone</li><li>Try it</li><li>Paste</li><li>Extras</li></ol>
         <button class="btn quiet" id="obSkip" type="button">Set up later</button>
       </div>
 
       <div class="ob-step" data-step="1">
-        <h2 id="obTitle" tabindex="-1">Let Echotype hear you and type for you</h2>
-        <p class="lede">macOS asks once for each. You can change them later in System Settings.</p>
-        <div class="group" id="obPerms"></div>
-        <div class="ob-foot"><button class="btn quiet" data-recheck type="button">Check again</button><button class="btn primary" data-next type="button">Continue</button></div>
+        <h2 id="obTitle" tabindex="-1">Let Echotype hear you</h2>
+        <p class="lede">Echotype listens only while you hold the shortcut. Your speech model is downloading meanwhile, and it runs on this Mac.</p>
+        <div class="group" id="obMic"></div>
+        <p class="ob-model" id="obModel" aria-live="polite"></p>
+        <div class="ob-foot"><button class="btn quiet" id="obApi" type="button">Use an API instead</button><button class="btn primary" data-next type="button">Continue</button></div>
       </div>
 
       <div class="ob-step" data-step="2" hidden>
-        <h2 tabindex="-1">Choose a speech model</h2>
-        <p class="lede" id="obModelLede"></p>
-        <div class="group scroll" id="obModels"></div>
-        <div class="ob-foot"><button class="btn quiet" id="obApi" type="button">Use an API instead</button><button class="btn primary" data-next id="obModelNext" type="button">Continue</button></div>
+        <h2 class="ob-try" id="obTry" tabindex="-1"></h2>
+        <p class="lede" id="obTryState" aria-live="polite">Say a sentence. Your words show up below.</p>
+        <p class="ob-result text" id="obResult" data-empty="Your words show up here"></p>
+        <div class="ob-foot"><button class="btn quiet" id="obToggle" type="button">Start with a click</button><button class="btn primary" data-next id="obTryNext" type="button">Continue</button></div>
       </div>
 
       <div class="ob-step" data-step="3" hidden>
-        <h2 class="ob-try" id="obTry" tabindex="-1"></h2>
-        <p class="lede" id="obTryState" aria-live="polite">Click into any text field first, then say a sentence.</p>
-        <p class="ob-result text" id="obResult" hidden></p>
-        <div class="ob-foot"><button class="btn quiet" id="obToggle" type="button">Start with a click</button><button class="btn primary" id="obDone" type="button">Finish</button></div>
+        <h2 tabindex="-1">Let Echotype type for you</h2>
+        <p class="lede">With Accessibility on, Echotype presses ⌘V in the app you are using. Without it, your text waits on the clipboard.</p>
+        <div class="group" id="obPerms"></div>
+        <div class="ob-foot"><button class="btn quiet" data-recheck type="button">Check again</button><button class="btn primary" data-next id="obPasteNext" type="button">Continue</button></div>
+      </div>
+
+      <div class="ob-step" data-step="4" hidden>
+        <h2 tabindex="-1">A few extras</h2>
+        <p class="lede">All optional. You can change them in Settings.</p>
+        <div class="group">
+          <label class="row" id="obTalkRow"><span class="row-text"><span class="row-title">Talk key</span><span class="row-desc">Dictate with one key as well as the shortcut.</span><span class="row-desc" id="obTalkStatus" role="status"></span></span>
+            <select id="obTalk" aria-label="Talk key">
+              <option value="accelerator">Shortcut only</option>
+              <option value="fn">fn (Globe)</option>
+              <option value="right_option">Right Option ⌥</option>
+              <option value="right_command">Right Command ⌘</option>
+              <option value="right_control">Right Control ⌃</option>
+            </select></label>
+          <label class="row"><span class="row-text"><span class="row-title">Cleanup</span><span class="row-desc">Removes fillers and fixes punctuation with a language model.</span></span>
+            <select id="obCleanup" aria-label="Cleanup">
+              <option value="off">Off for now</option>
+              <option value="local">Local server (Ollama, LM Studio)</option>
+              <option value="cloud">Echotype Cloud</option>
+              <option value="key">My own API key</option>
+            </select></label>
+          <label class="row" id="obAutostartRow"><span class="row-text"><span class="row-title">Launch at login</span><span class="row-desc" id="obAutostartDesc">Echotype starts quietly in the menu bar.</span></span>
+            <input type="checkbox" class="switch" id="obAutostart" checked /></label>
+        </div>
+        <div class="ob-foot"><span></span><button class="btn primary" id="obDone" type="button">Finish</button></div>
       </div>
     </div>
   </div>

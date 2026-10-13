@@ -6,6 +6,8 @@ const { listen } = window.__TAURI__.event;
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 
+// replaceChildren without the stray "false"/"undefined" text of an absent optional child.
+const fill = (el, ...kids) => el.replaceChildren(...kids.flat().filter(k => k != null && k !== false && k !== ''));
 // Tiny element builder. Strings become text nodes, so user text is never parsed as HTML.
 function h(tag, attrs = {}, ...kids) {
   const el = document.createElement(tag);
@@ -29,6 +31,8 @@ const CHECK = '<path d="M3.5 8.5l3 3 6-7"/>';
 const CROSS = '<path d="M4 4l8 8M12 4l-8 8"/>';
 
 let S, presets, models = [], sys, isMac = true;
+let status = {}; // shortcut_status: talk key, Input Monitoring, Globe key, launch-time shortcut errors
+let devices = [];
 const progress = {}, modelErr = {};
 let recent = [], dropResults = [], apiStatus = null, tokenShown = false;
 
@@ -112,6 +116,9 @@ function syncBound() {
 }
 function changed(p) {
   if (p === 'mode' || p === 'hotkey') renderHotkey();
+  if (p === 'talk_key') refreshStatus();
+  if (p === 'input_device') renderMicNote();
+  if (p === 'cleanup.enabled') renderRaw();
   if (p === 'translate_to_english') renderLangNote();
   if (p === 'cleanup.enabled') { setCleanupInert(); renderCloud(); refreshCloud(); }
   if (p.startsWith('local_api')) refreshApi();
@@ -124,7 +131,7 @@ function go(page) {
   for (const b of $$('nav button')) b.toggleAttribute('aria-current', false), b.dataset.page === page && b.setAttribute('aria-current', 'page');
   $('#main').scrollTop = 0;
   if (page === 'history') renderHistory();
-  if (page === 'settings') { refreshPerms(); refreshApi(); }
+  if (page === 'settings') { refreshPerms(); refreshApi(); refreshStatus(); }
   if (page === 'speech' || page === 'cleanup') refreshCloud();
   history.replaceState(null, '', '#' + page);
 }
@@ -158,60 +165,121 @@ function accelFrom(e) {
   return { mods, accel: [...mods, key].join('+') };
 }
 
+// The keys that dictate: the talk key when it is active, else the shortcut.
+const TALK = { fn: ['fn'], right_option: ['Right', '⌥'], right_command: ['Right', '⌘'], right_control: ['Right', '⌃'] };
+const talkCaps = () => status.talk_key_active && TALK[S.talk_key] ? [h('kbd', {}, TALK[S.talk_key].join(' '))] : keycaps(S.hotkey);
+const verb = () => (S.mode === 'toggle' ? 'Press' : 'Hold');
+const DEFAULT_LAST = () => isMac ? ['CommandOrControl+Control+V', 'CommandOrControl+Control+C'] : ['Control+Alt+V', 'Control+Alt+C'];
+
 function renderHotkey() {
-  const btn = $('#hotkeyBtn');
-  if (!btn.classList.contains('listening')) btn.replaceChildren(...keycaps(S.hotkey));
+  for (const btn of $$('[data-shortcut]')) {
+    if (btn.classList.contains('listening')) continue;
+    const v = S[btn.dataset.shortcut];
+    btn.replaceChildren(...(v ? keycaps(v) : [h('span', { className: 'none' }, 'None')]));
+  }
+  for (const b of $$('[data-clear]')) { b.hidden = !S[b.dataset.clear]; b.replaceChildren(svg(CROSS)); }
   $('#modeDesc').textContent = S.mode === 'toggle'
-    ? 'Press once to start, again to stop.'
-    : 'Hold the shortcut while you speak, let go to paste.';
+    ? 'Press once to start, again to stop. Esc cancels.'
+    : 'Hold while you speak, let go to paste. Tap twice to go hands-free.';
   renderHero();
-  $('#obTry').replaceChildren(S.mode === 'toggle' ? 'Press' : 'Hold', ...keycaps(S.hotkey), 'and speak');
+  $('#obTry').replaceChildren(verb(), ...talkCaps(), 'and say a sentence');
 }
 
 let recording = null;
 function stopRecording() {
   if (!recording) return;
-  window.removeEventListener('keydown', recording, true);
-  window.removeEventListener('keyup', recording, true);
+  window.removeEventListener('keydown', recording.fn, true);
+  window.removeEventListener('keyup', recording.fn, true);
+  recording.btn.classList.remove('listening');
   recording = null;
-  $('#hotkeyBtn').classList.remove('listening');
   renderHotkey();
 }
-$('#hotkeyBtn').addEventListener('click', () => {
-  if (recording) return stopRecording();
-  const btn = $('#hotkeyBtn'), err = $('#hotkeyError');
-  err.hidden = true;
-  btn.classList.add('listening');
-  btn.textContent = 'Press a shortcut…';
-  recording = async e => {
-    e.preventDefault(); e.stopPropagation();
-    const r = accelFrom(e);
-    if (e.type === 'keyup') { if (!r.mods.length) btn.textContent = 'Press a shortcut…'; return; }
-    if (e.key === 'Escape' && !r.mods.length) return stopRecording();
-    if (!r.accel) {
-      if (r.error) { err.textContent = r.error; err.hidden = false; }
-      btn.textContent = r.mods.length ? r.mods.map(keyName).join(isMac ? ' ' : '+') + ' …' : 'Press a shortcut…';
-      return;
-    }
-    const prev = S.hotkey;
-    S.hotkey = r.accel;
-    stopRecording();
-    const fail = await save(true);
-    if (fail) {
-      S.hotkey = prev;
-      err.textContent = `${hotkeyText(r.accel)} didn't work: ${fail}`;
-      err.hidden = false;
-    }
-    renderHotkey();
-  };
-  window.addEventListener('keydown', recording, true);
-  window.addEventListener('keyup', recording, true);
-});
-$('#hotkeyBtn').addEventListener('blur', stopRecording);
+const errEl = field => field === 'hotkey' ? $('#hotkeyError') : $(`#${field}Error`);
+for (const btn of $$('[data-shortcut]')) {
+  const field = btn.dataset.shortcut;
+  btn.addEventListener('click', () => {
+    if (recording) { const same = recording.btn === btn; stopRecording(); if (same) return; }
+    const err = errEl(field);
+    err.hidden = true;
+    btn.classList.add('listening');
+    btn.textContent = 'Press a shortcut…';
+    const fn = async e => {
+      e.preventDefault(); e.stopPropagation();
+      const r = accelFrom(e);
+      if (e.type === 'keyup') { if (!r.mods.length) btn.textContent = 'Press a shortcut…'; return; }
+      if (e.key === 'Escape' && !r.mods.length) return stopRecording();
+      if (!r.accel) {
+        if (r.error) { err.textContent = r.error; err.hidden = false; }
+        btn.textContent = r.mods.length ? r.mods.map(keyName).join(isMac ? ' ' : '+') + ' …' : 'Press a shortcut…';
+        return;
+      }
+      setShortcut(field, r.accel);
+    };
+    recording = { btn, fn };
+    window.addEventListener('keydown', fn, true);
+    window.addEventListener('keyup', fn, true);
+  });
+  btn.addEventListener('blur', stopRecording);
+}
+for (const b of $$('[data-clear]')) b.addEventListener('click', () => setShortcut(b.dataset.clear, ''));
+
+async function setShortcut(field, accel) {
+  const prev = S[field], err = errEl(field);
+  S[field] = accel;
+  stopRecording();
+  const fail = await save(true);
+  if (fail) {
+    S[field] = prev;
+    err.textContent = accel ? `${hotkeyText(accel)} didn't work: ${fail}` : fail;
+    err.hidden = false;
+  }
+  renderHotkey();
+}
+
+// ---------- talk key, Input Monitoring, Globe key ----------
+async function refreshStatus() {
+  try { status = await invoke('shortcut_status'); } catch { status = {}; }
+  renderTalk();
+  renderHotkey();
+}
+function talkLines() {
+  if (S.talk_key === 'accelerator') return [];
+  if (status.talk_key_active) return [h('span', {}, `On. ${S.mode === 'toggle' ? 'Press' : 'Hold'} it anywhere to dictate.`)];
+  const recheck = h('button', { className: 'btn', type: 'button', onclick: refreshStatus }, 'Check again');
+  if (S.talk_key === 'fn' && !status.globe_does_nothing) return [h('span', {}, 'In System Settings, Keyboard, set “Press 🌐 key to” to “Do Nothing”. Until then fn would also open emoji or dictation.'),
+    h('button', { className: 'btn', type: 'button', onclick: () => invoke('open_permission_settings', { kind: 'keyboard' }).catch(() => {}) }, 'Open Keyboard Settings'), recheck];
+  if (!status.input_monitoring) return [h('span', {}, `Using ${hotkeyText(S.hotkey)} for now: this key needs Input Monitoring.`),
+    h('button', { className: 'btn', type: 'button', onclick: () => invoke('open_permission_settings', { kind: 'input_monitoring' }) }, 'Allow Input Monitoring'), recheck];
+  if (status.needs_relaunch) return [h('span', {}, 'Relaunch Echotype to finish.'), h('button', { className: 'btn primary', type: 'button', onclick: () => invoke('relaunch') }, 'Relaunch')];
+  return [h('span', {}, status.talk_key_error || 'Not active yet.'), recheck];
+}
+function renderTalk() {
+  for (const id of ['#talkStatus', '#obTalkStatus']) {
+    const el = $(id), lines = talkLines();
+    el.replaceChildren(...lines);
+    el.hidden = !lines.length;
+    el.classList.toggle('warn', S.talk_key !== 'accelerator' && !status.talk_key_active);
+  }
+  $('#obTalk').value = S.talk_key;
+  const errs = status.shortcut_errors || [];
+  if (errs.length && $('#hotkeyError').hidden) { $('#hotkeyError').textContent = 'Shortcut unavailable'; $('#hotkeyError').title = errs.join('\n'); $('#hotkeyError').hidden = false; }
+}
+$('#obTalk').addEventListener('change', e => { S.talk_key = e.target.value; syncBound(); save().then(refreshStatus); });
 
 // ---------- home ----------
 let dictation = { state: 'idle' };
-const STATE_LABEL = { idle: 'Ready', recording: 'Listening', transcribing: 'Transcribing', cleaning: 'Cleaning up', done: 'Pasted', error: "Couldn't dictate" };
+const STATE_LABEL = { idle: 'Ready', recording: 'Listening', transcribing: 'Transcribing', cleaning: 'Cleaning up', done: 'Pasted', error: "Couldn't dictate", hint: 'Ready' };
+const CHIP = { too_quiet: 'Too quiet, move the mic closer', quiet: 'Quiet voice', no_cleanup: 'No cleanup' };
+// The one action that fixes a dictation error or notice (D7).
+const ACTIONS = {
+  microphone: ['Open Settings', () => invoke('open_permission_settings', { kind: 'microphone' })],
+  accessibility: ['Allow pasting', () => invoke('open_permission_settings', { kind: 'accessibility' })],
+  model: ['Choose a model', () => go('speech')],
+  cleanup: ['Open Cleanup', () => go('cleanup')],
+  settings: ['Open Settings', () => go('settings')],
+};
+const actionBtn = kind => ACTIONS[kind] && h('button', { className: 'btn', type: 'button', onclick: ACTIONS[kind][1] }, ACTIONS[kind][0]);
+let muted = false;
 const METER = [0.5, 0.75, 0.95, 1, 0.8, 0.95, 0.7, 0.5];
 
 // What stops dictation from working right now, with the one action that fixes it.
@@ -235,23 +303,58 @@ function renderHero() {
   document.body.dataset.state = st;
   document.body.toggleAttribute('data-blocked', !!b);
   $('#heroState span').textContent = b ? 'Not ready' : dictation.copied ? 'Copied' : STATE_LABEL[st] ?? 'Ready';
+  const chip = dictation.chip && h('span', { className: 'tag' }, CHIP[dictation.chip]);
   const line = $('#heroLine'), sub = $('#heroSub');
   const start = h('button', { className: 'btn quiet', type: 'button', onclick: () => invoke('toggle_dictation') }, 'Start with a click');
   if (st === 'recording') {
-    line.replaceChildren('Listening', h('span', { className: 'meter', id: 'heroMeter', 'aria-hidden': 'true' }, METER.map(() => h('i'))));
-    sub.replaceChildren(S.mode === 'toggle' ? 'Press the shortcut again to stop. Esc cancels.' : 'Let go to paste. Esc cancels.');
+    line.replaceChildren(muted ? 'Is your mic muted?' : 'Listening', h('span', { className: 'meter', id: 'heroMeter', 'aria-hidden': 'true' }, METER.map(() => h('i'))));
+    fill(sub, muted ? 'Echotype hears nothing from the microphone. It keeps recording.'
+      : dictation.locked || S.mode === 'toggle' ? 'Press the key again to finish. Esc cancels.' : 'Let go to paste. Esc cancels.');
   } else if (st === 'transcribing' || st === 'cleaning') {
     line.replaceChildren(st === 'cleaning' ? 'Cleaning up…' : 'Transcribing…');
-    sub.replaceChildren('The text goes wherever your cursor is.');
+    fill(sub, h('span', {}, 'The text goes wherever your cursor is.'), chip);
   } else {
-    line.replaceChildren(S.mode === 'toggle' ? 'Press' : 'Hold', ...keycaps(S.hotkey), 'to dictate');
-    if (b) sub.replaceChildren(h('span', {}, b.text), h('button', { className: 'btn', type: 'button', onclick: b.act }, b.label));
-    else if (st === 'error') sub.replaceChildren(h('span', {}, `${dictation.error || 'Dictation stopped.'} Try again, or check Settings.`), ...keptText(), dictation.retry && retryBtn(), start);
-    else if (st === 'done' && dictation.copied) sub.replaceChildren(h('span', {}, dictation.warning || 'The retry worked. The text is on your clipboard.'), ...keptText(), start);
-    else if (st === 'done' && dictation.warning) sub.replaceChildren(h('span', {}, dictation.warning), start);
-    else sub.replaceChildren(h('span', {}, 'Text appears wherever your cursor is.'), start);
+    line.replaceChildren(verb(), ...talkCaps(), 'to dictate');
+    const cleanupFix = dictation.warning?.startsWith('Cleanup failed') && actionBtn('cleanup');
+    if (b) fill(sub, h('span', {}, b.text), h('button', { className: 'btn', type: 'button', onclick: b.act }, b.label));
+    else if (st === 'error') fill(sub, h('span', {}, `${dictation.error || 'Dictation stopped.'}`), ...keptText(), dictation.retry && retryBtn(), actionBtn(dictation.action), start);
+    else if (st === 'hint') fill(sub, h('span', { className: 'notice-inline' }, dictation.message), actionBtn(dictation.action), start);
+    else if (st === 'done' && dictation.copied) fill(sub, h('span', {}, dictation.warning || 'Copied. Press ⌘V to paste it.'), chip, ...keptText(), actionBtn(dictation.action), start);
+    else if (st === 'done' && dictation.warning) fill(sub, h('span', {}, dictation.warning), chip, cleanupFix, start);
+    else fill(sub, h('span', {}, 'Text appears wherever your cursor is.'), chip, start);
   }
 }
+
+// "No cleanup" (D4): cleanup is off, or on with no key. A dismissible Home banner offers the setup.
+let cleanupKeySaved = true;
+const noCleanup = () => !S.cleanup.enabled || (preset(S.cleanup.provider)?.needs_key && !cleanupKeySaved);
+function renderRaw() {
+  if (!S) return;
+  $('#rawBanner').hidden = !noCleanup() || S.dismissed.includes('no_cleanup_banner');
+  $('#cleanupSetup').hidden = !noCleanup();
+  $('#cleanupSetupTitle').textContent = S.cleanup.enabled ? 'Finish setting up cleanup' : 'Turn on cleanup';
+}
+$('#rawDismiss').append(svg(CROSS));
+$('#rawSetup').addEventListener('click', () => go('cleanup'));
+$('#rawDismiss').addEventListener('click', () => dismiss('no_cleanup_banner'));
+function dismiss(what) {
+  if (!S.dismissed.includes(what)) S.dismissed.push(what);
+  save();
+  renderRaw(); renderUpgrade(); renderMicNote();
+}
+function setupCleanup(how) {
+  S.cleanup.enabled = true;
+  syncBound();
+  if (how === 'cloud') setProvider('cleanup', 'cloud');
+  else if (how === 'local') setProvider('cleanup', preset(S.cleanup.provider)?.needs_key === false && S.cleanup.provider !== 'custom' ? S.cleanup.provider : 'ollama');
+  else setProvider('cleanup', preset(S.cleanup.provider)?.needs_key ? S.cleanup.provider : 'openai');
+  setCleanupInert();
+  renderRaw();
+}
+for (const b of $$('[data-setup]')) b.addEventListener('click', () => {
+  setupCleanup(b.dataset.setup);
+  (b.dataset.setup === 'key' ? $('[data-key="cleanup"] input') : $('#cleanupProvider'))?.focus();
+});
 
 // Text that was transcribed but not pasted: shown with Copy so it survives even with history off.
 function keptText() {
@@ -348,10 +451,12 @@ async function renderKey(kind) {
   // Local servers such as Ollama take no key; hide the row rather than show an optional field.
   // Echotype Cloud signs in on its own panel instead.
   row.hidden = (p?.needs_key === false && p.id !== 'custom') || p?.id === 'cloud';
+  if (p?.id === 'cloud' && kind === 'cleanup') { cleanupKeySaved = await invoke('has_secret', { name: 'cloud' }).catch(() => false); renderRaw(); }
+  else if (row.hidden && kind === 'cleanup') { cleanupKeySaved = true; renderRaw(); }
   if (row.hidden) return;
   const saved = await invoke('has_secret', { name }).catch(() => false);
   if (secretName(kind) !== name) return; // provider changed while we waited
-  if (kind === 'stt') { sttKeySaved = saved; renderHero(); }
+  if (kind === 'stt') { sttKeySaved = saved; renderHero(); } else { cleanupKeySaved = saved; renderRaw(); }
   const title = h('span', { className: 'row-text' },
     h('span', { className: 'row-title' }, p?.needs_key === false ? 'API key (optional)' : 'API key'),
     h('span', { className: 'row-desc' }, 'Stored in your keychain, never in the settings file.'));
@@ -426,7 +531,7 @@ function modelRow(m, { compact, pick } = {}) {
 function renderModels() {
   $('#memline').replaceChildren('Free memory now ', h('b', {}, `${sys.available_ram_gb.toFixed(1)} GB`), ` of ${Math.round(sys.total_ram_gb)} GB. A model fits when it leaves 2 GB for everything else.`);
   $('#modelList').replaceChildren(...models.map(m => modelRow(m)));
-  renderObModels();
+  renderObModel();
 }
 
 async function refreshModels() {
@@ -449,7 +554,7 @@ function useModel(id) {
   S.stt.local_model = id;
   save();
   renderStt();
-  renderObModels();
+  renderObModel();
   renderLangNote();
   renderHero();
 }
@@ -586,7 +691,7 @@ function renderCloud() {
   row.hidden = !viaCloud;
   if (viaCloud) {
     const st = cloud.status;
-    row.replaceChildren(h('span', { className: 'row-text' }, h('span', { className: 'row-title' }, 'Uses your Echotype Cloud account'),
+    fill(row, h('span', { className: 'row-text' }, h('span', { className: 'row-title' }, 'Uses your Echotype Cloud account'),
       h('span', { className: st === 'error' ? 'row-desc error' : 'row-desc' },
         st === 'in' ? `Signed in as ${cloud.account.email}.` : st === 'loading' ? 'Checking your account…' : st === 'error' ? cloud.error : 'You are not signed in. Sign in on the Speech model page.')),
       (st === 'out' || st === 'code') && h('span', { className: 'actions' }, h('button', { className: 'btn', type: 'button', onclick: () => go('speech') }, 'Open Speech model')));
@@ -606,7 +711,7 @@ function renderLangNote() {
   if (note.hidden) return;
   const alt = models.find(x => x.translates && x.downloaded);
   note.classList.toggle('warn', !alt);
-  note.replaceChildren(alt
+  fill(note, alt
     ? `${m.label} can't translate, so Echotype uses ${alt.label} while this is on.`
     : `${m.label} can't translate, and no multilingual model is downloaded yet. Medium works best for Hinglish.`,
   !alt && h('button', { className: 'btn', type: 'button', onclick: () => go('speech') }, 'Choose a model'));
@@ -657,7 +762,7 @@ async function renderHistory() {
   $('#clearHistory').disabled = !items.length;
   if (!items.length) {
     list.replaceChildren(S.history_enabled
-      ? h('p', { className: 'empty' }, 'No dictations yet. ', S.mode === 'toggle' ? 'Press ' : 'Hold ', hotkeyText(S.hotkey), ' in any text field and the result lands here.')
+      ? h('p', { className: 'empty' }, 'Your dictations show up here. ', verb(), ' ', hotkeyText(S.hotkey), ' in any text field to start.')
       : h('p', { className: 'empty' }, 'History is off, so nothing is kept.', h('button', { className: 'btn', type: 'button', onclick: () => go('settings') }, 'Turn on in Settings')));
     return;
   }
@@ -665,12 +770,13 @@ async function renderHistory() {
     const copy = h('button', { className: 'btn', type: 'button' }, 'Copy');
     copy.onclick = e => { e.preventDefault(); copyText(it.text, copy); };
     return h('details', {},
-      h('summary', {}, h('span', { className: 'when' }, fmtTime(it.ts)), h('span', { className: 'text' }, it.text), copy),
+      h('summary', {}, h('span', { className: 'when' }, fmtTime(it.ts)), h('span', { className: 'text' }, it.text), it.no_cleanup && h('span', { className: 'tag' }, 'No cleanup'), copy),
       h('div', { className: 'detail' },
         it.raw !== it.text && h('p', { className: 'raw text' }, h('b', {}, 'Heard: '), it.raw),
         h('span', { className: 'timing' },
           h('span', {}, `Speech ${it.stt_ms} ms${it.stt_provider ? ` (${it.stt_provider})` : ''}`),
-          it.cleanup_provider && h('span', {}, `Cleanup ${it.cleanup_ms} ms (${it.cleanup_provider})`))));
+          it.cleanup_provider && h('span', {}, `Cleanup ${it.cleanup_ms} ms (${it.cleanup_provider})`)),
+        it.no_cleanup && noCleanup() && h('p', { className: 'hint' }, 'Kept as you said it because cleanup is off. ', h('button', { className: 'btn quiet', type: 'button', onclick: () => go('cleanup') }, 'Set up cleanup'))));
   }));
 }
 const confirmClear = on => { $('#clearHistory').hidden = on; $('#clearConfirm').hidden = !on; (on ? $('#clearCancel') : $('#clearHistory')).focus(); };
@@ -686,11 +792,48 @@ $('#clearYes').addEventListener('click', async () => {
 
 // ---------- settings: mic, local API, permissions ----------
 async function renderMics() {
-  let devices = [];
   try { devices = await invoke('list_input_devices'); $('#micError').hidden = true; }
-  catch (e) { $('#micError').textContent = `Couldn't list microphones (${e}). Echotype uses the system default.`; $('#micError').hidden = false; }
-  $('#mic').replaceChildren(h('option', { value: '' }, 'System default'), ...devices.map(d => h('option', { value: d }, d)));
+  catch (e) { devices = []; $('#micError').textContent = `Couldn't list microphones (${e}). Echotype uses the system default.`; $('#micError').hidden = false; }
+  const def = devices.find(d => d.default);
+  $('#mic').replaceChildren(h('option', { value: '' }, def ? `System default (${def.name})` : 'System default'), ...devices.map(d => h('option', { value: d.name }, d.name)));
   $('#mic').value = S.input_device ?? '';
+  renderMicNote();
+}
+// D13: a persistent info glyph for a Bluetooth mic, plus a one-time tip.
+function renderMicNote() {
+  const d = devices.find(x => (S.input_device ? x.name === S.input_device : x.default));
+  const bt = !!d?.bluetooth;
+  $('#btInfo').hidden = !bt;
+  $('#btTip').hidden = !bt || S.dismissed.includes('bluetooth_tip');
+}
+$('#btTipOk').addEventListener('click', () => dismiss('bluetooth_tip'));
+
+// Upgraders: the new shortcuts and launch at login are offered once, never switched on silently.
+function renderUpgrade() {
+  const box = $('#upgradeOffer');
+  box.hidden = !S.onboarded || S.dismissed.includes('upgrade_offer');
+  if (box.hidden) return;
+  const [p, c] = DEFAULT_LAST();
+  box.querySelector('.notice-text').replaceChildren(h('b', {}, 'New: '), 'paste your last dictation again with ', ...keycaps(p), ', copy it with ', ...keycaps(c),
+    sys.can_autostart ? ', and start Echotype at login.' : '.');
+}
+$('#upgradeYes').addEventListener('click', () => {
+  const [p, c] = DEFAULT_LAST();
+  S.paste_last_hotkey ||= p;
+  S.copy_last_hotkey ||= c;
+  if (sys.can_autostart) S.autostart = true;
+  syncBound();
+  dismiss('upgrade_offer');
+  renderHotkey();
+});
+$('#upgradeNo').addEventListener('click', () => dismiss('upgrade_offer'));
+
+function renderStartup() {
+  const ok = sys.can_autostart;
+  $('#autostart').disabled = !ok && !S.autostart;
+  $('#autostartDesc').textContent = ok ? 'Echotype starts quietly in the menu bar.' : 'Move Echotype to your Applications folder first.';
+  $('#obAutostartRow').hidden = !ok;
+  $('#talkRow').hidden = $('#obTalkRow').hidden = $('#soundsRow').hidden = !isMac; // talk keys and sounds are macOS-only
 }
 
 async function refreshApi() {
@@ -728,52 +871,84 @@ async function refreshPerms() {
       row('Microphone', p.microphone === 'unknown' ? 'macOS asks the first time you dictate.' : 'To hear you while the shortcut is down.', MIC[p.microphone] ?? MIC.unknown, 'microphone'),
       row('Accessibility', 'Echotype uses it only to press ⌘V in the app you are using.', p.accessibility ? ['Allowed', '', false] : ['Needed to paste', 'warn', true], 'accessibility'),
     ];
-  $('#perms').replaceChildren(...rows());
-  $('#obPerms').replaceChildren(...rows());
-  $('.ob-step[data-step="1"] [data-next]').textContent = p.accessibility ? 'Continue' : 'Continue without pasting';
+  const im = isMac && S.talk_key !== 'accelerator' && [row('Input Monitoring', 'Only for the talk key: Echotype watches that one key, and never records what you type.',
+    status.input_monitoring ? ['Allowed', '', false] : ['Needed for the talk key', 'warn', true], 'input_monitoring')];
+  $('#perms').replaceChildren(...rows(), ...(im || []));
+  $('#obPerms').replaceChildren(rows()[1] ?? rows()[0]);
+  $('#obMic').replaceChildren(rows()[0]);
+  $('#obPasteNext').textContent = p.accessibility ? 'Continue' : 'Continue without pasting';
+  $('#axLine').hidden = failed || p.accessibility;
   renderHero();
 }
 window.addEventListener('focus', refreshPerms); // coming back from System Settings
+window.addEventListener('focus', () => S && refreshStatus()); // Input Monitoring or the Globe key may have changed
+for (const b of $$('[data-perm]')) b.addEventListener('click', () => invoke('open_permission_settings', { kind: b.dataset.perm }));
 
 // ---------- onboarding ----------
+// D9: the model downloads in the background while the mic is set up; the first dictation lands in
+// a practice field (never pasted); Accessibility comes after; extras last. Nothing blocks the next step.
 let obStep = 1;
 function obShow(n) {
   obStep = n;
   $$('.ob-step').forEach(s => (s.hidden = +s.dataset.step !== n));
   $$('#obSteps li').forEach((li, i) => { li.className = i + 1 === n ? 'on' : i + 1 < n ? 'done' : ''; li.toggleAttribute('aria-current', i + 1 === n); });
-  if (n === 2) renderObModels();
+  renderObModel();
+  if (n === 4) refreshStatus();
   $(`.ob-step[data-step="${n}"] h2`).focus();
 }
 function showOnboarding(on) {
   $('#onboard').hidden = !on;
   $('aside').inert = $('main').inert = on; // keep Tab inside the dialog
 }
-function renderObModels() {
-  if ($('#onboard').hidden) return;
-  const rec = models.find(m => m.recommended);
-  $('#obModelLede').textContent = rec
-    ? `${rec.label} is the best fit for the ${sys.available_ram_gb.toFixed(1)} GB of memory free right now. Everything runs on this Mac.`
-    : 'None of the local models fit in the memory free right now. You can use an API instead.';
-  const list = models.filter(m => m.fits || m.downloaded).sort((a, b) => !!b.recommended - !!a.recommended);
-  $('#obModels').replaceChildren(...list.map(m => modelRow(m, { compact: !m.recommended, pick: true })));
+// Start the recommended model downloading as soon as onboarding opens.
+function obStartModel() {
+  if (S.stt.provider !== 'local') return;
   const chosen = models.find(m => m.id === S.stt.local_model);
-  $('#obModelNext').disabled = !(S.stt.provider === 'local' && chosen?.downloaded);
+  if (chosen?.downloaded) return;
+  const pick = chosen && chosen.fits ? chosen : models.find(m => m.recommended);
+  if (!pick) return;
+  if (S.stt.local_model !== pick.id) { S.stt.local_model = pick.id; save(); }
+  if (progress[pick.id] == null) download(pick.id);
 }
-$$('[data-next]').forEach(b => b.addEventListener('click', () => {
-  if (obStep === 2 && !models.find(m => m.id === S.stt.local_model)?.downloaded) return;
-  obShow(obStep + 1);
-}));
+function renderObModel() {
+  if ($('#onboard').hidden) return;
+  const m = models.find(x => x.id === S.stt.local_model), p = m && progress[m.id];
+  const text = S.stt.provider !== 'local' ? `Using ${preset(S.stt.provider)?.label ?? S.stt.provider} for speech.`
+    : !m ? 'None of the local models fit in the memory free right now. You can use an API instead.'
+    : m.downloaded ? `${m.label} is ready.`
+    : modelErr[m.id] ? `Couldn't download ${m.label}: ${modelErr[m.id]}`
+    : `Downloading ${m.label} (${fmtMB(m.size_mb)}) · ${Math.round((p || 0) * 100)}%`;
+  $('#obModel').textContent = text;
+  const ready = S.stt.provider !== 'local' || m?.downloaded;
+  if (dictation.state === 'idle' || dictation.state === 'done' || dictation.state === 'hint') {
+    $('#obTryState').textContent = ready ? 'Say a sentence. Your words show up below.' : `Model downloading ${Math.round((p || 0) * 100)}%. You can try as soon as it finishes.`;
+  }
+  $('#obToggle').disabled = !ready && dictation.state !== 'recording';
+}
+$$('[data-next]').forEach(b => b.addEventListener('click', () => obShow(obStep + 1)));
 $$('[data-recheck]').forEach(b => b.addEventListener('click', refreshPerms));
 async function finishOnboarding(page) {
+  // New installs get the new shortcuts and (when allowed) launch at login; upgraders are only offered them.
+  const [p, c] = DEFAULT_LAST();
+  S.paste_last_hotkey ||= p;
+  S.copy_last_hotkey ||= c;
+  S.autostart = !!sys.can_autostart && $('#obAutostart').checked;
+  if (!S.dismissed.includes('upgrade_offer')) S.dismissed.push('upgrade_offer');
   S.onboarded = true;
+  syncBound();
   await save();
   showOnboarding(false);
+  renderHotkey();
   go(page);
 }
 $('#obSkip').addEventListener('click', () => finishOnboarding('home'));
 $('#onboard').addEventListener('keydown', e => { if (e.key === 'Escape') finishOnboarding('home'); });
 $('#obApi').addEventListener('click', () => finishOnboarding('speech'));
-$('#obDone').addEventListener('click', () => finishOnboarding('home'));
+$('#obDone').addEventListener('click', () => {
+  const how = $('#obCleanup').value;
+  if (how !== 'off') setupCleanup(how);
+  finishOnboarding(how === 'off' ? 'home' : 'cleanup');
+});
 $('#obToggle').addEventListener('click', () => invoke('toggle_dictation'));
 
 // ---------- clipboard ----------
@@ -798,12 +973,17 @@ listen('dictation-state', ({ payload }) => {
     renderRecent();
   }
   if (payload.state === 'done' || payload.state === 'error') refreshCloud(); // words used went up
+  if (payload.state !== 'recording') muted = false;
+  // The practice field fills from the result itself; nothing is pasted during onboarding.
   const st = $('#obTryState'), res = $('#obResult');
   st.textContent = payload.state === 'error' ? payload.error || 'Something went wrong. Try again.'
-    : payload.state === 'idle' || payload.state === 'done' ? 'Click into any text field first, then say a sentence.'
+    : payload.state === 'hint' ? payload.message
+    : payload.state === 'done' ? 'That is what Echotype heard. Try another, or continue.'
+    : payload.state === 'idle' ? 'Say a sentence. Your words show up below.'
     : `${STATE_LABEL[payload.state]}…`;
-  if (payload.state === 'done' && payload.text) { res.textContent = payload.text; res.hidden = false; }
+  if (payload.state === 'done' && payload.text) res.textContent = payload.text;
   $('#obToggle').textContent = payload.state === 'recording' ? 'Stop' : 'Start with a click';
+  if (payload.state === 'idle') renderObModel();
 });
 
 // Rust is the source of truth; keep any edit made here that has not been saved yet.
@@ -818,16 +998,17 @@ listen('settings-changed', ({ payload }) => {
 });
 
 listen('audio-level', ({ payload }) => {
+  if (!!payload.muted !== muted) { muted = !!payload.muted; renderHero(); }
   const bars = $$('#heroMeter i');
-  const lvl = Math.sqrt(Math.max(0, Math.min(1, payload.level)));
+  const lvl = Math.max(0, Math.min(1, payload.meter));
   bars.forEach((b, i) => { b.style.transform = `scaleY(${Math.max(0.15, Math.min(1, lvl * METER[i] * (0.75 + Math.random() * 0.5)))})`; });
 });
 
 listen('model-download', ({ payload: p }) => {
-  if (p.error) { delete progress[p.id]; modelErr[p.id] = p.error; renderModels(); return; }
+  if (p.error) { delete progress[p.id]; modelErr[p.id] = p.error; renderModels(); renderObModel(); return; }
   if (p.done) {
     delete progress[p.id];
-    refreshModels().then(() => { if (!$('#onboard').hidden && obStep === 2) useModel(p.id); });
+    refreshModels().then(renderObModel);
     return;
   }
   const frac = p.total ? p.downloaded / p.total : 0;
@@ -837,6 +1018,7 @@ listen('model-download', ({ payload: p }) => {
   if (!had || !bars.length) return renderModels();
   bars.forEach(b => { b.firstChild.style.transform = `scaleX(${frac})`; b.setAttribute('aria-valuenow', Math.round(frac * 100)); });
   $$(`[data-pct="${p.id}"]`).forEach(el => (el.textContent = `${Math.round(frac * 100)}%`));
+  renderObModel();
 });
 
 listen('tauri://drag-enter', () => $('#drop').classList.add('over'));
@@ -859,11 +1041,17 @@ try {
 isMac = /mac|darwin/i.test(sys.os);
 S.dictionary ??= [];
 S.replacements ??= [];
+S.dismissed ??= [];
 base = clone(S);
 recent = await invoke('get_history', { limit: 3 }).catch(() => []);
 
 function renderAll() {
   renderHotkey();
+  renderRaw();
+  renderUpgrade();
+  renderStartup();
+  renderMicNote();
+  renderTalk();
   renderStt();
   renderCleanup();
   renderCloud();
@@ -878,6 +1066,7 @@ renderRecent();
 refreshCloud();
 renderMics();
 refreshPerms();
+refreshStatus();
 const start = location.hash.slice(1);
 go($(`main > section[data-page="${start}"]`) ? start : 'home');
-if (!S.onboarded) { showOnboarding(true); obShow(1); }
+if (!S.onboarded) { showOnboarding(true); obStartModel(); obShow(+new URLSearchParams(location.search).get('step') || 1); }
