@@ -290,6 +290,12 @@ mod panel {
     }
 }
 
+/// Kept out of screen capture unless the user asked to see it there. The toggle lives in the
+/// macOS-only Pill settings, so elsewhere the overlay stays capturable as before.
+fn protect(s: &Settings) -> bool {
+    cfg!(target_os = "macos") && !s.pill_in_recordings
+}
+
 /// The overlay: transparent, click-through except over the capsule. On macOS a non-activating
 /// NSPanel on every Space and over full-screen apps, so clicking it never takes focus from the
 /// app being dictated into. Elsewhere a plain always-on-top window (dictating only).
@@ -307,7 +313,7 @@ pub fn create(app: &tauri::App, s: &Settings) -> tauri::Result<WebviewWindow> {
         .focused(false)
         .focusable(false)
         .accept_first_mouse(true)
-        .content_protected(!s.pill_in_recordings)
+        .content_protected(protect(s))
         .visible(false)
         .build()?;
     #[cfg(target_os = "macos")]
@@ -407,10 +413,18 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
                 }
                 let (_, list, primary) = monitors.as_ref().expect("just filled");
                 let cursor = app.cursor_position().ok().map(|p| cursor_pt((p.x, p.y), *primary));
+                // The primary monitor's point origin is (0, 0) on every platform.
+                let primary_screen = || list.iter().find(|m| m.rect.x == 0.0 && m.rect.y == 0.0);
                 let target = match pinned {
                     Some(x) => list.iter().find(|m| (m.rect.x - x).abs() < 1.0),
-                    None => cursor.and_then(|c| list.iter().find(|m| m.rect.contains(c))),
+                    // ponytail: Windows/Linux (dictating-only pill) stay on the primary monitor; their
+                    // cursor and monitor coordinates don't follow the macOS points maths above.
+                    None if !cfg!(target_os = "macos") => primary_screen(),
+                    None => cursor.and_then(|c| list.iter().find(|m| m.rect.contains(c))).or_else(|| placed_on.is_none().then(primary_screen).flatten()),
                 };
+                if pinned.is_some() && target.is_none() {
+                    placed_on = None; // the pinned monitor went away
+                }
                 // F4: follow the cursor's display while idle; a recording or notice stays put.
                 if let Some(t) = target
                     && (!shown || (!active && !expanded))
@@ -445,9 +459,9 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
                 let _ = app.emit_to("overlay", "pill", &view);
                 emitted = Some(view);
             }
-            if protected != Some(!s.pill_in_recordings) {
-                protected = Some(!s.pill_in_recordings);
-                let _ = win.set_content_protected(!s.pill_in_recordings);
+            if protected != Some(protect(&s)) {
+                protected = Some(protect(&s));
+                let _ = win.set_content_protected(protect(&s));
             }
             let text = tray_label(&c);
             if text != tray_text {
