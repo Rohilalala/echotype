@@ -11,7 +11,8 @@
 
 <p align="center">
   <a href="#set-it-up-with-your-coding-agent">Set up with your agent</a> ·
-  <a href="#build-from-source">Build from source</a>
+  <a href="#build-from-source">Build from source</a> ·
+  <a href="#shortcuts-and-permissions">Shortcuts and permissions</a>
 </p>
 
 <p align="center">
@@ -74,6 +75,34 @@ Needs Rust, CMake and Node 20+. Transcribe a file without opening the window:
 ```sh
 echotype --transcribe note.opus
 ```
+
+## Shortcuts and permissions
+
+| Action | Default | Notes |
+|---|---|---|
+| Dictate | <kbd>⌥ Space</kbd> | Hold and talk, let go to paste. In toggle mode, press to start and again to finish. |
+| Hands-free | Tap the dictation key twice | Keeps recording until you press the key again. |
+| Cancel | <kbd>Esc</kbd> | Echotype takes Esc from other apps only while it is recording, hands-free included. |
+| Paste last | <kbd>⌘ ⌃ V</kbd> | Pastes your last dictation again. Kept in memory only, so it works with history off. |
+| Copy last | <kbd>⌘ ⌃ C</kbd> | Puts your last dictation on the clipboard. |
+
+Every shortcut can be changed in Settings, and paste last and copy last can be turned off. If you upgraded from an earlier version, they start off and Settings offers them once, together with launch at login.
+
+### Talk key (macOS)
+
+You can also dictate with one key: **fn**, **Right Option**, **Right Command** or **Right Control**. Pick it in Settings → Shortcuts. ⌥ Space keeps working alongside it. Pressing another key while the talk key is down (fn + arrow, Right ⌘ + C) cancels the dictation, so your usual shortcuts still work.
+
+To use **fn**, first stop macOS from acting on it: System Settings → Keyboard → **Press 🌐 key to** → **Do Nothing**. This should print `0`:
+
+```sh
+defaults read com.apple.HIToolbox AppleFnUsageType
+```
+
+### Permissions
+
+- **Microphone**, to hear you while you dictate.
+- **Accessibility**, to press ⌘V in the app you're using. Without it, Echotype copies the text and you paste it yourself.
+- **Input Monitoring**, only for a talk key. Echotype watches for that one key and whether another key is pressed with it; it never records, stores or logs what you type. After granting it, relaunch Echotype. macOS ties these grants to the app's signature, so a self-built, unsigned Echotype may need them granted again after each rebuild.
 
 ## Local models
 
