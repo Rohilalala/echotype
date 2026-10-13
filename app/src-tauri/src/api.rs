@@ -140,16 +140,31 @@ async fn transcribe(State(st): State<ApiState>, req: Request) -> Response {
         crate::cleanup::run(&settings, &pcm, || {}).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
     });
     match job.await {
-        Ok(Ok(out)) if format.as_deref() == Some("text") => out.text.into_response(),
-        Ok(Ok(out)) => axum::Json(json!({ "text": out.text })).into_response(),
+        Ok(Ok(out)) => reply(out, format.as_deref()),
         Ok(Err((status, e))) => error(status, if status.is_client_error() { "invalid_request_error" } else { "server_error" }, e),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", e.to_string()),
     }
 }
 
+/// 200 with the text, also when nothing was said: noise-only audio is `{"text":""}`, not an error.
+fn reply(out: crate::cleanup::Output, format: Option<&str>) -> Response {
+    if format == Some("text") { out.text.into_response() } else { axum::Json(json!({ "text": out.text })).into_response() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn noise_only_audio_is_an_empty_200_not_an_error() {
+        let out = crate::cleanup::Output { raw: String::new(), text: String::new(), stt_ms: 1, cleanup_ms: 0, warning: None, no_cleanup: false };
+        let body = |r: Response| {
+            assert_eq!(r.status(), StatusCode::OK);
+            tauri::async_runtime::block_on(axum::body::to_bytes(r.into_body(), 1024)).unwrap()
+        };
+        assert_eq!(&body(reply(out.clone(), None))[..], br#"{"text":""}"#);
+        assert_eq!(&body(reply(out, Some("text")))[..], b"");
+    }
 
     #[test]
     fn bearer_auth() {

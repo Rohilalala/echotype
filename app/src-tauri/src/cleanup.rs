@@ -60,7 +60,7 @@ pub fn cleanup(s: &Settings, text: &str) -> Result<String, String> {
         if let Some(k) = &key {
             req = req.bearer_auth(k);
         }
-        req.send().map_err(|e| format!("Cleanup request failed: {e}"))
+        req.send().map_err(|e| format!("request failed: {e}"))
     };
     let off = reasoning_off(&c.provider);
     let mut resp = send(off)?;
@@ -73,10 +73,10 @@ pub fn cleanup(s: &Settings, text: &str) -> Result<String, String> {
         if c.provider == "cloud" {
             return Err(crate::cloud::error_message(status.as_u16(), &body));
         }
-        return Err(format!("Cleanup failed ({status}): {}", body.chars().take(300).collect::<String>()));
+        return Err(format!("{status}: {}", body.chars().take(300).collect::<String>()));
     }
-    let v: Value = serde_json::from_str(&body).map_err(|_| "Cleanup returned a non-JSON response".to_string())?;
-    parse_reply(&v).ok_or_else(|| "Cleanup response had no message content".to_string())
+    let v: Value = serde_json::from_str(&body).map_err(|_| "it returned a non-JSON response".to_string())?;
+    parse_reply(&v).ok_or_else(|| "its response had no message content".to_string())
 }
 
 /// Case-insensitive, whole-word (or whole-phrase) replacements.
@@ -120,6 +120,9 @@ pub struct Output {
     pub cleanup_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// Cleanup did not run because it is off or its provider has no key (shown as "No cleanup").
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub no_cleanup: bool,
 }
 
 /// `verbatim` keeps the recognizer's words and skips the LLM entirely.
@@ -127,12 +130,57 @@ pub fn wants_cleanup(s: &Settings, text: &str) -> bool {
     s.cleanup.enabled && s.cleanup.style != "verbatim" && !text.trim().is_empty()
 }
 
+/// True when the transcript holds at least one letter or digit in any script. Whisper turns
+/// noise into "." or "...", which must count as nothing said.
+pub fn has_speech(text: &str) -> bool {
+    text.chars().any(char::is_alphanumeric)
+}
+
+/// Spoken "new line" / "new paragraph" become line breaks without the LLM. Whole phrase, any case;
+/// the spaces around it and the punctuation Whisper adds after it ("New line.") are absorbed.
+pub fn spoken_breaks(text: &str) -> String {
+    let t: Vec<char> = text.chars().collect();
+    let boundary = |i: Option<&char>| i.is_none_or(|c| !c.is_alphanumeric());
+    let at = |i: usize, p: &str| {
+        let p: Vec<char> = p.chars().collect();
+        i + p.len() <= t.len()
+            && t[i..i + p.len()].iter().zip(&p).all(|(a, b)| a.to_lowercase().eq(b.to_lowercase()))
+            && boundary(if i == 0 { None } else { t.get(i - 1) })
+            && boundary(t.get(i + p.len()))
+    };
+    let (mut out, mut i) = (String::new(), 0);
+    while i < t.len() {
+        let hit = [("new paragraph", "\n\n"), ("new line", "\n")].into_iter().find(|(p, _)| at(i, p));
+        let Some((phrase, br)) = hit else {
+            out.push(t[i]);
+            i += 1;
+            continue;
+        };
+        out.truncate(out.trim_end_matches([' ', '\t']).len());
+        out.push_str(br);
+        i += phrase.chars().count();
+        while i < t.len() && matches!(t[i], '.' | ',' | ';' | ':' | '!' | '?') {
+            i += 1;
+        }
+        while i < t.len() && matches!(t[i], ' ' | '\t') {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Whether cleanup is wanted but cannot run because its provider needs a key that is not saved.
+pub fn keyless(s: &Settings) -> bool {
+    let c = &s.cleanup;
+    settings::preset(&c.provider).is_some_and(|p| p.needs_key) && settings::provider_key("llm", &c.provider).is_none()
+}
+
 /// STT → replacements → cleanup. Cleanup failure never loses text: the raw (replaced)
 /// transcript is returned with a warning. `on_cleaning` fires before the LLM call.
 pub fn run(s: &Settings, pcm: &[f32], on_cleaning: impl FnOnce()) -> Result<Output, String> {
     let t = Instant::now();
     let prompt = stt::prompt(&s.dictionary);
-    let (raw, mut warning) = if s.stt.provider == "local" {
+    let (raw, warning) = if s.stt.provider == "local" {
         let (model, warning) = stt::pick_local_model(s)?;
         let lang = (s.language != "auto" && !s.language.is_empty()).then_some(s.language.as_str());
         (stt::transcribe_local(&model, pcm, lang, s.translate_to_english, &prompt)?, warning)
@@ -140,20 +188,34 @@ pub fn run(s: &Settings, pcm: &[f32], on_cleaning: impl FnOnce()) -> Result<Outp
         (stt::transcribe_remote(s, pcm, &prompt)?, None)
     };
     let stt_ms = t.elapsed().as_millis() as u64;
+    let keyless = s.cleanup.enabled && keyless(s);
+    Ok(after_stt(s, raw, stt_ms, warning, keyless, on_cleaning, cleanup))
+}
 
-    let mut text = apply_replacements(&raw, &s.replacements);
+/// Everything after STT, with the LLM call passed in so tests never touch the network.
+fn after_stt(s: &Settings, raw: String, stt_ms: u64, mut warning: Option<String>, keyless: bool, on_cleaning: impl FnOnce(), llm: impl Fn(&Settings, &str) -> Result<String, String>) -> Output {
+    if !has_speech(&raw) {
+        return Output { raw: String::new(), text: String::new(), stt_ms, cleanup_ms: 0, warning: None, no_cleanup: false };
+    }
+    let mut text = spoken_breaks(&apply_replacements(&raw, &s.replacements));
     let mut cleanup_ms = 0;
-    if wants_cleanup(s, &text) {
+    // "No cleanup": switched off, or on with no key to call the provider. Verbatim is a choice, not raw.
+    let no_cleanup = !s.cleanup.enabled || keyless;
+    if !keyless && wants_cleanup(s, &text) {
         on_cleaning();
         let t = Instant::now();
-        match cleanup(s, &text) {
+        match llm(s, &text) {
             Ok(c) if !c.is_empty() => text = c,
             Ok(_) => {}
-            Err(e) => warning = Some(format!("{}. Pasted the raw transcript instead.", e.trim_end_matches('.'))),
+            Err(e) => {
+                let first = e.lines().next().unwrap_or_default().trim_end_matches('.');
+                let provider = settings::preset(&s.cleanup.provider).map_or(s.cleanup.provider.as_str(), |p| p.label);
+                warning = Some(format!("Cleanup failed: {provider}: {first}. Pasted the raw transcript instead."));
+            }
         }
         cleanup_ms = t.elapsed().as_millis() as u64;
     }
-    Ok(Output { raw, text, stt_ms, cleanup_ms, warning })
+    Output { raw, text, stt_ms, cleanup_ms, warning, no_cleanup }
 }
 
 #[cfg(test)]
@@ -168,6 +230,7 @@ mod tests {
         assert!(p.contains("contractions and light punctuation"));
         assert!(p.ends_with("\nUse British spelling."));
         assert!(!p.contains("{{"));
+        assert!(p.contains("Keep the line breaks already in the transcript."));
 
         let plain = system_prompt(&[], "default", "");
         assert!(plain.ends_with("If the transcript is empty or only filler, output nothing."));
@@ -215,5 +278,52 @@ mod tests {
         assert!(!wants_cleanup(&s, "  "));
         s.cleanup.style = "verbatim".into();
         assert!(!wants_cleanup(&s, "hello"));
+    }
+
+    fn post(s: &Settings, raw: &str) -> Output {
+        after_stt(s, raw.into(), 1, None, false, || {}, |_, t| Ok(format!("clean:{t}")))
+    }
+
+    #[test]
+    fn transcripts_without_letters_or_digits_are_empty() {
+        let mut s = Settings::default();
+        s.cleanup.enabled = true;
+        for noise in [".", " , ", "...", "", " - ! "] {
+            let o = post(&s, noise);
+            assert_eq!((o.text.as_str(), o.raw.as_str(), o.no_cleanup), ("", "", false), "{noise:?}");
+        }
+        for kept in ["a.", "2", "नमस्ते"] {
+            assert!(post(&s, kept).text.starts_with("clean:"), "{kept}");
+        }
+    }
+
+    #[test]
+    fn spoken_new_line_and_paragraph_become_breaks() {
+        assert_eq!(spoken_breaks("a new line b"), "a\nb");
+        assert_eq!(spoken_breaks("A. New line. B"), "A.\nB");
+        assert_eq!(spoken_breaks("one new paragraph two"), "one\n\ntwo");
+        assert_eq!(spoken_breaks("New Paragraph, next"), "\n\nnext");
+        assert_eq!(spoken_breaks("renewal linen"), "renewal linen");
+        assert_eq!(spoken_breaks("a newline b"), "a newline b");
+        // replacements run first, then the break rule, then the LLM sees the breaks
+        let s = Settings::default();
+        assert_eq!(post(&s, "Hi new line there").text, "Hi\nthere");
+    }
+
+    #[test]
+    fn no_cleanup_marks_off_and_keyless_but_not_verbatim_or_failures() {
+        let mut s = Settings::default();
+        let off = post(&s, "hello");
+        assert!(off.no_cleanup && off.text == "hello");
+        s.cleanup.enabled = true;
+        let keyless = after_stt(&s, "hello".into(), 1, None, true, || panic!("called the LLM"), |_, _| panic!("called the LLM"));
+        assert!(keyless.no_cleanup && keyless.text == "hello");
+        s.cleanup.style = "verbatim".into();
+        assert!(!post(&s, "hello").no_cleanup);
+        s.cleanup.style = "default".into();
+        s.cleanup.provider = "groq".into();
+        let failed = after_stt(&s, "hello".into(), 1, None, false, || {}, |_, _| Err("401 Unauthorized: bad key\nmore".into()));
+        assert!(!failed.no_cleanup && failed.text == "hello");
+        assert_eq!(failed.warning.unwrap(), "Cleanup failed: Groq: 401 Unauthorized: bad key. Pasted the raw transcript instead.");
     }
 }

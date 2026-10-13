@@ -684,26 +684,48 @@ pub fn cli(args: &[String]) -> i32 {
     let t = std::time::Instant::now();
     let result = transcribe_path(&s, &file);
     stt::unload();
+    let (out, err, code) = cli_report(result, t.elapsed().as_millis());
+    if !out.is_empty() {
+        println!("{out}");
+    }
+    eprint!("{err}");
+    code
+}
+
+/// (stdout, stderr, exit code) for `--transcribe`. Nothing said is a success with empty stdout.
+fn cli_report(result: R<cleanup::Output>, total_ms: u128) -> (String, String, i32) {
     match result {
         Ok(out) => {
-            println!("{}", out.text);
-            if let Some(w) = &out.warning {
-                eprintln!("warning: {w}");
+            let mut err = String::new();
+            if out.text.is_empty() {
+                err.push_str("echotype: no speech found\n");
             }
-            eprintln!("stt {} ms, cleanup {} ms, total {} ms", out.stt_ms, out.cleanup_ms, t.elapsed().as_millis());
-            0
+            if let Some(w) = &out.warning {
+                err.push_str(&format!("warning: {w}\n"));
+            }
+            err.push_str(&format!("stt {} ms, cleanup {} ms, total {total_ms} ms\n", out.stt_ms, out.cleanup_ms));
+            (out.text, err, 0)
         }
-        Err(e) => {
-            eprintln!("error: {e}");
-            1
-        }
+        Err(e) => (String::new(), format!("error: {e}\n"), 1),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Settings, commit, parse_hotkey};
+    use super::{Settings, cli_report, commit, parse_hotkey};
     use std::cell::RefCell;
+
+    #[test]
+    fn cli_prints_nothing_and_exits_zero_when_no_speech_was_found() {
+        let out = |text: &str| crate::cleanup::Output { raw: text.into(), text: text.into(), stt_ms: 5, cleanup_ms: 0, warning: None, no_cleanup: true };
+        let (stdout, stderr, code) = cli_report(Ok(out("")), 9);
+        assert_eq!((stdout.as_str(), code), ("", 0));
+        assert!(stderr.starts_with("echotype: no speech found\n"), "{stderr}");
+        let (stdout, stderr, code) = cli_report(Ok(out("Hello.")), 9);
+        assert_eq!((stdout.as_str(), code), ("Hello.", 0));
+        assert!(!stderr.contains("no speech"));
+        assert_eq!(cli_report(Err("boom".into()), 1).2, 1);
+    }
 
     #[test]
     fn hotkeys_the_ui_sends_parse_and_junk_is_a_readable_error() {
