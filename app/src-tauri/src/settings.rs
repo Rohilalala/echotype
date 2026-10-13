@@ -11,12 +11,17 @@ const HISTORY_CAP: usize = 500;
 
 // Same directories Tauri's path resolver returns for this identifier, so the CLI
 // (which runs without an AppHandle) reads the same files as the app.
+// ECHOTYPE_CONFIG_DIR puts settings, history and downloaded models in one other folder (tests, a second profile).
+fn override_dir() -> Option<PathBuf> {
+    std::env::var_os("ECHOTYPE_CONFIG_DIR").filter(|d| !d.is_empty()).map(PathBuf::from)
+}
+
 pub fn config_dir() -> PathBuf {
-    dirs::config_dir().unwrap_or_else(std::env::temp_dir).join(APP_ID)
+    override_dir().unwrap_or_else(|| dirs::config_dir().unwrap_or_else(std::env::temp_dir).join(APP_ID))
 }
 
 pub fn data_dir() -> PathBuf {
-    dirs::data_dir().unwrap_or_else(std::env::temp_dir).join(APP_ID)
+    override_dir().unwrap_or_else(|| dirs::data_dir().unwrap_or_else(std::env::temp_dir).join(APP_ID))
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -37,6 +42,19 @@ pub struct Settings {
     pub restore_clipboard: bool,
     pub history_enabled: bool,
     pub onboarded: bool,
+    /// macOS extra talk key next to the shortcut: "accelerator" (none) | "fn" | "right_option" |
+    /// "right_command" | "right_control". Hold or press it like the shortcut, per `mode`.
+    pub talk_key: String,
+    /// Paste and copy the last result again. "" is unbound, the serde default, so upgraders
+    /// are offered these instead of having keys taken; onboarding binds them for new installs.
+    pub paste_last_hotkey: String,
+    pub copy_last_hotkey: String,
+    /// Launch at login. Off for upgraders; onboarding offers it pre-checked.
+    pub autostart: bool,
+    /// Start, stop and lock sounds (macOS).
+    pub sounds: bool,
+    /// One-time notices already dismissed: "upgrade_offer", "bluetooth_tip", "no_cleanup_banner".
+    pub dismissed: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -94,6 +112,12 @@ impl Default for Settings {
             restore_clipboard: true,
             history_enabled: true,
             onboarded: false,
+            talk_key: "accelerator".into(),
+            paste_last_hotkey: String::new(),
+            copy_last_hotkey: String::new(),
+            autostart: false,
+            sounds: true,
+            dismissed: vec![],
         }
     }
 }
@@ -156,6 +180,32 @@ impl Settings {
         std::fs::create_dir_all(config_dir()).map_err(|e| e.to_string())?;
         write_atomic(&Self::path(), &serde_json::to_string_pretty(self).map_err(|e| e.to_string())?)
     }
+}
+
+/// Three-way merge for a writer holding a stale copy: every field `incoming` changed relative
+/// to `base` (what that writer last saw) wins; everything else keeps `current`. So a save from the
+/// settings window never reverts a value Rust wrote after the window last loaded its copy.
+pub fn merge(current: &Settings, base: &Settings, incoming: &Settings) -> Settings {
+    use serde_json::Value;
+    fn walk(cur: &mut Value, base: &Value, inc: &Value) {
+        match (cur, base, inc) {
+            (Value::Object(c), Value::Object(b), Value::Object(i)) => {
+                for (k, iv) in i {
+                    match (c.get_mut(k), b.get(k)) {
+                        (Some(cv), Some(bv)) => walk(cv, bv, iv),
+                        (Some(cv), None) => *cv = iv.clone(),
+                        (None, _) => {}
+                    }
+                }
+            }
+            (c, b, i) if i != b => *c = i.clone(),
+            _ => {}
+        }
+    }
+    let to = |s: &Settings| serde_json::to_value(s).expect("settings serialize");
+    let mut out = to(current);
+    walk(&mut out, &to(base), &to(incoming));
+    serde_json::from_value(out).unwrap_or_else(|_| incoming.clone())
 }
 
 /// Write to a uniquely named temp file, fsync, then rename over `path`: a crash leaves the
@@ -355,6 +405,40 @@ mod tests {
         assert_eq!(s.stt.local_model, "large-v3-turbo-q5_0");
         assert_eq!(s.cleanup, Cleanup::default());
         assert!(s.history_enabled);
+    }
+
+    #[test]
+    fn a_pre_v11_settings_file_loads_with_the_upgrade_defaults() {
+        // A real settings.json from v1.0: every field it has, none of the v1.1 ones.
+        let old = r#"{"hotkey":"Alt+Space","mode":"toggle","input_device":null,"language":"auto","translate_to_english":false,
+            "local_api":{"enabled":true,"port":7811},"stt":{"provider":"local","local_model":"large-v3-turbo-q5_0","model":"whisper-large-v3-turbo","base_url":""},
+            "cleanup":{"enabled":true,"provider":"ollama","model":"gemma3:1b","base_url":"","style":"default","custom_instructions":""},
+            "dictionary":["Arnav"],"replacements":[],"restore_clipboard":true,"history_enabled":true,"onboarded":true}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert!(s.onboarded && s.mode == "toggle" && s.local_api.enabled);
+        assert_eq!((s.paste_last_hotkey.as_str(), s.copy_last_hotkey.as_str()), ("", ""), "upgraders get no new global shortcuts");
+        assert!(!s.autostart, "upgraders are offered launch at login, not opted in");
+        assert_eq!(s.talk_key, "accelerator");
+        assert!(s.sounds && s.dismissed.is_empty());
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn a_stale_save_keeps_what_rust_wrote_and_applies_what_the_window_changed() {
+        let base = Settings::default(); // what the window loaded
+        let mut current = base.clone(); // Rust wrote since then
+        current.dismissed = vec!["bluetooth_tip".into()];
+        current.cleanup.model = "gemma3:4b".into();
+        let mut incoming = base.clone(); // the window's stale copy plus its own edit
+        incoming.mode = "toggle".into();
+        incoming.cleanup.style = "casual".into();
+        let m = merge(&current, &base, &incoming);
+        assert_eq!(m.dismissed, ["bluetooth_tip"]);
+        assert_eq!(m.cleanup.model, "gemma3:4b");
+        assert_eq!((m.mode.as_str(), m.cleanup.style.as_str()), ("toggle", "casual"));
+        // An up-to-date window (base == current) simply wins.
+        assert_eq!(merge(&current, &current, &incoming), incoming);
     }
 
     #[test]

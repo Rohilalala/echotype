@@ -222,21 +222,57 @@ fn parse_hotkey(s: &str) -> Result<Shortcut, String> {
     s.parse::<Shortcut>().map_err(|e| format!("Invalid hotkey '{s}': {e}"))
 }
 
-fn swap_hotkey(app: &AppHandle, old: Option<&str>, new: &str) -> Result<(), String> {
-    let new_sc = parse_hotkey(new)?;
+/// Moves one global shortcut from `old` to `new`; "" means unbound. A failed registration
+/// re-registers `old`, so a bad key never leaves the user with no shortcut.
+fn swap_hotkey(app: &AppHandle, old: &str, new: &str) -> Result<(), String> {
     let gs = app.global_shortcut();
-    if gs.is_registered(new_sc) {
+    let new_sc = if new.is_empty() { None } else { Some(parse_hotkey(new)?) };
+    if new_sc.is_some_and(|n| gs.is_registered(n)) {
         return Ok(());
     }
-    if let Some(old_sc) = old.and_then(|o| parse_hotkey(o).ok()) {
-        let _ = gs.unregister(old_sc);
+    let old_sc = (!old.is_empty()).then(|| parse_hotkey(old).ok()).flatten();
+    if let Some(o) = old_sc {
+        let _ = gs.unregister(o);
     }
-    gs.register(new_sc).map_err(|e| {
-        if let Some(o) = old.and_then(|o| parse_hotkey(o).ok()) {
+    let Some(n) = new_sc else { return Ok(()) };
+    gs.register(n).map_err(|e| {
+        if let Some(o) = old_sc {
             let _ = gs.register(o);
         }
         format!("Could not register hotkey '{new}': {e}")
     })
+}
+
+const SHORTCUT_NAMES: [&str; 3] = ["dictation", "paste last", "copy last"];
+
+fn shortcuts(s: &Settings) -> [String; 3] {
+    [s.hotkey.clone(), s.paste_last_hotkey.clone(), s.copy_last_hotkey.clone()]
+}
+
+fn same_shortcut(a: &str, b: &str) -> bool {
+    !a.is_empty() && match (parse_hotkey(a), parse_hotkey(b)) {
+        (Ok(x), Ok(y)) => x.id() == y.id(),
+        _ => a.eq_ignore_ascii_case(b),
+    }
+}
+
+/// Launch at login is offered only from /Applications and never from a translocated copy:
+/// a login item pointing into Downloads or a random translocation path breaks on the next move.
+fn autostart_location_ok(exe: &str) -> bool {
+    !cfg!(target_os = "macos") || (exe.starts_with("/Applications/") && !exe.contains("/AppTranslocation/"))
+}
+
+fn can_autostart() -> bool {
+    std::env::current_exe().is_ok_and(|p| autostart_location_ok(&p.to_string_lossy()))
+}
+
+fn set_autostart(app: &AppHandle, on: bool) -> R<()> {
+    use tauri_plugin_autostart::ManagerExt;
+    if on && !can_autostart() {
+        return Err("Launch at login needs Echotype in your Applications folder".into());
+    }
+    let l = app.autolaunch();
+    if on { l.enable() } else { l.disable() }.map_err(|e| format!("Could not change launch at login: {e}"))
 }
 
 fn apply_local_api(app: &AppHandle, s: &Settings) -> Result<(), String> {
@@ -281,46 +317,86 @@ async fn get_settings(app: AppHandle) -> R<Settings> {
     Ok(current_settings(&app))
 }
 
-/// Saves `new`, keeping the hotkey registration in step with what is on disk. The hotkey is
-/// swapped only when it changed. A key that cannot be registered never blocks the rest: the
-/// other settings are saved with the old key and the reason comes back as a warning. A failed
-/// save swaps the key back, so the registration, the file and memory never disagree.
-fn commit(old: &Settings, mut new: Settings, swap: impl Fn(&str, &str) -> R<()>, save: impl Fn(&Settings) -> R<()>) -> R<(Settings, Option<String>)> {
-    let mut warning = None;
-    let swapped = new.hotkey != old.hotkey
-        && match swap(&old.hotkey, &new.hotkey) {
+/// Saves `new`, keeping the three global shortcuts and launch at login in step with what is on
+/// disk. Each changes only when it differs. A shortcut that cannot register (or is already one
+/// of the other two) never blocks the rest: it keeps its old key and the reason comes back as a
+/// warning; the same for launch at login. A failed save undoes every swap, so the registrations,
+/// the file and memory never disagree. The dictation shortcut can't be unbound; the others can ("").
+fn commit(old: &Settings, mut new: Settings, swap: impl Fn(&str, &str) -> R<()>, autostart: impl Fn(bool) -> R<()>, save: impl Fn(&Settings) -> R<()>) -> R<(Settings, Option<String>)> {
+    let olds = shortcuts(old);
+    let mut keys = shortcuts(&new);
+    if keys[0].trim().is_empty() {
+        keys[0] = olds[0].clone();
+    }
+    let (mut warnings, mut swapped) = (vec![], vec![]);
+    for i in 0..3 {
+        if keys[i] == olds[i] {
+            continue;
+        }
+        let clash = (0..3).find(|&j| j != i && same_shortcut(&keys[i], &keys[j]));
+        let res = match clash {
+            Some(j) => Err(format!("{} is already the {} shortcut", keys[i], SHORTCUT_NAMES[j])),
+            None => swap(&olds[i], &keys[i]),
+        };
+        match res {
+            Ok(()) => swapped.push(i),
+            Err(e) => {
+                warnings.push(format!("{e}. Your other settings were saved."));
+                keys[i] = olds[i].clone();
+            }
+        }
+    }
+    [new.hotkey, new.paste_last_hotkey, new.copy_last_hotkey] = keys.clone();
+    let autostart_changed = new.autostart != old.autostart
+        && match autostart(new.autostart) {
             Ok(()) => true,
             Err(e) => {
-                warning = Some(format!("{e}. Your other settings were saved."));
-                new.hotkey = old.hotkey.clone();
+                warnings.push(format!("{e}."));
+                new.autostart = old.autostart;
                 false
             }
         };
     if let Err(e) = save(&new) {
-        if swapped {
-            let _ = swap(&new.hotkey, &old.hotkey);
+        for &i in swapped.iter().rev() {
+            let _ = swap(&keys[i], &olds[i]);
+        }
+        if autostart_changed {
+            let _ = autostart(old.autostart);
         }
         return Err(e);
     }
-    Ok((new, warning))
+    Ok((new, (!warnings.is_empty()).then(|| warnings.join(" "))))
 }
 
-#[tauri::command]
-async fn save_settings(app: AppHandle, settings: Settings) -> R<()> {
-    if settings.local_api.port < settings::MIN_PORT {
-        return Err(format!("The local API port must be between {} and 65535", settings::MIN_PORT));
-    }
-    // One save at a time: hotkey swap, file write, in-memory update and API restart happen together.
+/// The one way settings change, for the settings window and for Rust-side writers alike: one
+/// at a time, shortcuts/login item/file/memory/local API/talk key updated together, then every
+/// window gets `settings-changed` with the full result.
+fn commit_settings(app: &AppHandle, change: impl FnOnce(&Settings) -> Settings) -> R<Option<String>> {
     static SAVE: Mutex<()> = Mutex::new(());
     let _g = SAVE.lock().unwrap_or_else(|e| e.into_inner());
-    let old = current_settings(&app);
-    let (new, warning) = commit(&old, settings, |o, n| swap_hotkey(&app, Some(o), n), Settings::save)?;
-    *state(&app).settings.lock().unwrap_or_else(|e| e.into_inner()) = new.clone();
+    let old = current_settings(app);
+    let new = change(&old);
+    if new.local_api.port < settings::MIN_PORT {
+        return Err(format!("The local API port must be between {} and 65535", settings::MIN_PORT));
+    }
+    let (new, warning) = commit(&old, new, |o, n| swap_hotkey(app, o, n), |on| set_autostart(app, on), Settings::save)?;
+    *state(app).settings.lock().unwrap_or_else(|e| e.into_inner()) = new.clone();
     if (new.stt.local_model != old.stt.local_model || new.stt.provider != old.stt.provider) && new.stt.provider == "local" {
         let s = new.clone();
         std::thread::spawn(move || stt::warm_up(&s));
     }
-    apply_local_api(&app, &new)?;
+    let _ = app.emit("settings-changed", &new);
+    apply_local_api(app, &new)?;
+    Ok(warning)
+}
+
+/// `base` is the copy the window last received; with it, a stale window only applies its own edits.
+#[tauri::command]
+async fn save_settings(app: AppHandle, settings: Settings, base: Option<Settings>) -> R<()> {
+    let warning = commit_settings(&app, |cur| match &base {
+        Some(b) => settings::merge(cur, b, &settings),
+        None => settings,
+    })?;
     warning.map_or(Ok(()), Err)
 }
 
@@ -558,6 +634,7 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| show_main(app)))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, sc, ev| {
@@ -586,8 +663,10 @@ pub fn run() {
             });
             create_overlay(app)?;
             create_tray(app)?;
-            if let Err(e) = swap_hotkey(app.handle(), None, &s.hotkey) {
-                eprintln!("echotype: {e}");
+            for key in shortcuts(&s).iter().filter(|k| !k.is_empty()) {
+                if let Err(e) = swap_hotkey(app.handle(), "", key) {
+                    eprintln!("echotype: {e}");
+                }
             }
             // Off the main thread: the keychain read can wait on an access prompt (an unsigned
             // rebuild is a new identity to macOS), which must not freeze startup.
@@ -744,7 +823,7 @@ mod tests {
         let mut new = old.clone();
         new.onboarded = true;
         let saved = RefCell::new(None);
-        let (kept, warning) = commit(&old, new, |_, _| panic!("swapped an unchanged hotkey"), |s| {
+        let (kept, warning) = commit(&old, new, |_, _| panic!("swapped an unchanged hotkey"), |_| panic!("touched launch at login"), |s| {
             *saved.borrow_mut() = Some(s.clone());
             Ok(())
         }).unwrap();
@@ -759,7 +838,7 @@ mod tests {
         new.hotkey = "Control+Alt+KeyK".into();
         new.history_enabled = false;
         let saved = RefCell::new(None);
-        let (kept, warning) = commit(&old, new, |_, n| Err(format!("Could not register hotkey '{n}'")), |s| {
+        let (kept, warning) = commit(&old, new, |_, n| Err(format!("Could not register hotkey '{n}'")), |_| Ok(()), |s| {
             *saved.borrow_mut() = Some(s.clone());
             Ok(())
         }).unwrap();
@@ -778,9 +857,71 @@ mod tests {
         let err = commit(&old, new, |o, n| {
             swaps.borrow_mut().push((o.to_string(), n.to_string()));
             Ok(())
-        }, |_| Err("disk full".into())).unwrap_err();
+        }, |_| Ok(()), |_| Err("disk full".into())).unwrap_err();
         assert_eq!(err, "disk full");
         let k = |a: &str, b: &str| (a.to_string(), b.to_string());
         assert_eq!(swaps.into_inner(), vec![k("Alt+Space", "Control+Alt+KeyK"), k("Control+Alt+KeyK", "Alt+Space")]);
+    }
+
+    #[test]
+    fn three_shortcuts_swap_reject_duplicates_and_treat_empty_as_unbound() {
+        let old = Settings::default();
+        let mut new = old.clone();
+        new.paste_last_hotkey = "CommandOrControl+Control+V".into();
+        new.copy_last_hotkey = "Alt+Space".into(); // already dictation
+        let swaps = RefCell::new(vec![]);
+        let (kept, warning) = commit(&old, new, |o, n| {
+            swaps.borrow_mut().push((o.to_string(), n.to_string()));
+            Ok(())
+        }, |_| Ok(()), |_| Ok(())).unwrap();
+        assert_eq!(swaps.into_inner(), vec![(String::new(), "CommandOrControl+Control+V".to_string())]);
+        assert_eq!((kept.paste_last_hotkey.as_str(), kept.copy_last_hotkey.as_str()), ("CommandOrControl+Control+V", ""));
+        assert!(warning.unwrap().contains("already the dictation shortcut"));
+
+        // Back to None unregisters; the dictation shortcut can't be cleared.
+        let mut none = kept.clone();
+        none.paste_last_hotkey = String::new();
+        none.hotkey = String::new();
+        let swaps = RefCell::new(vec![]);
+        let (kept2, _) = commit(&kept, none, |o, n| {
+            swaps.borrow_mut().push((o.to_string(), n.to_string()));
+            Ok(())
+        }, |_| Ok(()), |_| Ok(())).unwrap();
+        assert_eq!(swaps.into_inner(), vec![("CommandOrControl+Control+V".to_string(), String::new())]);
+        assert_eq!((kept2.hotkey.as_str(), kept2.paste_last_hotkey.as_str()), ("Alt+Space", ""));
+    }
+
+    #[test]
+    fn launch_at_login_failures_are_warnings_and_a_failed_save_undoes_everything() {
+        let old = Settings::default();
+        let mut new = old.clone();
+        new.autostart = true;
+        new.history_enabled = false;
+        let (kept, warning) = commit(&old, new.clone(), |_, _| Ok(()), |_| Err("Launch at login needs Echotype in your Applications folder".into()), |_| Ok(())).unwrap();
+        assert!(!kept.autostart && !kept.history_enabled);
+        assert!(warning.unwrap().contains("Applications folder"));
+
+        new.copy_last_hotkey = "CommandOrControl+Control+C".into();
+        let calls = RefCell::new(vec![]);
+        let err = commit(&old, new, |o, n| {
+            calls.borrow_mut().push(format!("swap {o}>{n}"));
+            Ok(())
+        }, |on| {
+            calls.borrow_mut().push(format!("autostart {on}"));
+            Ok(())
+        }, |_| Err("disk full".into())).unwrap_err();
+        assert_eq!(err, "disk full");
+        assert_eq!(calls.into_inner(), ["swap >CommandOrControl+Control+C", "autostart true", "swap CommandOrControl+Control+C>", "autostart false"]);
+    }
+
+    #[test]
+    fn launch_at_login_only_from_applications() {
+        let ok = super::autostart_location_ok;
+        assert!(ok("/Applications/Echotype.app/Contents/MacOS/echotype"));
+        if cfg!(target_os = "macos") {
+            assert!(!ok("/Users/me/Downloads/Echotype.app/Contents/MacOS/echotype"));
+            assert!(!ok("/private/var/folders/x/AppTranslocation/ABC/d/Echotype.app/Contents/MacOS/echotype"));
+            assert!(!ok("/Applications/../Users/x/AppTranslocation/Echotype.app"));
+        }
     }
 }

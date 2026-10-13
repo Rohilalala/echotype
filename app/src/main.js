@@ -41,10 +41,28 @@ function save(quiet) {
   saving = run;
   return run;
 }
+// The copy Rust last confirmed. Sent with every save so Rust applies only what this window
+// changed, and used to keep unsaved local edits when `settings-changed` arrives.
+let base;
+const clone = o => structuredClone(o);
+const eq = (a, b) => a === b || (!!a && !!b && typeof a === 'object' && typeof b === 'object'
+  && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every(k => eq(a[k], b[k])));
+// Three-way merge: keys `mine` changed relative to `old` win, the rest come from `theirs`.
+function merge3(theirs, old, mine) {
+  const obj = v => v && typeof v === 'object' && !Array.isArray(v);
+  const out = clone(theirs);
+  for (const k of Object.keys(mine)) {
+    if (obj(mine[k]) && obj(old?.[k]) && obj(out[k])) out[k] = merge3(out[k], old[k], mine[k]);
+    else if (!eq(mine[k], old?.[k])) out[k] = clone(mine[k]);
+  }
+  return out;
+}
 async function saveNow(quiet) {
   const settings = { ...S, replacements: S.replacements.filter(r => r.from.trim()) };
+  const sentBase = base;
+  base = clone(settings); // from here on these values are Rust's to confirm or correct
   try {
-    await invoke('save_settings', { settings });
+    await invoke('save_settings', { settings, base: sentBase });
     flash();
     return null;
   } catch (e) {
@@ -788,6 +806,17 @@ listen('dictation-state', ({ payload }) => {
   $('#obToggle').textContent = payload.state === 'recording' ? 'Stop' : 'Start with a click';
 });
 
+// Rust is the source of truth; keep any edit made here that has not been saved yet.
+listen('settings-changed', ({ payload }) => {
+  if (!S) return;
+  const echo = eq(payload, base); // our own save coming back
+  S = merge3(payload, base, S);
+  base = clone(payload);
+  if (echo) return; // re-rendering would steal focus from the field being typed in
+  syncBound();
+  renderAll();
+});
+
 listen('audio-level', ({ payload }) => {
   const bars = $$('#heroMeter i');
   const lvl = Math.sqrt(Math.max(0, Math.min(1, payload.level)));
@@ -830,18 +859,23 @@ try {
 isMac = /mac|darwin/i.test(sys.os);
 S.dictionary ??= [];
 S.replacements ??= [];
+base = clone(S);
 recent = await invoke('get_history', { limit: 3 }).catch(() => []);
+
+function renderAll() {
+  renderHotkey();
+  renderStt();
+  renderCleanup();
+  renderCloud();
+  renderLangNote();
+  renderDict();
+}
 
 bindAll();
 syncBound();
-renderHotkey();
+renderAll();
 renderRecent();
-renderStt();
-renderCleanup();
-renderCloud();
 refreshCloud();
-renderLangNote();
-renderDict();
 renderMics();
 refreshPerms();
 const start = location.hash.slice(1);
