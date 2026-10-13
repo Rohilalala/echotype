@@ -47,6 +47,8 @@ pub enum Act {
 struct Rec {
     id: u64,
     started: Instant,
+    /// When the talk-key press that started or locked it went down (the click-chord window).
+    pressed: Instant,
     /// Hands-free: the next press finishes. Toggle mode and click-started recordings are always locked.
     locked: bool,
     /// The release of the press that started or locked it is not a "let go to finish".
@@ -95,6 +97,7 @@ impl Fsm {
                         r.locked = true;
                         r.ignore_release = true;
                         r.by_press = true;
+                        r.pressed = now;
                         Act::Lock
                     }
                     Some(r) if r.locked => {
@@ -153,8 +156,13 @@ impl Fsm {
             },
             // A modifier-click is a chord only right after the key went down; later, someone
             // dictating with the key held may click around, and that must not drop their words.
-            Ev::Click => match self.rec {
-                Some(r) if self.down && r.by_press && !r.finishing && now.duration_since(r.started) < TAP => {
+            Ev::Click => match &mut self.rec {
+                Some(r) if self.down && r.finishing => {
+                    r.finishing = false; // Right ⌘-click during a hands-free recording: a chord, keep recording
+                    r.ignore_release = true;
+                    Act::None
+                }
+                Some(r) if self.down && r.by_press && now.duration_since(r.pressed) < TAP => {
                     self.rec = None;
                     Act::Discard { hint: false }
                 }
@@ -179,7 +187,7 @@ impl Fsm {
 
     fn start(&mut self, now: Instant, locked: bool, ignore_release: bool, by_press: bool) -> Act {
         self.next_id += 1;
-        self.rec = Some(Rec { id: self.next_id, started: now, locked, ignore_release, tap: None, seq: 0, by_press, finishing: false });
+        self.rec = Some(Rec { id: self.next_id, started: now, pressed: now, locked, ignore_release, tap: None, seq: 0, by_press, finishing: false });
         Act::Start { id: self.next_id, locked }
     }
 }
@@ -579,11 +587,18 @@ mod tests {
         t.at(1000, Ev::Press);
         assert_eq!(t.at(5000, Ev::Click), Act::None, "clicking around while dictating keeps the words");
         assert_eq!(t.at(9000, Ev::Release), Act::Finish);
-        // A click during the press that finishes a hands-free recording does not cancel the finish.
+        // A Right ⌘-click during a hands-free recording is a chord: the recording keeps going.
         t.at(10_000, Ev::Toggle);
         t.at(20_000, Ev::Press);
         assert_eq!(t.at(20_050, Ev::Click), Act::None);
-        assert_eq!(t.at(20_100, Ev::Release), Act::Finish);
+        assert_eq!(t.at(20_100, Ev::Release), Act::None);
+        assert!(t.f.recording());
+        // A tap, then Right ⌘-click: the click is timed from the lock press, so it is a chord.
+        let mut t = T::hold();
+        t.at(0, Ev::Press);
+        t.at(100, Ev::Release);
+        assert_eq!(t.at(450, Ev::Press), Act::Lock);
+        assert_eq!(t.at(500, Ev::Click), Act::Discard { hint: false });
     }
 
     #[test]
