@@ -13,15 +13,21 @@ use tauri::menu::Menu;
 use tauri::{AppHandle, Emitter, LogicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Wry};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
-/// The overlay window: the "nowhere to paste" card plus room for its soft shadow (points). Every
-/// capsule sits on one line ANCHOR above the window's bottom edge; the card grows up from it.
-pub const WIN: (f64, f64) = (260.0, 84.0);
+/// The overlay page is laid out in CSS pixels (every size below but MARGIN) and shown this much
+/// larger (webview zoom), so ball, orb, capsule and card all scale together.
+pub const ZOOM: f64 = 1.5;
+/// The overlay page: the "nowhere to paste" card plus room for its soft shadow (CSS px). Every
+/// capsule sits on one line ANCHOR above the page's bottom edge; the card grows up from it.
+const PAGE: (f64, f64) = (260.0, 100.0);
+/// The overlay window in points.
+pub const WIN: (f64, f64) = (PAGE.0 * ZOOM, PAGE.1 * ZOOM);
 const ANCHOR: f64 = 16.0;
-/// The card: as wide as the widest notice, the text on one or two 15 pt lines above a 22 pt row (overlay.html).
+/// The card: as wide as the widest notice; why it could not paste on one 15 px line, the text on
+/// one or two 15 px lines, then a 22 px row (overlay.html).
 const CARD_W: f64 = MAX_W;
 // ponytail: ~7 pt a character at 11 px; a long word wraps sooner, so this errs towards two lines.
 const CARD_LINE: usize = 26;
-/// Gap between the tallest capsule and the bottom of the visible frame (or the auto-hidden Dock).
+/// Gap between the tallest capsule and the bottom of the visible frame (or the auto-hidden Dock), in points.
 const MARGIN: f64 = 10.0;
 const LINE_H: f64 = 22.0;
 const MAX_W: f64 = 240.0;
@@ -309,7 +315,7 @@ impl Pill {
             Some(a) if a.recording && self.muted => (text_w("Is your mic muted?".len()) + 36.0, LINE_H),
             Some(a) if a.recording => (REC_W, ORB),
             Some(Active { notice: None, .. }) => (ORB, ORB),
-            Some(a) if a.card => (CARD_W, 42.0 + 15.0 * if a.chars > CARD_LINE { 2.0 } else { 1.0 }),
+            Some(a) if a.card => (CARD_W, 57.0 + 15.0 * if a.chars > CARD_LINE { 2.0 } else { 1.0 }),
             Some(a) => (text_w(a.chars), LINE_H),
         }
     }
@@ -403,14 +409,16 @@ pub fn cursor_pt((x, y): (f64, f64), primary_scale: f64) -> (f64, f64) {
 
 /// The capsule in the window whose top-left is `win`: centred across, centred on the line
 /// ANCHOR above the bottom edge, and a card (taller than a line) growing up from that line's bottom.
+/// `(w, h)` in CSS px; the rect in points.
 pub fn capsule_rect(win: (f64, f64), (w, h): (f64, f64)) -> Rect {
-    let bottom = win.1 + WIN.1 - ANCHOR + h.min(LINE_H) / 2.0;
+    let (w, h) = (w * ZOOM, h * ZOOM);
+    let bottom = win.1 + WIN.1 - (ANCHOR - LINE_H.min(h / ZOOM) / 2.0) * ZOOM;
     Rect { x: win.0 + (WIN.0 - w) / 2.0, y: bottom - h, w, h }
 }
 
 /// Window top-left: bottom-centre of the visible frame `work`, the tallest line MARGIN above it plus `dock`.
 pub fn place(work: Rect, dock: f64) -> (f64, f64) {
-    (work.x + (work.w - WIN.0) / 2.0, work.y + work.h - MARGIN - dock - (WIN.1 - ANCHOR + LINE_H / 2.0))
+    (work.x + (work.w - WIN.0) / 2.0, work.y + work.h - MARGIN - dock - (WIN.1 - (ANCHOR - LINE_H / 2.0) * ZOOM))
 }
 
 /// The window's top-left kept inside `work` (a display's visible frame), so no part of the pill,
@@ -419,6 +427,15 @@ pub fn place(work: Rect, dock: f64) -> (f64, f64) {
 // window down while a card is up near the top if that ever bothers anyone.
 pub fn clamp(work: Rect, (x, y): (f64, f64)) -> (f64, f64) {
     (x.clamp(work.x, work.x + (work.w - WIN.0).max(0.0)), y.clamp(work.y, work.y + (work.h - WIN.1).max(0.0)))
+}
+
+/// Dragged within this many points of a display's horizontal centre, the pill snaps onto it.
+const SNAP: f64 = 24.0;
+
+/// The window's x while dragging on `work`: pulled onto the centre line when close to it.
+pub fn snap_x(work: Rect, x: f64) -> f64 {
+    let centre = work.x + (work.w - WIN.0) / 2.0;
+    if (x - centre).abs() <= SNAP { centre } else { x }
 }
 
 /// Where in `work` the window is, as fractions of the room it has there, so a display that
@@ -498,6 +515,7 @@ pub fn create(app: &tauri::App, s: &Settings) -> tauri::Result<WebviewWindow> {
         .content_protected(protect(s))
         .visible(false)
         .build()?;
+    win.set_zoom(ZOOM)?;
     #[cfg(target_os = "macos")]
     {
         use tauri_nspanel::{CollectionBehavior, PanelLevel, StyleMask, WebviewWindowExt};
@@ -715,7 +733,12 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
                         d.moved |= is_drag(d.from, c);
                         let on = if pinned.is_some() { target } else { list.iter().find(|m| m.rect.contains(c)) };
                         if let Some(m) = on.filter(|_| d.moved) {
-                            at = clamp(m.work, (start.0 + c.0 - d.from.0, start.1 + c.1 - d.from.1));
+                            let next = clamp(m.work, (start.0 + c.0 - d.from.0, start.1 + c.1 - d.from.1));
+                            let snapped = snap_x(m.work, next.0);
+                            if snapped != next.0 && at.0 != snapped {
+                                let _ = app.run_on_main_thread(crate::platform::snap_feedback); // a click under the finger as it lands on the centre
+                            }
+                            at = (snapped, next.1);
                             let _ = win.set_position(LogicalPosition::new(at.0, at.1));
                             placed_on = Some(m.work);
                         }
@@ -1094,17 +1117,17 @@ mod tests {
         let mut p = Pill::default();
         assert!(p.on_state(&card("Hello there."), t0));
         assert!(p.card_up());
-        assert_eq!(p.capsule(false, 0), (CARD_W, 57.0), "one line of text");
+        assert_eq!(p.capsule(false, 0), (CARD_W, 72.0), "the reason and one line of text");
         assert!(p.tick(ms(5999), false).0, "still up just before 6 s");
         assert!(!p.tick(ms(6000), false).0, "and gone at 6 s");
         assert!(p.menu_copy() && p.menu_line() == Some("Hello there."), "the menu-bar menu keeps it to copy");
 
         let mut p = Pill::default();
         p.on_state(&card(&"word ".repeat(30)), t0);
-        assert_eq!(p.capsule(false, 0), (CARD_W, 72.0), "two lines, then an ellipsis");
+        assert_eq!(p.capsule(false, 0), (CARD_W, 87.0), "two lines, then an ellipsis");
         let mut wide = Pill::default();
         wide.on_state(&card(&"漢字".repeat(8)), t0);
-        assert_eq!(wide.capsule(false, 0).1, 72.0, "16 wide characters fill two lines");
+        assert_eq!(wide.capsule(false, 0).1, 87.0, "16 wide characters fill two lines");
         p.tick(ms(2000), false);
         for t in (2066..=5000).step_by(66) {
             assert!(p.tick(ms(t), true).0, "paused while hovered (at {t} ms)");
@@ -1301,18 +1324,18 @@ mod tests {
         assert_eq!(retina, Rect { x: 0.0, y: 0.0, w: 1512.0, h: 982.0 });
         // The pill bottom-centre of the external visible frame (menu bar 25 pt, no Dock).
         let at = place(Rect { x: 1512.0, y: -675.0, w: 2560.0, h: 1575.0 }, 0.0);
-        assert_eq!(at, (2662.0, 1575.0 - 675.0 - 10.0 - 79.0));
+        assert_eq!(at, (2597.0, 1575.0 - 675.0 - 10.0 - 142.5), "a 390x150 pt window (260x100 at 1.5x)");
         let r = capsule_rect(at, IDLE_HIT);
-        assert_eq!((r.x, r.w), (2780.0, 24.0));
+        assert_eq!((r.x, r.w, r.h), (2774.0, 36.0, 33.0), "hit areas scale with the zoom");
         // Every line capsule's bottom sits MARGIN above the visible frame; the card grows up from it.
         let line_bottom = |size: (f64, f64)| { let r = capsule_rect(at, size); r.y + r.h };
         assert_eq!(line_bottom((MAX_W, LINE_H)), 1575.0 - 675.0 - 10.0);
-        assert_eq!(line_bottom((CARD_W, 72.0)), 1575.0 - 675.0 - 10.0);
-        assert_eq!(capsule_rect(at, IDLE_HIT).y + 11.0, capsule_rect(at, (MAX_W, LINE_H)).y + 11.0, "every line centred on one line");
+        assert_eq!(line_bottom((CARD_W, 87.0)), 1575.0 - 675.0 - 10.0);
+        assert_eq!(capsule_rect(at, IDLE_HIT).y, capsule_rect(at, (MAX_W, LINE_H)).y, "every line centred on one line");
         assert_eq!(line_bottom((ORB, ORB)), 1575.0 - 675.0 - 10.0, "the orb grows up from it too");
-        assert!(capsule_rect(at, (CARD_W, 72.0)).y >= at.1, "the card fits in the window");
+        assert!(capsule_rect(at, (CARD_W, 87.0)).y >= at.1, "the card fits in the window");
         // The cursor on the capsule centre, as Tauri reports it: points x PRIMARY scale (2), not 1.
-        let centre = (r.x + 12.0, r.y + 11.0);
+        let centre = (r.x + 18.0, r.y + 16.5);
         let phys = (centre.0 * 2.0, centre.1 * 2.0);
         assert!(r.contains(cursor_pt(phys, 2.0)) && ext.contains(cursor_pt(phys, 2.0)));
         assert!(!r.contains(cursor_pt(phys, 1.0)), "using the 1x monitor's own scale misses the capsule");
@@ -1320,6 +1343,16 @@ mod tests {
         assert!(!r.contains((r.x - 1.0, centre.1)) && !r.contains((r.x + r.w, centre.1)) && !r.contains((centre.0, r.y + r.h)));
         // On a scale-1 primary the same maths holds.
         assert!(r.contains(cursor_pt(centre, 1.0)));
+    }
+
+    #[test]
+    fn dragging_near_the_middle_snaps_to_the_centre() {
+        let work = Rect { x: 0.0, y: 25.0, w: 1512.0, h: 900.0 };
+        let centre = (1512.0 - WIN.0) / 2.0;
+        assert_eq!(snap_x(work, centre + 20.0), centre);
+        assert_eq!(snap_x(work, centre - 24.0), centre);
+        assert_eq!(snap_x(work, centre + 30.0), centre + 30.0, "further out it moves freely");
+        assert_eq!(snap_x(work, centre), place(work, 0.0).0, "the same spot the pill starts in");
     }
 
     #[test]

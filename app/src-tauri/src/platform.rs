@@ -164,6 +164,12 @@ pub fn paste_target() -> Target {
     Target::Paste
 }
 
+/// The trackpad's alignment click (macOS), as when a dragged object snaps into place.
+pub fn snap_feedback() {
+    #[cfg(target_os = "macos")]
+    mac::haptic_alignment();
+}
+
 pub fn accessibility_granted() -> bool {
     #[cfg(target_os = "macos")]
     return mac::accessibility();
@@ -295,6 +301,26 @@ mod mac {
     pub fn accessibility() -> bool {
         // SAFETY: no arguments; reads the TCC state for this process.
         unsafe { AXIsProcessTrusted() }
+    }
+
+    /// [[NSHapticFeedbackManager defaultPerformer] performFeedbackPattern:Alignment performanceTime:Now].
+    pub fn haptic_alignment() {
+        // SAFETY: a class method returning an object, then an instance method taking two NSIntegers
+        // (NSHapticFeedbackPatternAlignment = 1, NSHapticFeedbackPerformanceTimeNow = 1); objc_msgSend
+        // is cast to each signature. AppKit is loaded by the app; a missing class is a no-op.
+        unsafe {
+            let cls = objc_getClass(c"NSHapticFeedbackManager".as_ptr());
+            if cls.is_null() {
+                return;
+            }
+            let get: extern "C" fn(*const c_void, *const c_void) -> *const c_void = std::mem::transmute(objc_msgSend as *const ());
+            let performer = get(cls, sel_registerName(c"defaultPerformer".as_ptr()));
+            if performer.is_null() {
+                return;
+            }
+            let perform: extern "C" fn(*const c_void, *const c_void, isize, isize) = std::mem::transmute(objc_msgSend as *const ());
+            perform(performer, sel_registerName(c"performFeedbackPattern:performanceTime:".as_ptr()), 1, 1);
+        }
     }
 
     /// AVAuthorizationStatus: 0 not determined, 1 restricted, 2 denied, 3 authorized.

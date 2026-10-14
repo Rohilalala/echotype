@@ -24,7 +24,7 @@
      element's box, so .pill itself is transparent and only lays out. Sizes match pill.rs (its hit
      areas): idle ball 10 (hit 24x22), orb 36 (recording 96 wide with ✕ and ✓), any line of text
      22 tall and at most 240 wide. */
-  #body { position: fixed; left: 0; top: 0; width: 260px; height: 84px; pointer-events: none; }
+  #body { position: fixed; left: 0; top: 0; width: 260px; height: 100px; pointer-events: none; }
   .pill {
     display: flex;
     align-items: center;
@@ -98,7 +98,14 @@
   .pill.active.card > * { animation-delay: 0.36s; }
   .pill.active.card :is(.label, .secs, .chip) { display: none; }
   .pill.active.card .ctext { display: -webkit-box; }
+  .pill.active.card .creason { display: block; }
+  .pill.active.card .fix:not([hidden]) { display: block; }
   .pill.active.card .crow, .pill.active.card .close { display: flex; }
+  /* Why it could not paste, in one line; amber when the user can fix it (Accessibility). */
+  .creason { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 15px; padding-right: 18px; color: rgba(255, 255, 255, 0.62); }
+  .creason.fixable { color: #ffd59a; }
+  .fix { height: 20px; padding: 0 9px; border: 0; border-radius: 6px; background: transparent; color: #ffd59a; font: inherit; box-shadow: inset 0 0 0 1px rgba(255, 213, 154, 0.4); }
+  .fix:hover { background: rgba(255, 213, 154, 0.14); }
   .ctext { -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; white-space: normal; line-height: 15px; padding-right: 18px; color: rgba(255, 255, 255, 0.94); }
   .crow { align-items: center; gap: 6px; height: 22px; }
   .ring { width: 12px; height: 12px; flex: none; }
@@ -128,8 +135,9 @@
     <span class="secs" id="secs" aria-hidden="true"></span>
     <span class="chip" id="chip" hidden></span>
     <button class="btn ok" type="button" data-act="finish" aria-label="Finish dictation" title="Finish"><svg viewBox="0 0 8 8"><path d="M1 4.2l2 2L7 1.8"/></svg></button>
+    <span class="creason" id="creason"></span>
     <span class="ctext" id="ctext"></span>
-    <span class="crow"><svg class="ring" viewBox="0 0 12 12" aria-hidden="true"><circle class="track" cx="6" cy="6" r="4.5"/><circle class="left" id="ringLeft" cx="6" cy="6" r="4.5"/></svg><span class="ckey" id="ckey"></span><button class="copy" id="copy" type="button" data-act="copy">Copy</button></span>
+    <span class="crow"><svg class="ring" viewBox="0 0 12 12" aria-hidden="true"><circle class="track" cx="6" cy="6" r="4.5"/><circle class="left" id="ringLeft" cx="6" cy="6" r="4.5"/></svg><span class="ckey" id="ckey"></span><button class="fix" id="fix" type="button" data-act="fix" hidden>Turn on</button><button class="copy" id="copy" type="button" data-act="copy">Copy</button></span>
     <button class="btn close" type="button" data-act="close" aria-label="Close" title="Close"><svg viewBox="0 0 8 8"><path d="M1 1l6 6M7 1L1 7"/></svg></button>
   </div>
 <script type="module" src="overlay.js"></script>

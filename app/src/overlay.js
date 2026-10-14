@@ -4,6 +4,7 @@ const { listen } = window.__TAURI__.event;
 const { invoke } = window.__TAURI__.core;
 const pill = document.getElementById('pill'), label = document.getElementById('label');
 const chipEl = document.getElementById('chip');
+const creason = document.getElementById('creason'), fixBtn = document.getElementById('fix');
 const ctext = document.getElementById('ctext'), ckey = document.getElementById('ckey'), copyBtn = document.getElementById('copy'), ring = document.getElementById('ringLeft');
 const CHIP = { too_quiet: 'Too quiet, move the mic closer', quiet: 'Quiet voice', no_cleanup: 'No cleanup' };
 const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -22,6 +23,11 @@ function primary(p) {
   return '';
 }
 
+function reason(w) {
+  if (!w || w === 'Nowhere to paste') return 'No text field selected';
+  return w.split('\n')[0];
+}
+
 function render() {
   const active = cur.state !== 'idle' && (view ? view.active : true);
   pill.classList.toggle('active', active);
@@ -37,13 +43,18 @@ function render() {
   pill.classList.toggle('orb', active && !muted && ['recording', 'transcribing', 'cleaning'].includes(cur.state));
   pill.classList.toggle('collapse', active && cur.state === 'done' && !card && !cur.copied && !cur.chip);
   ctext.textContent = card ? cur.text || '' : '';
+  // Why the words are here and not in the app: Accessibility (fixable here) or nothing to type into.
+  const fixable = card && cur.action === 'accessibility';
+  creason.textContent = !card ? '' : fixable ? 'Accessibility is off, can’t paste' : reason(cur.warning);
+  creason.classList.toggle('fixable', fixable);
+  fixBtn.hidden = !fixable;
   ckey.textContent = card && cur.paste_key ? `Paste last: ${cur.paste_key}` : '';
   const text = !active ? (view?.expand ? view.hint : '') : muted ? 'Is your mic muted?' : primary(cur);
   label.textContent = text;
   chipEl.hidden = !active || !cur.chip;
   chipEl.dataset.chip = cur.chip || '';
   chipEl.textContent = CHIP[cur.chip] || '';
-  const full = card ? `Nowhere to paste: ${cur.text || ''}` : [text, active && CHIP[cur.chip]].filter(Boolean).join(' · ');
+  const full = card ? `${creason.textContent}: ${cur.text || ''}` : [text, active && CHIP[cur.chip]].filter(Boolean).join(' · ');
   pill.title = full;
   pill.setAttribute('aria-label', active ? full || 'Dictating' : 'Start dictation');
   kick();
@@ -81,17 +92,18 @@ listen('audio-level', ({ payload }) => {
 // listening/thinking → card → ball is one continuous morph. A dark backing chases .pill's box
 // underneath so dots and words read on any wallpaper.
 const cvs = document.getElementById('body'), g = cvs.getContext('2d');
-const W = 260, H = 84, ORB = 36, N = 600;
+const W = 260, H = 100, ORB = 36, N = 600;
 const LISTEN = resolvePreset('listening', 64), THINK = resolvePreset('working', 64);
 // Dots visible in the ball and along an edge; the rest wait, unseen, on those same spots.
 const BALL_DOTS = 90, EDGE_GAP = 4;
-const dpr = devicePixelRatio || 1;
+// The window shows this page zoomed 1.5x (pill.rs ZOOM): draw at 3x so the dots stay crisp.
+const dpr = Math.max(3, devicePixelRatio || 1);
 cvs.width = W * dpr;
 cvs.height = H * dpr;
-const box = { x: W / 2 - 5, y: 63, w: 10, h: 10, r: 5 };
+const box = { x: W / 2 - 5, y: H - 21, w: 10, h: 10, r: 5 };
 const hash = i => { const h = Math.sin(i * 12.9898) * 43758.5453; return h - Math.floor(h); };
 // Per particle: position, velocity, look, and its own stiffness (a little uneven, so the swarm flows).
-const P = Array.from({ length: N }, (_, i) => ({ x: W / 2, y: 68, vx: 0, vy: 0, r: 0.4, a: 0, w: 0.1, k: 380 + 260 * hash(i + 1) }));
+const P = Array.from({ length: N }, (_, i) => ({ x: W / 2, y: H - 16, vx: 0, vy: 0, r: 0.4, a: 0, w: 0.1, k: 380 + 260 * hash(i + 1) }));
 let alpha = 0.35, level = 0, clockL = 0, clockT = 0, last = 0, raf = 0, prevOrb = null;
 
 const follow = (v, to, dt, ms) => (still ? to : v + (to - v) * (1 - Math.exp(-dt / ms)));
@@ -249,6 +261,7 @@ addEventListener('mouseup', e => {
   const act = target.dataset?.act;
   if (act === 'copy') return invoke('pill_copy').then(() => (copyBtn.textContent = 'Copied'), () => {});
   if (act === 'close') return invoke('pill_dismiss');
+  if (act === 'fix') return invoke('pill_open'); // Home, with the Accessibility fix
   if (pill.classList.contains('card')) return; // the card's text is to read; even a double-click there leaves the pill where it is
   if (target === pill && e.detail === 2) return invoke('pill_reset');
   const active = pill.classList.contains('active');
