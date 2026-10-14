@@ -128,6 +128,7 @@ function changed(p) {
   if (p.startsWith('local_api')) refreshApi();
   if (p === 'history_enabled') renderHistory();
   if (p === 'pill_idle') renderPill();
+  if (p === 'look') applyLook();
   renderChips();
 }
 
@@ -1133,7 +1134,14 @@ S.dismissed ??= [];
 base = clone(S);
 recent = await invoke('get_history', { limit: 3 }).catch(() => []);
 
+// Ink (look-v2.css) applies under <html data-look="v2">; anything else is Classic.
+function applyLook() {
+  if (S.look === 'v2') document.documentElement.dataset.look = 'v2';
+  else delete document.documentElement.dataset.look;
+}
+
 function renderAll() {
+  applyLook();
   renderHotkey();
   renderPill();
   renderRaw();

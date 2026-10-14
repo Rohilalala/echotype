@@ -19,6 +19,7 @@ const settings = {
   paste_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+V',
   copy_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+C',
   autostart: !q.has('upgrade'), sounds: true,
+  look: q.get('look') === 'v2' ? 'v2' : 'classic',
   pill_idle: !q.has('pilloff'), pill_hidden_until: q.has('pillhidden') ? now + 42 * 60000 : 0, pill_in_recordings: false,
   dismissed: q.has('upgrade') || q.has('onboarding') ? [] : ['upgrade_offer'],
 };
