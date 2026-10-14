@@ -1,5 +1,5 @@
 //! The talk key: a pure press/release state machine shared by the global shortcut and the
-//! macOS fn / right-modifier event tap, plus the tap itself and the Globe-key check.
+//! macOS fn / modifier-key event tap, plus the tap itself and the Globe-key check.
 
 use std::time::{Duration, Instant};
 
@@ -11,9 +11,15 @@ pub const DOUBLE_TAP: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Ev {
-    /// Talk key (shortcut, fn or right modifier) went down / up.
+    /// The shortcut went down: the mic opens at once.
     Press,
+    /// The talk key (fn or a single modifier) went down alone. It counts once it has been held
+    /// alone until `HoldReady`, or as a clean tap: two of them within DOUBLE_TAP go hands-free.
+    ModPress,
+    /// The shortcut or talk key went up.
     Release,
+    /// The talk key press `seq` is still down, alone, after the hold delay (lib.rs SHOW_AFTER).
+    HoldReady(u64),
     /// Pill click, tray item or the window's button: start hands-free, or finish.
     Toggle,
     /// Esc or ✕.
@@ -41,6 +47,8 @@ pub enum Act {
     Lock,
     /// Send `TapExpired(id, seq)` after DOUBLE_TAP.
     ArmTap { id: u64, seq: u64 },
+    /// Send `HoldReady(seq)` after the hold delay.
+    ArmHold { seq: u64 },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -63,11 +71,24 @@ struct Rec {
     finishing: bool,
 }
 
+/// A talk-key press that has not started anything yet.
+#[derive(Debug, Clone, Copy)]
+struct Pending {
+    seq: u64,
+    pressed: Instant,
+    /// Another key or a click joined (⌃C, ⌘-click): the press is a shortcut, not a talk key.
+    chord: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct Fsm {
     down: bool,
     rec: Option<Rec>,
     next_id: u64,
+    pending: Option<Pending>,
+    presses: u64,
+    /// When the last clean quick tap came up, for the double-tap.
+    last_tap: Option<Instant>,
 }
 
 impl Fsm {
@@ -84,13 +105,19 @@ impl Fsm {
     /// `busy`: a transcription is running, so nothing new may start.
     pub fn step(&mut self, ev: Ev, now: Instant, busy: bool, toggle_mode: bool) -> Act {
         match ev {
-            Ev::Press => {
+            Ev::Press | Ev::ModPress => {
                 if self.down {
                     return Act::None; // key repeat, or a second talk key while one is held
                 }
                 self.down = true;
                 match &mut self.rec {
                     None if busy => Act::None,
+                    // A modifier opens nothing yet: ⌃C or ⌘-click must not touch the mic.
+                    None if ev == Ev::ModPress => {
+                        self.presses += 1;
+                        self.pending = Some(Pending { seq: self.presses, pressed: now, chord: false });
+                        Act::ArmHold { seq: self.presses }
+                    }
                     None => self.start(now, toggle_mode, toggle_mode, true),
                     Some(r) if r.tap.is_some() => {
                         r.tap = None;
@@ -109,6 +136,23 @@ impl Fsm {
             }
             Ev::Release => {
                 self.down = false;
+                if let Some(p) = self.pending.take() {
+                    let tap = self.last_tap.take();
+                    if p.chord || busy || self.rec.is_some() {
+                        return Act::None;
+                    }
+                    if toggle_mode {
+                        return self.start(now, true, false, false);
+                    }
+                    // A clean quick tap: the first does nothing, a second one this soon goes hands-free.
+                    return match tap {
+                        Some(t) if p.pressed.duration_since(t) <= DOUBLE_TAP => self.start(now, true, false, false),
+                        _ => {
+                            self.last_tap = Some(now);
+                            Act::None
+                        }
+                    };
+                }
                 let Some(r) = &mut self.rec else { return Act::None };
                 r.by_press = false;
                 if r.finishing {
@@ -138,6 +182,20 @@ impl Fsm {
                 None if busy => Act::None,
                 None => self.start(now, true, false, false),
             },
+            Ev::HoldReady(seq) => match self.pending {
+                Some(p) if p.seq == seq && !p.chord && !busy && self.rec.is_none() => {
+                    self.pending = None;
+                    // Timed from the press, so a release before TAP is still a tap (double-tap lock).
+                    self.start(p.pressed, toggle_mode, toggle_mode, true)
+                }
+                _ => Act::None,
+            },
+            Ev::OtherKey | Ev::Click if self.pending.is_some() => {
+                if let Some(p) = &mut self.pending {
+                    p.chord = true;
+                }
+                Act::None
+            }
             Ev::Cancel => match self.rec.take() {
                 Some(_) => Act::Discard { hint: false },
                 None => Act::None,
@@ -192,28 +250,37 @@ impl Fsm {
     }
 }
 
-// ---------- fn / right-modifier keys ----------
+// ---------- fn / modifier keys ----------
 
-/// macOS virtual keycodes of the keys that can be a talk key on their own.
+/// The keys that can be a talk key on their own: setting value, macOS virtual keycode, the key's
+/// own bit in CGEventFlags (NX_DEVICE*KEYMASK per side, SecondaryFn for fn), label.
+// ponytail: no Caps Lock. It is a hardware toggle: macOS sends one flagsChanged per press with the
+// lock state, not a down/up pair, so there is no hold to time. A HID-level IOHIDManager watch if asked.
+const KEYS: [(&str, u16, u64, &str); 9] = [
+    ("fn", 63, 0x0080_0000, "fn"),
+    ("left_control", 59, 0x0000_0001, "Left ⌃"),
+    ("right_control", 62, 0x0000_2000, "Right ⌃"),
+    ("left_option", 58, 0x0000_0020, "Left ⌥"),
+    ("right_option", 61, 0x0000_0040, "Right ⌥"),
+    ("left_command", 55, 0x0000_0008, "Left ⌘"),
+    ("right_command", 54, 0x0000_0010, "Right ⌘"),
+    ("left_shift", 56, 0x0000_0002, "Left ⇧"),
+    ("right_shift", 60, 0x0000_0004, "Right ⇧"),
+];
+/// Every per-side ⌃ ⌥ ⌘ ⇧ bit: one of them besides the talk key's own means it is not alone.
+const SIDE_BITS: u64 = 0x207F;
+
 pub fn keycode(talk_key: &str) -> Option<u16> {
-    match talk_key {
-        "fn" => Some(63),
-        "right_option" => Some(61),
-        "right_command" => Some(54),
-        "right_control" => Some(62),
-        _ => None,
-    }
+    KEYS.iter().find(|k| k.0 == talk_key).map(|k| k.1)
 }
 
-/// Per-side modifier bits in CGEventFlags (NX_DEVICER*KEYMASK) and SecondaryFn for fn.
+/// "Right ⌘", "fn": how copy names the talk key.
+pub fn label(talk_key: &str) -> Option<&'static str> {
+    KEYS.iter().find(|k| k.0 == talk_key).map(|k| k.3)
+}
+
 fn down_bit(code: u16) -> u64 {
-    match code {
-        63 => 0x0080_0000,
-        61 => 0x0000_0040,
-        54 => 0x0000_0010,
-        62 => 0x0000_2000,
-        _ => 0,
-    }
+    KEYS.iter().find(|k| k.1 == code).map_or(0, |k| k.2)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -226,12 +293,19 @@ pub enum TapEv {
 
 /// What one tapped event means for talk key `code`. The key is identified by its keycode on a
 /// flagsChanged event, never by a flag: arrow keys carry SecondaryFn too, and fn+arrow must
-/// not start dictation. Direction comes from the key's own device-side bit.
+/// not start dictation. Direction comes from the key's own device-side bit. Another modifier
+/// changing is another key (Left ⌘ then ⇧ is a shortcut), and the talk key going down while
+/// another modifier is held is not a press at all (⇧ held, then ⌘).
 pub fn classify(flags_changed: bool, event_keycode: u16, flags: u64, code: u16) -> Option<TapEv> {
-    if !flags_changed {
-        return Some(TapEv::Other); // a keyDown
+    if !flags_changed || event_keycode != code {
+        return Some(TapEv::Other); // a keyDown, or another modifier
     }
-    (event_keycode == code).then(|| if flags & down_bit(code) != 0 { TapEv::Down } else { TapEv::Up })
+    let bit = down_bit(code);
+    match (flags & bit != 0, flags & SIDE_BITS & !bit != 0) {
+        (false, _) => Some(TapEv::Up),
+        (true, false) => Some(TapEv::Down),
+        (true, true) => None,
+    }
 }
 
 /// `defaults read com.apple.HIToolbox AppleFnUsageType` output: fn is usable as a talk key only
@@ -288,7 +362,7 @@ pub mod tap {
     }
 
     /// Watches `code` (None removes the tap). Installs the tap only when it is not running yet,
-    /// so switching between fn and a right modifier needs no reinstall. Err when macOS refuses
+    /// so switching between talk keys needs no reinstall. Err when macOS refuses
     /// the tap (Input Monitoring off, or granted but not yet effective until a relaunch).
     pub fn set(code: Option<u16>, send: impl Fn(TapEv) + Send + Sync + 'static) -> Result<(), String> {
         let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
@@ -622,15 +696,215 @@ mod tests {
         assert_eq!(classify(true, 63, 0, fn_code), Some(TapEv::Up));
         // An arrow keyDown carries SecondaryFn: it is "another key", never a press.
         assert_eq!(classify(false, 126, SECONDARY_FN, fn_code), Some(TapEv::Other));
-        // Left Option (58) changing flags is not the right-Option talk key.
+        // Left Option (58) changing flags is not the right-Option talk key: it is another key.
         let ropt = keycode("right_option").unwrap();
-        assert_eq!(classify(true, 58, 0x20 | 0x80000, ropt), None);
+        assert_eq!(classify(true, 58, 0x20 | 0x80000, ropt), Some(TapEv::Other));
         assert_eq!(classify(true, 61, 0x40 | 0x80000, ropt), Some(TapEv::Down));
         // Right Option released while Left Option is still held: the device bit is clear.
         assert_eq!(classify(true, 61, 0x20 | 0x80000, ropt), Some(TapEv::Up));
         assert_eq!(keycode("right_command"), Some(54));
         assert_eq!(keycode("right_control"), Some(62));
         assert_eq!(keycode("accelerator"), None);
+    }
+
+    #[test]
+    fn every_side_of_every_modifier_by_keycode_and_device_bit() {
+        // (setting, keycode, NX_DEVICE*KEYMASK, device-independent mask)
+        for (key, code, bit, mask) in [
+            ("left_control", 59, 0x01, 0x40000),
+            ("right_control", 62, 0x2000, 0x40000),
+            ("left_shift", 56, 0x02, 0x20000),
+            ("right_shift", 60, 0x04, 0x20000),
+            ("left_command", 55, 0x08, 0x100000),
+            ("right_command", 54, 0x10, 0x100000),
+            ("left_option", 58, 0x20, 0x80000),
+            ("right_option", 61, 0x40, 0x80000),
+        ] {
+            assert_eq!(keycode(key), Some(code), "{key}");
+            assert!(label(key).is_some_and(|l| l.starts_with(if key.starts_with("left") { "Left " } else { "Right " })));
+            assert_eq!(classify(true, code, bit | mask, code), Some(TapEv::Down), "{key} down");
+            assert_eq!(classify(true, code, 0, code), Some(TapEv::Up), "{key} up");
+        }
+        let (lcmd, rcmd) = (keycode("left_command").unwrap(), keycode("right_command").unwrap());
+        // Left ⌘ released while Right ⌘ is still held: the shared ⌘ mask stays set, the side bit does not.
+        assert_eq!(classify(true, lcmd, 0x10 | 0x100000, lcmd), Some(TapEv::Up));
+        // Right ⌘ down while Left ⌘ is held is not "alone", and is never Left ⌘'s press.
+        assert_eq!(classify(true, rcmd, 0x08 | 0x10 | 0x100000, rcmd), None);
+        assert_eq!(classify(true, rcmd, 0x08 | 0x10 | 0x100000, lcmd), Some(TapEv::Other));
+        // ⇧ held, then Left ⌘: a shortcut in the making, not a talk-key press.
+        assert_eq!(classify(true, lcmd, 0x08 | 0x02 | 0x120000, lcmd), None);
+        // ⌘ held, then ⇧ joins (⌘⇧4): another key.
+        assert_eq!(classify(true, 56, 0x08 | 0x02 | 0x120000, lcmd), Some(TapEv::Other));
+        // Caps Lock on (AlphaShift, no side bit) does not stop Left ⌃ from being alone.
+        let lctl = keycode("left_control").unwrap();
+        assert_eq!(classify(true, lctl, 0x01 | 0x40000 | 0x10000, lctl), Some(TapEv::Down));
+        assert_eq!(label("fn"), Some("fn"));
+        assert_eq!(label("caps_lock"), None);
+    }
+
+    // ----- a modifier talk key (ModPress): alone only, hold delay, clean double-tap -----
+
+    #[test]
+    fn modifier_held_alone_starts_after_the_hold_delay() {
+        let mut t = T::hold();
+        assert_eq!(t.at(0, Ev::ModPress), Act::ArmHold { seq: 1 });
+        assert!(!t.f.recording(), "nothing opens on the press");
+        assert_eq!(t.at(150, Ev::HoldReady(1)), Act::Start { id: 1, locked: false });
+        assert_eq!(t.at(2000, Ev::Release), Act::Finish);
+        assert!(!t.f.recording());
+    }
+
+    #[test]
+    fn a_shortcut_with_the_modifier_never_starts() {
+        let mut t = T::hold();
+        t.at(0, Ev::ModPress); // ⌃ down...
+        assert_eq!(t.at(60, Ev::OtherKey), Act::None, "...C: ⌃C");
+        assert_eq!(t.at(150, Ev::HoldReady(1)), Act::None, "the hold delay finds a chord");
+        assert_eq!(t.at(400, Ev::Release), Act::None);
+        assert!(!t.f.recording());
+        // ⌘-click.
+        t.at(1000, Ev::ModPress);
+        assert_eq!(t.at(1040, Ev::Click), Act::None);
+        assert_eq!(t.at(1150, Ev::HoldReady(2)), Act::None);
+        assert_eq!(t.at(1200, Ev::Release), Act::None);
+        // Two chords in a row are not a double-tap.
+        t.at(1300, Ev::ModPress);
+        t.at(1320, Ev::OtherKey);
+        assert_eq!(t.at(1350, Ev::Release), Act::None);
+        assert!(!t.f.recording());
+    }
+
+    #[test]
+    fn a_key_joining_after_the_hold_delay_drops_the_recording_silently() {
+        let mut t = T::hold();
+        t.at(0, Ev::ModPress);
+        t.at(150, Ev::HoldReady(1));
+        assert_eq!(t.at(400, Ev::OtherKey), Act::Discard { hint: false });
+        assert_eq!(t.at(500, Ev::Release), Act::None);
+        assert!(!t.f.recording());
+    }
+
+    #[test]
+    fn a_single_quick_tap_does_nothing() {
+        let mut t = T::hold();
+        t.at(0, Ev::ModPress);
+        assert_eq!(t.at(90, Ev::Release), Act::None, "no mic, no hint, no window to wait out");
+        assert_eq!(t.at(150, Ev::HoldReady(1)), Act::None, "the delay of a released press");
+        assert!(!t.f.recording());
+        // Much later, another quick tap is a first tap again.
+        t.at(5000, Ev::ModPress);
+        assert_eq!(t.at(5080, Ev::Release), Act::None);
+        assert!(!t.f.recording());
+    }
+
+    #[test]
+    fn two_clean_quick_taps_go_hands_free_and_one_tap_ends_it() {
+        let mut t = T::hold();
+        t.at(0, Ev::ModPress);
+        t.at(80, Ev::Release);
+        assert_eq!(t.at(300, Ev::ModPress), Act::ArmHold { seq: 2 });
+        assert_eq!(t.at(380, Ev::Release), Act::Start { id: 1, locked: true }, "starts on the second clean release");
+        assert_eq!(t.at(450, Ev::HoldReady(2)), Act::None);
+        assert!(t.f.recording());
+        // Typing and shortcuts while hands-free keep the recording (the key is up).
+        assert_eq!(t.at(2000, Ev::OtherKey), Act::None);
+        // ⌃C during the recording: a chord, not the stop.
+        assert_eq!(t.at(3000, Ev::ModPress), Act::None);
+        assert_eq!(t.at(3050, Ev::OtherKey), Act::None);
+        assert_eq!(t.at(3100, Ev::Release), Act::None);
+        assert!(t.f.recording());
+        // One clean tap finishes.
+        assert_eq!(t.at(9000, Ev::ModPress), Act::None);
+        assert_eq!(t.at(9080, Ev::Release), Act::Finish);
+        // The second tap of a "stop" double-tap is just a first tap.
+        t.at(9200, Ev::ModPress);
+        assert_eq!(t.at(9280, Ev::Release), Act::None);
+        assert!(!t.f.recording());
+    }
+
+    #[test]
+    fn the_double_tap_window_runs_from_the_first_release_to_the_second_press() {
+        let mut t = T::hold();
+        t.at(0, Ev::ModPress);
+        t.at(80, Ev::Release);
+        t.at(580, Ev::ModPress); // exactly DOUBLE_TAP after the release
+        assert_eq!(t.at(640, Ev::Release), Act::Start { id: 1, locked: true });
+        let mut t = T::hold();
+        t.at(0, Ev::ModPress);
+        t.at(80, Ev::Release);
+        t.at(581, Ev::ModPress); // too slow: a first tap again...
+        assert_eq!(t.at(640, Ev::Release), Act::None);
+        t.at(900, Ev::ModPress); // ...so this one pairs with it
+        assert_eq!(t.at(960, Ev::Release), Act::Start { id: 1, locked: true });
+    }
+
+    #[test]
+    fn a_tap_then_a_shortcut_is_not_a_double_tap() {
+        let mut t = T::hold();
+        t.at(0, Ev::ModPress);
+        t.at(80, Ev::Release);
+        t.at(200, Ev::ModPress);
+        t.at(230, Ev::OtherKey); // ⌘ tap, then ⌘V
+        assert_eq!(t.at(260, Ev::Release), Act::None);
+        t.at(400, Ev::ModPress); // the chord broke the pair
+        assert_eq!(t.at(460, Ev::Release), Act::None);
+        assert!(!t.f.recording());
+    }
+
+    #[test]
+    fn a_medium_tap_after_the_delay_still_locks_on_the_next_press() {
+        // Held past the delay but let go before TAP: the existing tap window and lock.
+        let mut t = T::hold();
+        t.at(0, Ev::ModPress);
+        assert_eq!(t.at(150, Ev::HoldReady(1)), Act::Start { id: 1, locked: false });
+        assert_eq!(t.at(250, Ev::Release), Act::ArmTap { id: 1, seq: 1 }, "TAP counts from the press, not the start");
+        assert_eq!(t.at(500, Ev::ModPress), Act::Lock);
+        assert_eq!(t.at(560, Ev::Release), Act::None);
+        assert!(t.f.recording());
+        // Alone, the medium tap ends with the hint like any tap.
+        let mut t = T::hold();
+        t.at(0, Ev::ModPress);
+        t.at(150, Ev::HoldReady(1));
+        t.at(250, Ev::Release);
+        assert_eq!(t.at(750, Ev::TapExpired(1, 1)), Act::Discard { hint: true });
+    }
+
+    #[test]
+    fn modifier_in_toggle_mode_starts_on_a_clean_tap_or_hold_and_stops_on_the_next() {
+        let mut t = T::toggle();
+        t.at(0, Ev::ModPress);
+        assert_eq!(t.at(80, Ev::Release), Act::Start { id: 1, locked: true });
+        assert_eq!(t.at(2000, Ev::ModPress), Act::None);
+        assert_eq!(t.at(2080, Ev::Release), Act::Finish);
+        // Held: starts at the delay, its own release is ignored.
+        t.at(3000, Ev::ModPress);
+        assert_eq!(t.at(3150, Ev::HoldReady(2)), Act::Start { id: 2, locked: true });
+        assert_eq!(t.at(3400, Ev::Release), Act::None);
+        assert!(t.f.recording());
+        // A chord starts nothing.
+        let mut t = T::toggle();
+        t.at(0, Ev::ModPress);
+        t.at(40, Ev::OtherKey);
+        assert_eq!(t.at(80, Ev::Release), Act::None);
+        assert!(!t.f.recording());
+    }
+
+    #[test]
+    fn modifier_presses_while_transcribing_start_nothing() {
+        let mut t = T::hold();
+        t.busy = true;
+        assert_eq!(t.at(0, Ev::ModPress), Act::None);
+        assert_eq!(t.at(80, Ev::Release), Act::None);
+        t.busy = false;
+        t.at(200, Ev::ModPress);
+        assert_eq!(t.at(260, Ev::Release), Act::None, "the busy tap was not a first tap");
+        t.busy = true;
+        t.at(400, Ev::ModPress);
+        assert_eq!(t.at(460, Ev::Release), Act::None, "a second tap while busy");
+        t.busy = false;
+        t.at(1000, Ev::ModPress);
+        t.busy = true;
+        assert_eq!(t.at(1150, Ev::HoldReady(2)), Act::None, "busy by the time the delay ran out");
     }
 
     #[test]

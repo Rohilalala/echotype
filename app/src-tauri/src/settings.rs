@@ -47,8 +47,9 @@ pub struct Settings {
     /// Shown on the Stats page ("Aditya's stats"). Stays on this computer.
     pub display_name: String,
     pub onboarded: bool,
-    /// macOS extra talk key next to the shortcut: "accelerator" (none) | "fn" | "right_option" |
-    /// "right_command" | "right_control". Hold or press it like the shortcut, per `mode`.
+    /// macOS extra talk key next to the shortcut: "accelerator" (none) | "fn" | "left_control" |
+    /// "right_control" and the same for option, command and shift (hotkey::KEYS). Hold or press it
+    /// like the shortcut, per `mode`; it counts only when pressed alone.
     pub talk_key: String,
     /// Paste and copy the last result again. "" is unbound, the serde default, so upgraders
     /// are offered these instead of having keys taken; onboarding binds them for new installs.

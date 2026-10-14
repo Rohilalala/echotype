@@ -38,8 +38,9 @@ const MIN_SAMPLES: usize = audio::RATE as usize * 3 / 10; // under 0.3 s there i
 const MAX_RECORDING: Duration = Duration::from_secs(30 * 60);
 /// Windows (50 ms) of level stats skipped after Echotype's own start/lock sound (<= 120 ms plus output latency).
 const SOUND_WINDOWS: u32 = 4;
-/// A key-started recording shows itself (pill, start sound) only after this long without another
-/// key, so fn+arrow or Right ⌘+C stays silent. The mic opens at once, so no words are lost.
+/// A shortcut-started recording shows itself (pill, start sound) only after this long without
+/// another key; the mic opens at once, so no words are lost. A modifier talk key opens the mic
+/// only after it has been held alone this long, so ⌃C or ⌘-click never touch it.
 const SHOW_AFTER: Duration = Duration::from_millis(150);
 /// A pill click shows its recording this much later (the mic opens at once), so the second
 /// click of a double-click (put the pill back) can take it back before anything shows or plays.
@@ -180,16 +181,11 @@ fn memory_action(s: &Settings, text: &str) -> Option<&'static str> {
 
 /// "⌥ Space", "fn", "Right ⌘", "Ctrl+Alt+K": how copy names the key the user dictates with.
 fn key_label(s: &Settings, mac: bool) -> String {
-    let side = |k: &str| format!("Right {k}");
-    match (mac, s.talk_key.as_str()) {
-        // The tap runs for fn only after the Globe-key check passed (apply_talk_key).
-        (true, "fn") if talk_tap_active() => return "fn".into(),
-        (true, "right_option") if talk_tap_active() => return side("⌥"),
-        (true, "right_command") if talk_tap_active() => return side("⌘"),
-        (true, "right_control") if talk_tap_active() => return side("⌃"),
-        _ => {}
+    // The tap runs for fn only after the Globe-key check passed (apply_talk_key).
+    match hotkey::label(&s.talk_key) {
+        Some(l) if mac && talk_tap_active() => l.into(),
+        _ => accel_label(&s.hotkey, mac),
     }
-    accel_label(&s.hotkey, mac)
 }
 
 fn accel_label(accel: &str, mac: bool) -> String {
@@ -285,11 +281,12 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                         l.locked = locked && !toggle_mode;
                         if click {
                             show_later(&app, id, false, CLICK_SHOW_AFTER);
-                        } else if ev == Ev::Toggle {
+                        } else if ev != Ev::Press {
+                            // Toggle, or a talk key already held alone (HoldReady) or double-tapped (Release).
                             l.shown = true;
                             if s.sounds {
                                 lock(&l.stats).exclude(SOUND_WINDOWS);
-                                platform::play_sound(&app, "start");
+                                platform::play_sound(&app, if ev == Ev::Release && !toggle_mode { "lock" } else { "start" });
                             }
                             emit_state(&app, DictationState { state: "recording", locked: locked && !toggle_mode, ..Default::default() });
                         } else {
@@ -313,6 +310,13 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                     std::thread::spawn(move || {
                         std::thread::sleep(hotkey::DOUBLE_TAP);
                         send(&a, Cmd::Key(Ev::TapExpired(id, seq)));
+                    });
+                }
+                Act::ArmHold { seq } => {
+                    let a = app.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(SHOW_AFTER);
+                        send(&a, Cmd::Key(Ev::HoldReady(seq)));
                     });
                 }
                 Act::Discard { hint: show } => {
@@ -572,7 +576,7 @@ fn record_history(s: &Settings, out: &cleanup::Output) {
     }
 }
 
-/// Installs, retargets or removes the fn / right-modifier tap for `s.talk_key`. Returns why the
+/// Installs, retargets or removes the fn / modifier tap for `s.talk_key`. Returns why the
 /// talk key is not active when it was asked for; the shortcut keeps working either way.
 fn apply_talk_key(app: &AppHandle, s: &Settings) -> Option<String> {
     #[cfg(target_os = "macos")]
@@ -586,7 +590,7 @@ fn apply_talk_key(app: &AppHandle, s: &Settings) -> Option<String> {
         let tx = state(app).dictation.clone();
         let res = hotkey::tap::set(code.filter(|_| blocked.is_none()), move |e| {
             let ev = match e {
-                hotkey::TapEv::Down => Ev::Press,
+                hotkey::TapEv::Down => Ev::ModPress,
                 hotkey::TapEv::Up => Ev::Release,
                 hotkey::TapEv::Other => Ev::OtherKey,
                 hotkey::TapEv::Click => Ev::Click,
