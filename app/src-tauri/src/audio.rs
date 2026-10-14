@@ -517,6 +517,36 @@ where
     )
 }
 
+/// Plays a short sound file on the default output and returns once it has played: Echotype's
+/// chimes on Windows and Linux (macOS plays them with NSSound).
+// ponytail: f32 output only, which WASAPI shared mode and the PulseAudio/PipeWire ALSA device take;
+// a device that wants another sample format stays silent (the error is logged).
+#[cfg(not(target_os = "macos"))]
+pub fn play(path: &std::path::Path) -> Result<(), String> {
+    let pcm = decode(std::fs::read(path).map_err(|e| e.to_string())?, path.extension().and_then(|e| e.to_str()))?;
+    let dev = cpal::default_host().default_output_device().ok_or("No audio output found")?;
+    let cfg = dev.default_output_config().map_err(|e| e.to_string())?;
+    let (rate, ch) = (cfg.sample_rate().0, cfg.channels().max(1) as usize);
+    let pcm = resample(&pcm, RATE, rate);
+    let secs = pcm.len() as f32 / rate as f32;
+    let mut it = pcm.into_iter();
+    let stream = dev
+        .build_output_stream(
+            &cfg.into(),
+            move |out: &mut [f32], _| {
+                for frame in out.chunks_mut(ch) {
+                    frame.fill(it.next().unwrap_or(0.0));
+                }
+            },
+            |e| eprintln!("echotype: sound output error: {e}"),
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+    stream.play().map_err(|e| e.to_string())?;
+    std::thread::sleep(Duration::from_secs_f32(secs + 0.1));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
