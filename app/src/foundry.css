@@ -1,0 +1,246 @@
+/*
+  Foundry: the default look for the Echotype window (Settings > Appearance; ?look= in the browser
+  preview). Active under <html data-look="foundry">; Classic (styles.css) and Ink (look-v2.css) stay.
+  The system lives in DESIGN.md; this file maps its tokens onto the shared names and adds what
+  Classic does not have.
+
+  A precision-made desk instrument that casts your voice into type. Pewter neutrals give depth by
+  tone (ground, surface, raised) and hairlines, never by shadow. Ink marks what is chosen, settled
+  or focused. Molten bronze appears only while audio is live (the meter, the needle, the recording
+  mark) and is never text. Interface type is SF Pro at 28 / 17 / 13 / 11; Recursive sets only the
+  words you said (CASL 0, MONO 0) and the numbers you read (MONO 1, tabular). Keycaps are SF Mono.
+  Radii 4 (inputs, keycaps) / 6 (buttons) / 10 (panels); full only for switches.
+
+  Pantone names in DESIGN.md are colour references only (Ultimate Gray, Classic Blue, Marsala).
+  Recursive: Arrow Type, SIL Open Font License 1.1 (fonts/Recursive-OFL.txt), bundled, no network.
+*/
+@font-face {
+  font-family: "Recursive";
+  src: url("fonts/Recursive-latin.woff2") format("woff2");
+  font-weight: 300 1000;
+  font-style: oblique 0deg 15deg;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Recursive";
+  src: url("fonts/Recursive-latin-ext.woff2") format("woff2");
+  font-weight: 300 1000;
+  font-style: oblique 0deg 15deg;
+  font-display: swap;
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+:root[data-look="foundry"] {
+  /* DESIGN.md colours, light */
+  --ground: #e9eaea;
+  --surface: #f6f6f5;
+  --raised: #ffffff;
+  --text: #1d2024;
+  --muted: #666a6f;
+  --hairline: rgba(29, 32, 36, 0.12);
+  --ink: #0f4c81;
+  --on-ink: #ffffff;
+  --molten: #9a6a35;
+  --error: #955251;
+  --success: #3d6a4c;
+  --warning: #7a6416;
+  color-scheme: light;
+
+  /* Derived: hover and pressed mix 14% / 26% toward the text colour. */
+  --ink-hover: color-mix(in oklab, var(--ink) 86%, var(--text));
+  --ink-active: color-mix(in oklab, var(--ink) 74%, var(--text));
+  --fill: color-mix(in oklab, var(--text) 6%, transparent);
+  --fill-2: color-mix(in oklab, var(--text) 11%, transparent);
+  --hairline-strong: color-mix(in oklab, var(--text) 20%, transparent);
+  /* Muted alone falls just under 4.5:1 on a filled track or tag, so labels there lean toward text. */
+  --muted-on-fill: color-mix(in oklab, var(--muted) 55%, var(--text));
+
+  /* Mapped onto the names styles.css uses. */
+  --side: var(--ground);
+  --pane: var(--surface);
+  --elev: var(--raised);
+  --card: var(--raised);
+  --soft: color-mix(in oklab, var(--text) 5%, var(--surface));
+  --fg: var(--text);
+  --fg-2: var(--muted);
+  --fg-3: var(--muted);
+  --line: var(--hairline);
+  --line-strong: var(--hairline);
+  --outline: var(--hairline-strong);
+  --outline-hover: color-mix(in oklab, var(--text) 32%, transparent);
+  --hover: var(--fill);
+  --selected: color-mix(in oklab, var(--ink) 13%, transparent);
+  --solid: var(--ink);
+  --solid-hover: var(--ink-hover);
+  --solid-ink: var(--on-ink);
+  --seg-track: var(--fill-2);
+  --seg-thumb: var(--raised);
+  --switch-off: color-mix(in oklab, var(--text) 14%, var(--surface));
+  --composer-line: var(--hairline-strong);
+  --shadow-float: none;
+  --shadow-menu: 0 8px 20px -6px rgba(0, 0, 0, 0.22), 0 0 0 1px var(--hairline);
+  --accent: var(--ink);
+  --accent-weak: color-mix(in oklab, var(--ink) 13%, transparent);
+  --ok: var(--success);
+  --warn: var(--warning);
+  --bad: var(--error);
+  --r-ctl: 6px;
+  --r-card: 10px;
+  --r-float: 10px;
+
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --rec: "Recursive", ui-sans-serif, system-ui, sans-serif;
+  --rec-axes: "CASL" 0, "MONO" 0, "slnt" 0, "CRSV" 0;
+  --num: "Recursive", ui-monospace, "SF Mono", monospace;
+  --num-axes: "CASL" 0, "MONO" 1, "slnt" 0, "CRSV" 0;
+}
+
+/* Dark: surfaces step up in lightness (ground, surface, raised) instead of inverting. */
+@media (prefers-color-scheme: dark) {
+  :root[data-look="foundry"] {
+    --ground: #17191c;
+    --surface: #212428;
+    --raised: #2a2e33;
+    --text: #e3e4e2;
+    --muted: #939597;
+    --hairline: rgba(227, 228, 226, 0.12);
+    --ink: #7fa3c9;
+    --on-ink: #10202f;
+    --molten: #c9925a;
+    --error: #c78381;
+    --success: #8fbf9a;
+    --warning: #d2b356;
+    --shadow-menu: 0 8px 20px -6px rgba(0, 0, 0, 0.55), 0 0 0 1px var(--hairline);
+    color-scheme: dark;
+  }
+}
+
+/* The frame: an opaque ground for the sidebar, the content pane one step up, a hairline between.
+   Later in the cascade than styles.css, so it wins over the macOS vibrancy's transparent sidebar. */
+:root[data-look="foundry"] main { border-radius: 0; border-left-color: var(--hairline); }
+:root[data-look="foundry"] main > section { max-width: 720px; margin: 0; }
+:root[data-look="foundry"] ::selection { background: color-mix(in oklab, var(--ink) 22%, transparent); }
+:root[data-look="foundry"] :focus-visible { outline-color: var(--ink); }
+
+/* Headings differ from the body by size: 17 for a page, 28 for the one Home and onboarding line. */
+:root[data-look="foundry"] h1 { font-size: 17px; line-height: 22px; font-weight: 600; letter-spacing: 0; margin-bottom: 6px; }
+:root[data-look="foundry"] .hero-line { font-size: 28px; line-height: 34px; font-weight: 600; letter-spacing: -0.01em; }
+:root[data-look="foundry"] .group-title { color: var(--text); font-weight: 600; margin: 26px 0 8px; }
+:root[data-look="foundry"] .lede { color: var(--muted); }
+
+/* Sidebar: the selected page is an ink wash with ink text. */
+:root[data-look="foundry"] nav button { border-radius: var(--r-ctl); height: 28px; }
+:root[data-look="foundry"] nav button[aria-current="page"] { background: var(--selected); color: var(--ink); font-weight: 600; }
+:root[data-look="foundry"] nav button[aria-current="page"] svg { color: var(--ink); }
+
+/* Grouped rows on the raised tone, split by full-width hairlines. */
+:root[data-look="foundry"] .group { background: var(--raised); border-color: var(--hairline); }
+:root[data-look="foundry"] .row + .row::before,
+:root[data-look="foundry"] #apiBody > .row::before,
+:root[data-look="foundry"] #reps > .row::before { left: 0; right: 0; }
+:root[data-look="foundry"] .list .row + .row::before { left: 10px; right: 10px; }
+:root[data-look="foundry"] .group.elev { border-color: var(--hairline); border-radius: var(--r-card); box-shadow: none; }
+:root[data-look="foundry"] .result { background: var(--raised); border-color: var(--hairline); }
+
+/* Controls: ink primary, a raised secondary with a firm hairline, quiet text buttons. */
+:root[data-look="foundry"] .btn { border-radius: 6px; border-color: var(--hairline-strong); background: var(--raised); font-weight: 500; }
+:root[data-look="foundry"] .btn:hover { background: color-mix(in oklab, var(--raised) 92%, var(--text)); border-color: var(--hairline-strong); }
+:root[data-look="foundry"] .btn:active { background: color-mix(in oklab, var(--raised) 85%, var(--text)); }
+:root[data-look="foundry"] .btn.primary { background: var(--ink); color: var(--on-ink); border-color: transparent; }
+:root[data-look="foundry"] .btn.primary:hover { background: var(--ink-hover); }
+:root[data-look="foundry"] .btn.primary:active { background: var(--ink-active); }
+:root[data-look="foundry"] .btn.quiet { background: transparent; border-color: transparent; color: var(--muted); }
+:root[data-look="foundry"] .btn.quiet:hover { background: var(--fill); color: var(--text); }
+:root[data-look="foundry"] .btn.danger { color: var(--error); }
+:root[data-look="foundry"] .btn.danger:not(.quiet):hover { background: color-mix(in oklab, var(--error) 11%, var(--raised)); border-color: color-mix(in oklab, var(--error) 40%, transparent); }
+:root[data-look="foundry"] .btn.quiet.danger { color: var(--muted); }
+:root[data-look="foundry"] .btn.quiet.danger:hover, :root[data-look="foundry"] .btn.quiet.danger[data-armed] { color: var(--error); }
+:root[data-look="foundry"] :is(input[type="text"], input[type="url"], input[type="password"], input[type="number"], select, textarea) { border-radius: 4px; background-color: var(--raised); border-color: var(--hairline-strong); }
+:root[data-look="foundry"] :is(input, select, textarea):focus-visible { outline: 2px solid var(--ink); outline-offset: 0; border-color: transparent; box-shadow: none; }
+:root[data-look="foundry"] input[readonly] { background: transparent; }
+:root[data-look="foundry"] .switch { height: 18px; background: var(--switch-off); border: 1px solid var(--hairline); }
+:root[data-look="foundry"] .switch::before { top: 1px; left: 1px; width: 14px; height: 14px; box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.18); }
+:root[data-look="foundry"] .switch:checked { background: var(--ink); border-color: transparent; }
+:root[data-look="foundry"] .switch:checked::before { transform: translateX(14px); background: var(--on-ink); }
+@media (prefers-color-scheme: light) { :root[data-look="foundry"] .switch:checked::before { background: #fff; } }
+:root[data-look="foundry"] .seg { background: var(--fill-2); border-radius: 6px; }
+:root[data-look="foundry"] .seg span { border-radius: 4px; font-weight: 500; font-size: 12px; color: var(--muted-on-fill); }
+:root[data-look="foundry"] .seg label:hover input:not(:checked) + span { color: var(--text); }
+:root[data-look="foundry"] .seg input:checked + span { background: var(--raised); color: var(--ink); box-shadow: 0 0 0 1px var(--hairline); }
+:root[data-look="foundry"] section > .seg { background: none; }
+:root[data-look="foundry"] section > .seg input:checked + span { background: var(--selected); color: var(--ink); box-shadow: none; }
+:root[data-look="foundry"] .choice input[type="radio"]:checked { background-color: var(--ink); }
+@media (prefers-color-scheme: dark) {
+  :root[data-look="foundry"] .choice input[type="radio"]:checked {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%2310202f' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.5 8.25l2.25 2.25 4.75-5'/%3E%3C/svg%3E");
+  }
+}
+
+/* Keycaps: SF Mono on the raised tone, a firmer bottom edge. */
+:root[data-look="foundry"] kbd { font: 500 11px/1 var(--mono); min-width: 20px; height: 20px; padding: 0 5px; border-radius: 4px; background: var(--raised); color: var(--text); border: 1px solid var(--hairline-strong); border-bottom-width: 2px; }
+:root[data-look="foundry"] kbd + kbd { margin-left: 3px; }
+:root[data-look="foundry"] :is(.hero-line, .ob-try) kbd { font-size: 17px; min-width: 34px; height: 34px; padding: 0 9px; border-radius: 6px; margin: 0; }
+:root[data-look="foundry"] .hotkey { border-radius: 6px; border-color: var(--hairline-strong); background: var(--surface); font-size: 13px; }
+:root[data-look="foundry"] .hotkey.listening { outline: 2px solid var(--ink); outline-offset: 0; border-color: transparent; box-shadow: none; }
+
+/* Small marks: tags and chips square off, the round download button too (full is for switches). */
+:root[data-look="foundry"] .tag { border-radius: 4px; background: var(--fill); color: var(--muted-on-fill); }
+:root[data-look="foundry"] .tag.rec { color: var(--text); }
+:root[data-look="foundry"] .chip { border-radius: 6px; background: var(--fill); font-weight: 500; }
+:root[data-look="foundry"] .chip button { border-radius: 4px; }
+:root[data-look="foundry"] .round { border-radius: 6px; border-color: var(--hairline-strong); background: var(--raised); }
+:root[data-look="foundry"] .tile { border-radius: 6px; background: var(--fill); border-color: var(--hairline); }
+:root[data-look="foundry"] .chip.spk { border-radius: 6px; background: var(--fill); }
+:root[data-look="foundry"] .mark { border-color: var(--hairline-strong); }
+:root[data-look="foundry"] .menu { border-radius: 10px; }
+:root[data-look="foundry"] .menu-item { border-radius: 6px; }
+
+/* Alerts: a raised strip with a toned hairline; the tone names the kind. */
+:root[data-look="foundry"] :is(.notice, .banner, .status-line, .note, .stats-empty) { --tone: var(--muted); background: var(--raised); border: 1px solid color-mix(in oklab, var(--tone) 38%, var(--hairline)); border-radius: 6px; }
+:root[data-look="foundry"] .notice { --tone: var(--ink); }
+:root[data-look="foundry"] :is(.status-line, .note.warn) { --tone: var(--warning); }
+:root[data-look="foundry"] .status-line { color: var(--text); }
+:root[data-look="foundry"] .status-line::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--warning); }
+:root[data-look="foundry"] .note.warn::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--warning); margin-right: 2px; }
+:root[data-look="foundry"] .hero-sub .kept { background: var(--raised); border: 1px solid var(--hairline); }
+:root[data-look="foundry"] .code { background: var(--fill); border-radius: 6px; }
+:root[data-look="foundry"] .heat-tip { border-radius: 6px; }
+
+/* Home: the ready line names the parts; the drop region stays plain. */
+:root[data-look="foundry"] .ready-line { font-size: 13px; }
+:root[data-look="foundry"] .hm-track { background: var(--fill-2); }
+:root[data-look="foundry"] .hm-ticks i.minor { background: var(--hairline-strong); }
+:root[data-look="foundry"] .drop { border-color: var(--hairline-strong); }
+:root[data-look="foundry"] .drop.over { border-color: var(--ink); }
+:root[data-look="foundry"] .stats-strip b { font-weight: 500; }
+
+/* Transcripts in Recursive: Recent at 13, galley proofs at 14, the cast sentence at 22. */
+:root[data-look="foundry"] .entry .text { font-size: 13px; }
+:root[data-look="foundry"] .pf-raw { font-variation-settings: "CASL" 1, "MONO" 0, "slnt" 0, "CRSV" 0; }
+:root[data-look="foundry"] .transcript .said { font-size: 14px; }
+
+/* Stats: figures in Recursive tabular, the year grid in five ink shades. */
+:root[data-look="foundry"] .fig-value { font-weight: 500; letter-spacing: 0; }
+:root[data-look="foundry"] .fig.big .fig-value { font-size: 32px; }
+:root[data-look="foundry"] .week-bar i { background: color-mix(in oklab, var(--text) 18%, var(--raised)); }
+:root[data-look="foundry"] .week-day.today .week-bar i { background: var(--ink); }
+:root[data-look="foundry"] {
+  --heat-0: color-mix(in oklab, var(--text) 7%, var(--raised));
+  --heat-1: color-mix(in oklab, var(--ink) 28%, var(--raised));
+  --heat-2: color-mix(in oklab, var(--ink) 50%, var(--raised));
+  --heat-3: color-mix(in oklab, var(--ink) 74%, var(--raised));
+  --heat-4: var(--ink);
+}
+
+/* Meetings: the recording mark is a molten hairline needle, never a red dot. */
+:root[data-look="foundry"] .rec-dot { width: 2px; height: 11px; border-radius: 1px; background: var(--molten); transform: rotate(14deg); }
+
+/* Onboarding: the sound check sits on the surface tone; the steps and the one primary are ink. */
+:root[data-look="foundry"] .onboard { background: var(--surface); }
+:root[data-look="foundry"] .ob-steps i { background: var(--fill-2); }
+:root[data-look="foundry"] .ob-steps i.on { background: var(--ink); }
+:root[data-look="foundry"] .pill-demo { background: color-mix(in oklab, var(--text) 8%, var(--surface)); }
+
+/* States: an error names its cause in marsala; empty and loading stay muted. */
+:root[data-look="foundry"] .empty[role="alert"] { color: var(--error); }
