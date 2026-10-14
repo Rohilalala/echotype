@@ -246,7 +246,13 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
         for cmd in rx {
             let s = current_settings(&app);
             let (ev, click) = match cmd {
-                Cmd::Key(ev) => (ev, false),
+                Cmd::Key(ev) => {
+                    // Onboarding presses its keycaps down with the real keys.
+                    if matches!(ev, Ev::Press | Ev::ModPress | Ev::Release) {
+                        let _ = app.emit_to("main", "hotkey-state", ev != Ev::Release);
+                    }
+                    (ev, false)
+                }
                 Cmd::Click => (Ev::Toggle, true),
                 Cmd::Lost(id) => (Ev::AutoStop(id), false),
                 Cmd::Show(id, locked) => {
@@ -426,6 +432,13 @@ fn main_window_focused(app: &AppHandle) -> bool {
     app.get_webview_window("main").is_some_and(|w| w.is_focused().unwrap_or(false))
 }
 
+/// Whether a finished dictation is pasted into the app in front rather than copied: never into
+/// Echotype's own window, and during onboarding only from its real-app step (3) on, so practice
+/// runs land in the practice field.
+fn pastes(s: &Settings, main_focused: bool) -> bool {
+    (s.onboarded || s.onboard_step >= 3) && !main_focused
+}
+
 /// STT + cleanup + paste + history on a worker thread, so the hotkey stays responsive.
 /// Paste vs copy is decided here, when the text is ready: with Echotype's own window in front
 /// (or onboarding not finished, or a retry from the window) pasting would type into Echotype,
@@ -461,7 +474,7 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
                 record_stats(&app, &s, stats::Source::Dictation, &out.text, speaking_ms);
                 record_history(&s, &out);
                 *lock(&state(&app).last_output) = Some(out.text.clone());
-                let paste = paste && s.onboarded && !main_window_focused(&app);
+                let paste = paste && pastes(&s, main_window_focused(&app));
                 let warning = out.warning.clone().or(clip.warning);
                 let chip = chip(clip.quality, out.no_cleanup && out.warning.is_none());
                 // Nothing focused takes text (the desktop, a list, Accessibility off): no ⌘V into nowhere.
@@ -1179,7 +1192,97 @@ async fn retry_last(app: AppHandle) -> R<()> {
 
 #[tauri::command]
 async fn check_permissions() -> R<serde_json::Value> {
-    Ok(serde_json::json!({ "microphone": platform::microphone_status(), "accessibility": platform::accessibility_granted(), "screen_recording": capture::screen_recording_allowed() }))
+    Ok(serde_json::json!({ "microphone": platform::microphone_status(), "microphone_restricted": platform::microphone_restricted(), "accessibility": platform::accessibility_granted(), "screen_recording": capture::screen_recording_allowed() }))
+}
+
+// ---------- onboarding ----------
+
+/// Onboarding's one microphone button: the system prompt now, not halfway through a first
+/// dictation. Returns the status as it stands; the window polls for the answer.
+#[tauri::command]
+async fn request_microphone() -> R<&'static str> {
+    platform::request_microphone();
+    Ok(platform::microphone_status())
+}
+
+/// Brings the settings window forward (a permission was just granted in System Settings, or a
+/// dictation was just pasted into another app). Returns the app that was in front, if not Echotype.
+#[tauri::command]
+async fn focus_main(app: AppHandle) -> R<Option<String>> {
+    let front = platform::frontmost_app(&app);
+    show_main(&app);
+    Ok(front)
+}
+
+/// Windows (50 ms each) a sound check runs before it stops by itself: two minutes.
+// ponytail: the recorder keeps its audio in memory (~23 MB at 48 kHz for two minutes); the cap is the bound.
+const MIC_CHECK_WINDOWS: u32 = 2400;
+
+/// Onboarding's sound check: the microphone's level as `mic-level` (20 Hz, like `audio-level`)
+/// without a dictation, so the orb can listen before a speech model is ready. `on: false` stops it.
+#[tauri::command]
+async fn mic_check(app: AppHandle, on: bool) -> R<()> {
+    static MIC: Mutex<Option<audio::Recorder>> = Mutex::new(None);
+    let old = lock(&MIC).take();
+    if let Some(r) = old {
+        blocking(move || {
+            r.stop();
+            Ok(())
+        })
+        .await?;
+    }
+    if !on {
+        return Ok(());
+    }
+    let device = current_settings(&app).input_device;
+    let (mut stats, mut n) = (LevelStats::default(), 0u32);
+    let rec = blocking(move || {
+        audio::Recorder::start(device, move |db, _| {
+            let _ = app.emit_to("main", "mic-level", stats.push(db));
+            n += 1;
+            if n == MIC_CHECK_WINDOWS {
+                std::thread::spawn(|| lock(&MIC).take().map(audio::Recorder::stop));
+            }
+        })
+    })
+    .await?;
+    *lock(&MIC) = Some(rec);
+    Ok(())
+}
+
+/// A success moment's sound, from the chosen pack (when sounds are on).
+#[tauri::command]
+async fn play_sound(app: AppHandle, name: String) -> R<()> {
+    let name = ["start", "stop", "lock"].into_iter().find(|n| *n == name).ok_or("Unknown sound")?;
+    if current_settings(&app).sounds {
+        platform::play_sound(&app, name);
+    }
+    Ok(())
+}
+
+/// "Open TextEdit": a blank document to try a real paste in.
+#[tauri::command]
+async fn open_textedit(app: AppHandle) -> R<()> {
+    let path = std::env::temp_dir().join("Try Echotype.txt");
+    if !path.exists() {
+        std::fs::write(&path, "").map_err(|e| e.to_string())?;
+    }
+    app.opener().open_path(path.to_string_lossy(), Some("TextEdit")).map_err(|e| e.to_string())
+}
+
+/// "Reset and ask again": drops a stale Accessibility entry, asks again and opens the pane.
+#[tauri::command]
+async fn reset_accessibility(app: AppHandle) -> R<()> {
+    let id = app.config().identifier.clone();
+    blocking(move || platform::reset_accessibility(&id)).await?;
+    open_permission_settings(app, "accessibility".into()).await
+}
+
+/// Onboarding's Quit, before there is a pill or a reason to stay in the menu bar.
+#[tauri::command]
+async fn quit_app(app: AppHandle) -> R<()> {
+    app.exit(0);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1439,6 +1542,13 @@ pub fn run() {
             retry_last,
             check_permissions,
             open_permission_settings,
+            request_microphone,
+            focus_main,
+            mic_check,
+            play_sound,
+            open_textedit,
+            reset_accessibility,
+            quit_app,
             cloud_start_login,
             cloud_verify,
             cloud_account,
@@ -1720,6 +1830,20 @@ mod tests {
         assert!(warning.is_none(), "{warning:?}");
         assert_eq!((kept.hotkey.as_str(), kept.paste_last_hotkey.as_str()), ("CommandOrControl+Control+V", "CommandOrControl+Control+B"));
         assert_eq!(swaps.into_inner(), ["CommandOrControl+Control+V>CommandOrControl+Control+B", "Alt+Space>CommandOrControl+Control+V"], "the key is freed before it is taken");
+    }
+
+    #[test]
+    fn onboarding_pastes_only_from_its_real_app_step_and_never_into_echotype() {
+        use super::pastes;
+        let mut s = Settings::default();
+        assert!(!pastes(&s, false), "steps 1-2: practice lands in onboarding's own field");
+        s.onboard_step = 2;
+        assert!(!pastes(&s, false));
+        s.onboard_step = 3;
+        assert!(pastes(&s, false), "step 3 tries a real paste in another app");
+        assert!(!pastes(&s, true), "but never into Echotype's own window");
+        let done = Settings { onboarded: true, ..Default::default() };
+        assert!(pastes(&done, false) && !pastes(&done, true));
     }
 
     #[test]
