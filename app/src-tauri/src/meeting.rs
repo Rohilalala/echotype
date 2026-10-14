@@ -30,7 +30,8 @@ const VOICE_DB: f32 = -50.0;
 /// Words further apart than this start a new transcript line.
 const LINE_GAP_S: f32 = 1.5;
 /// A run of computer-audio words this long gets a voice fingerprint for its live speaker label.
-const MIN_EMBED_S: f32 = 0.8;
+/// (Shorter runs fingerprint poorly and would start new speakers; they keep the previous label.)
+const MIN_EMBED_S: f32 = 1.5;
 
 pub const ME: &str = "you";
 pub const OTHERS: &str = "others";
@@ -121,27 +122,39 @@ fn norm(w: &str) -> String {
     w.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 
-/// Consecutive words of one speaker, split where they pause longer than LINE_GAP_S.
-fn lines(words: &[(Word, String)]) -> Vec<Segment> {
+/// A speaker's sentences: words up to . ? or ! (a sentence never splits, so word times that
+/// soak up a pause cannot break one apart, and a speaker change starts a new one).
+fn sentences(words: &[(Word, String)]) -> Vec<Segment> {
     let mut out: Vec<Segment> = vec![];
+    let mut open = false;
     for (w, who) in words {
         match out.last_mut() {
-            Some(s) if s.speaker == *who && w.start - s.end <= LINE_GAP_S => {
+            Some(s) if open && s.speaker == *who => {
                 s.text.push(' ');
                 s.text.push_str(&w.text);
                 s.end = s.end.max(w.end);
             }
             _ => out.push(Segment { start: w.start, end: w.end, speaker: who.clone(), text: w.text.clone() }),
         }
+        open = !w.text.ends_with(['.', '?', '!']);
     }
     out
 }
 
-/// One timeline from the mic and computer-audio words, ordered by time. Without headphones the
-/// mic also hears the call; a mic line whose words mostly appear in the computer audio at the
-/// same moment is that echo, not the user, and is dropped.
+/// Whisper stuck in a loop on noise ("the top of the top of the top of the top"): a long
+/// sentence that is mostly the same few words again.
+fn looped(text: &str) -> bool {
+    let words: Vec<String> = text.split_whitespace().map(norm).filter(|w| !w.is_empty()).collect();
+    words.len() >= 8 && words.iter().collect::<HashSet<_>>().len() * 2 <= words.len()
+}
+
+/// One timeline from the mic and computer-audio words: sentences from both, ordered by time, and
+/// a speaker's consecutive sentences joined into one line unless they pause longer than
+/// LINE_GAP_S. Ordering sentences, not lines, keeps one side's long stretch from swallowing what
+/// the other side said in between. Without headphones the mic also hears the call; a mic sentence
+/// whose words mostly appear in the computer audio at the same moment is that echo and is dropped.
 pub fn timeline(mic: &[(Word, String)], system: &[(Word, String)]) -> Vec<Segment> {
-    let mut out: Vec<Segment> = lines(mic)
+    let mut all: Vec<Segment> = sentences(mic)
         .into_iter()
         .filter(|m| {
             let heard: HashSet<String> = system.iter().filter(|(w, _)| w.end >= m.start - 1.0 && w.start <= m.end + 1.0).map(|(w, _)| norm(&w.text)).collect();
@@ -150,8 +163,20 @@ pub fn timeline(mic: &[(Word, String)], system: &[(Word, String)]) -> Vec<Segmen
             mine.len() < 3 || echoed * 10 < mine.len() * 6
         })
         .collect();
-    out.extend(lines(system));
-    out.sort_by(|a, b| a.start.total_cmp(&b.start));
+    all.extend(sentences(system));
+    all.retain(|s| !looped(&s.text));
+    all.sort_by(|a, b| a.start.total_cmp(&b.start));
+    let mut out: Vec<Segment> = vec![];
+    for s in all {
+        match out.last_mut() {
+            Some(l) if l.speaker == s.speaker && s.start - l.end <= LINE_GAP_S => {
+                l.text.push(' ');
+                l.text.push_str(&s.text);
+                l.end = l.end.max(s.end);
+            }
+            _ => out.push(s),
+        }
+    }
     out
 }
 
@@ -650,7 +675,7 @@ fn transcriber(s: &Settings) -> Result<Transcribe, String> {
     if s.stt.provider == "local" {
         let (model, _) = stt::pick_local_model(&s)?;
         let lang = (s.language != "auto" && !s.language.is_empty()).then(|| s.language.clone());
-        Ok(Box::new(move |pcm| stt::transcribe_words(&model, pcm, lang.as_deref(), &prompt)))
+        Ok(Box::new(move |pcm| stt::transcribe_words(&model, pcm, lang.as_deref(), &prompt, speakers::vad().as_deref())))
     } else {
         Ok(Box::new(move |pcm| Ok(spread(&stt::transcribe_remote(&s, pcm, &prompt)?, pcm.len() as f32 / RATE as f32))))
     }
@@ -963,15 +988,17 @@ pub async fn meeting_save(app: AppHandle, id: String, format: String) -> R<Strin
 
 // ---------- CLI ----------
 
-/// `echotype --meeting <audio file> [--speakers N] [--model <ggml .bin>]`: the meeting pipeline on
-/// a recording, all of it treated as computer audio, printed as a speaker-labelled transcript.
+/// `echotype --meeting <audio file> [--mic <audio file>] [--speakers N] [--model <ggml .bin>]`: the
+/// meeting pipeline on a recording (computer audio, plus the microphone track when given, as a
+/// saved meeting's audio-system.wav and audio-mic.wav), printed as a speaker-labelled transcript.
 pub fn cli(args: &[String]) -> i32 {
     let mut s = Settings::load();
-    let (mut file, mut n) = (None, None);
+    let (mut file, mut mic, mut n) = (None, None, None);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--meeting" => file = it.next().cloned(),
+            "--mic" => mic = it.next().cloned(),
             "--speakers" => n = it.next().and_then(|v| v.parse::<i32>().ok()).filter(|v| *v > 0),
             "--model" => {
                 if let Some(m) = it.next() {
@@ -987,11 +1014,11 @@ pub fn cli(args: &[String]) -> i32 {
         }
     }
     let Some(file) = file else {
-        eprintln!("usage: echotype --meeting <audio file> [--speakers N] [--model <path to ggml .bin>]");
+        eprintln!("usage: echotype --meeting <audio file> [--mic <audio file>] [--speakers N] [--model <path to ggml .bin>]");
         return 2;
     };
     stt::quiet_whisper_logs();
-    let code = match cli_run(&s, &file, n) {
+    let code = match cli_run(&s, &file, mic.as_deref(), n) {
         Ok(out) => {
             println!("{out}");
             0
@@ -1005,8 +1032,10 @@ pub fn cli(args: &[String]) -> i32 {
     code
 }
 
-fn cli_run(s: &Settings, file: &str, n: Option<i32>) -> Result<String, String> {
-    let pcm = audio::decode(std::fs::read(file).map_err(|e| format!("Could not read {file}: {e}"))?, Path::new(file).extension().and_then(|e| e.to_str()))?;
+fn cli_run(s: &Settings, file: &str, mic: Option<&str>, n: Option<i32>) -> Result<String, String> {
+    let read = |f: &str| audio::decode(std::fs::read(f).map_err(|e| format!("Could not read {f}: {e}"))?, Path::new(f).extension().and_then(|e| e.to_str()));
+    let pcm = read(file)?;
+    let mic = mic.map(read).transpose()?.unwrap_or_default();
     let secs = pcm.len() as f32 / RATE as f32;
     for m in speakers::MODELS.iter().filter(|m| !speakers::path(m).is_file()) {
         eprintln!("downloading {} ({} MB, {})", m.file, m.size_mb, m.license);
@@ -1015,8 +1044,13 @@ fn cli_run(s: &Settings, file: &str, n: Option<i32>) -> Result<String, String> {
     let m = Meeting { title: Path::new(file).file_stem().map_or_else(|| "Meeting".into(), |f| f.to_string_lossy().into_owned()), ..Default::default() };
     let mut session = Session::new(m, None, transcriber(s)?, Some(embed))?;
     let t = Instant::now();
-    for piece in pcm.chunks(RATE) {
-        session.push(Source::System, piece, None);
+    // One second of each track in turn, as the live capture delivers them.
+    for i in (0..pcm.len().max(mic.len())).step_by(RATE) {
+        for (src, track) in [(Source::System, &pcm), (Source::Mic, &mic)] {
+            if let Some(piece) = track.get(i..(i + RATE).min(track.len())).filter(|p| !p.is_empty()) {
+                session.push(src, piece, None);
+            }
+        }
     }
     let mut diarize_ms = 0;
     let mut diarize = |p: Vec<f32>| {
@@ -1161,9 +1195,19 @@ mod tests {
         let t = timeline(&mic, &sys);
         let got: Vec<(&str, &str)> = t.iter().map(|s| (s.speaker.as_str(), s.text.as_str())).collect();
         assert_eq!(got, [("you", "Morning all."), ("s1", "Hi"), ("s2", "Let's ship Friday."), ("s1", "OK?"), ("you", "Agreed.")]);
-        // Lines split on a long pause.
-        let gap = lines(&[(w(0.0, 1.0, "a"), ME.into()), (w(3.0, 4.0, "b"), ME.into())]);
-        assert_eq!(gap.len(), 2);
+        // Sentences join into a line, split on a long pause, and never break inside: a word whose
+        // time soaked up a pause stays in its sentence.
+        let me = |v: &[(f32, f32, &str)]| v.iter().map(|&(a, b, t)| (w(a, b, t), ME.to_string())).collect::<Vec<_>>();
+        let t = timeline(&me(&[(0.0, 1.0, "One."), (1.5, 2.0, "Two."), (4.0, 5.0, "Three"), (9.0, 9.5, "four.")]), &[]);
+        let got: Vec<&str> = t.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(got, ["One. Two.", "Three four."]);
+        // A long stretch of the mic does not swallow what the call said in between.
+        let t = timeline(&me(&[(0.0, 1.0, "Yes."), (1.2, 2.0, "Sure."), (2.2, 3.0, "Okay.")]), &[(w(1.1, 1.9, "Ready?"), "s1".to_string())]);
+        let got: Vec<&str> = t.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(got, ["Yes.", "Ready?", "Sure. Okay."]);
+        // A whisper loop is dropped; real repetition is kept.
+        let t = timeline(&me(&[(0.0, 4.0, "I'm going to go to the top of the top of the top of the top."), (5.0, 6.0, "Works, works, works.")]), &[]);
+        assert_eq!(t.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(), ["Works, works, works."]);
     }
 
     #[test]
