@@ -384,7 +384,7 @@ body[data-state="error"] .dot { background: var(--bad); }
 body[data-blocked] .dot { background: var(--warn); }
 /* What dictation will use right now; each opens its page (D15). */
 .chip-bar { display: contents; }
-.chip-btn { all: unset; color: var(--fg-2); border-radius: 4px; white-space: nowrap; }
+.chip-btn { all: unset; display: inline-flex; align-items: center; min-height: 24px; color: var(--fg-2); border-radius: 4px; white-space: nowrap; } /* 24px: the WCAG 2.2 target */
 .chip-btn::before { content: "·"; margin: 0 6px; color: var(--fg-3); }
 body:is([data-state="recording"], [data-state="transcribing"], [data-state="cleaning"]) .chip-btn:first-child::before { content: none; }
 .chip-btn:hover { color: var(--fg); }
