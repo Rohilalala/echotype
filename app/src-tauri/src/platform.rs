@@ -21,7 +21,9 @@ pub fn paste(app: &AppHandle, text: &str, restore: bool) -> Result<(), (String, 
     let saved = if restore { cb.get_text().ok() } else { None };
     set_private(cb, text).map_err(|e| (format!("Clipboard write failed: {e}"), false))?;
     // Delays follow Handy (MIT): 60 ms for the pasteboard to settle, 100 ms modifier hold, 60 ms before restoring.
-    std::thread::sleep(Duration::from_millis(60));
+    // ponytail: on Wayland the clipboard crosses the XWayland bridge first, so 250 ms; tune if a slow app pastes the old text.
+    let settle = Duration::from_millis(if wayland() { 250 } else { 60 });
+    std::thread::sleep(settle);
     let (tx, rx) = std::sync::mpsc::channel();
     // Keyboard-layout lookups (TIS) must run on the macOS main thread.
     app.run_on_main_thread(move || {
@@ -29,7 +31,7 @@ pub fn paste(app: &AppHandle, text: &str, restore: bool) -> Result<(), (String, 
     })
     .map_err(|e| (e.to_string(), true))?;
     rx.recv().map_err(|e| (e.to_string(), true))?.map_err(|e| (format!("{e}. The text is on your clipboard"), true))?;
-    std::thread::sleep(Duration::from_millis(60));
+    std::thread::sleep(settle);
     if let Some(prev) = saved {
         let _ = set_private(cb, &prev);
     }
@@ -106,7 +108,34 @@ fn set_private(cb: &mut arboard::Clipboard, text: &str) -> Result<(), arboard::E
     cb.set().exclude_from_history().text(text)
 }
 
+/// A Wayland session: apps can't send keystrokes to each other there (X11 apps under XWayland excepted).
+pub fn wayland() -> bool {
+    cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some_and(|d| !d.is_empty())
+}
+
+/// The command-line tool that can press Ctrl+V on Wayland, if one is installed: wtype (wlroots
+/// compositors, KDE) or ydotool (any compositor; its ydotoold daemon must be running).
+pub fn paste_tool() -> Option<&'static str> {
+    let on_path = |tool: &str| std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(tool).is_file()));
+    ["wtype", "ydotool"].into_iter().find(|t| wayland() && on_path(t))
+}
+
+/// Ctrl+V through wtype or ydotool. Without either, the text stays on the clipboard and the card says so.
+fn wayland_paste() -> Result<(), String> {
+    let tool = paste_tool().ok_or("On Wayland, Echotype needs wtype or ydotool to paste")?;
+    // ydotool takes Linux input event codes: 29 Left Ctrl, 47 V; :1 press, :0 release.
+    let args: &[&str] = if tool == "wtype" { &["-M", "ctrl", "-k", "v", "-m", "ctrl"] } else { &["key", "29:1", "47:1", "47:0", "29:0"] };
+    match std::process::Command::new(tool).args(args).output() {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => Err(format!("{tool} could not paste: {}", String::from_utf8_lossy(&o.stderr).trim())),
+        Err(e) => Err(format!("{tool} could not paste: {e}")),
+    }
+}
+
 fn send_paste_keys() -> Result<(), String> {
+    if wayland() {
+        return wayland_paste();
+    }
     use enigo::{Direction, Enigo, Key, Keyboard, Settings};
     let mut e = Enigo::new(&Settings::default()).map_err(|e| format!("Keyboard injection unavailable: {e}"))?;
     #[cfg(target_os = "macos")]
