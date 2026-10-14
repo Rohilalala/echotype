@@ -12,7 +12,7 @@ ram_ok() {  # free + inactive + speculative pages, in GB; refuse to load a model
 [ -d .venv ] || { uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r pyproject.toml; }
 
 $PY/python gen.py --out out/data                                  # 30k train / 1k valid / 500 held-out
-ram_ok && $PY/mlx_lm.lora -c lora.yaml 2>&1 | tee out/train.log      # LoRA, ~45 min on an M5 Pro
+ram_ok && $PY/mlx_lm.lora -c lora.yaml 2>&1 | tee out/train.log      # LoRA, 35-56 min on an M5 Pro (shared machine)
 ram_ok && $PY/mlx_lm.fuse --model $BASE --adapter-path out/adapters --save-path out/fused          # bf16, HF layout
 $PY/mlx_lm.convert --hf-path out/fused --mlx-path out/fused-4bit -q --q-bits 4 --q-group-size 64   # what mlx_lm.server serves
 

@@ -60,7 +60,8 @@ def checks(c, out):
     ref = c["reference"]
     res = {"exact": out == ref}
     if "must" in c or "mustnot" in c:
-        res["must"] = all(m in out for m in c.get("must", [])) and not any(m.lower() in out.lower() for m in c.get("mustnot", []))
+        bad = [m for m in c.get("mustnot", []) if re.search(rf"(?<!\w){re.escape(m.strip())}(?!\w)" if m.strip().isalnum() else re.escape(m), out, re.I)]
+        res["must"] = all(m in out for m in c.get("must", [])) and not bad
     res["no_filler"] = None if FILLER.search(ref) or not FILLER.search(c["transcript"]) else not FILLER.search(out)
     res["empty_ok"] = (out == "") if ref == "" else None
     res["list_ok"] = (len(LIST_LINE.findall(out)) >= 2) if len(LIST_LINE.findall(ref)) >= 2 else None

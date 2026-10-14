@@ -59,7 +59,9 @@ def main():
         with urllib.request.urlopen(req, timeout=30) as r:
             reply = json.load(r)
         ms = (time.perf_counter() - t0) * 1000
-        content = reply["choices"][0]["message"]["content"]
+        # mlx_lm.server sends "content": null for an empty completion (filler-only audio), and
+        # cleanup::parse_reply treats null as an error; the app should read null as "" for this model.
+        content = reply["choices"][0]["message"]["content"] or ""
         print(f"{ms:6.0f} ms  {transcript!r}\n          -> {content.rsplit('</think>', 1)[-1].strip()!r}")
 
 

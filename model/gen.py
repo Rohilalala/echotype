@@ -448,7 +448,7 @@ Send it to {name}, not to me.|Use the new link, not the old one.|It's on {day}, 
 See you {when}!|Congrats on the launch, {name}!|That's a lot of money for {small} days of work.|Payslips go out on {ordday}.|My last day is {ordday}.
 We need {small} more laptops for the new joiners.|It took {small} hours to fix.|I have {small} meetings today and {count} unread emails.|There are {small} open bugs and {count} closed ones.
 The second option is cheaper, but the first one is faster.|Two of the three tests are failing.|First things first, did everyone get the invite?|Can we do one call instead of two?
-I just need a minute.|Maybe we should just wait for {name}.|It's really not that urgent.|No worries, take your time.|Not today, maybe {when}.
+I mean it, no more extensions this month.|You know what, let's just ship it.|Like I said, the numbers are final.|I just need a minute.|Maybe we should just wait for {name}.|It's really not that urgent.|No worries, take your time.|Not today, maybe {when}.
 """)
 ENTITY = L("""
 My number is {phone}.|You can reach me at {email}.|The docs are at {url}.|Send the signed copy to {email} by {date}.|Call me on {phone} if anything breaks.
@@ -1084,7 +1084,25 @@ def ex_hinglish(r, translate, deva):
     sp = " ".join(toks).replace("\x05", " ")
     if raw:
         sp = sp.lower()
+    sp = hi_dictionary(sp, ctx)
     return clean, re.sub(r"\s+", " ", sp).strip(), ctx
+
+
+def hi_dictionary(sp, ctx):
+    """Dictionary for Hinglish: terms the speaker used (maybe misspelled by ASR) plus distractors."""
+    r = ctx.r
+    for term, bad in DICT_TERMS.items():
+        m = re.search(rf"(?<!\w){re.escape(term)}(?!\w)", sp, re.I)
+        if m and r.random() < 0.6:
+            ctx.dict.append(term)
+            if r.random() < 0.75:
+                sp = sp[:m.start()] + r.choice(bad) + sp[m.end():]
+    for _ in range(r.choice([0, 1, 1, 2, 3])):
+        t = r.choice(TOOLS + DICT_PEOPLE)
+        if t not in ctx.dict and len(ctx.dict) < 5:
+            ctx.dict.append(t)
+    r.shuffle(ctx.dict)
+    return sp
 
 
 def example(r):
