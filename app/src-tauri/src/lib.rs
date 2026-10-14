@@ -4,6 +4,7 @@ mod capture;
 mod cleanup;
 mod cloud;
 mod hotkey;
+mod llm;
 mod meeting;
 mod pill;
 mod platform;
@@ -787,6 +788,10 @@ fn commit_settings(app: &AppHandle, change: impl FnOnce(&Settings) -> Settings) 
         let s = new.clone();
         std::thread::spawn(move || stt::warm_up(&s));
     }
+    if llm::wanted(&new) != llm::wanted(&old) {
+        let s = new.clone();
+        std::thread::spawn(move || llm::apply(&s)); // start the built-in cleanup model, or free its memory
+    }
     if old.history_enabled && !new.history_enabled {
         *lock(&state(app).last_output) = None; // switching history off also forgets the in-memory copy
     }
@@ -921,13 +926,17 @@ struct SystemInfo {
     arch: &'static str,
     /// Launch at login can be offered (running from /Applications, not translocated).
     can_autostart: bool,
+    /// The built-in cleanup model is on disk, and its size (or download size) in MB.
+    echotype_model_installed: bool,
+    echotype_model_mb: u64,
 }
 
 #[tauri::command]
 async fn get_system_info() -> R<SystemInfo> {
     let (total, avail) = stt::ram_mb();
     let gb = |mb: u64| (mb as f64 / 1024.0 * 10.0).round() / 10.0;
-    Ok(SystemInfo { total_ram_gb: gb(total), available_ram_gb: gb(avail), os: std::env::consts::OS, arch: std::env::consts::ARCH, can_autostart: can_autostart() })
+    let (echotype_model_installed, echotype_model_mb) = llm::status();
+    Ok(SystemInfo { total_ram_gb: gb(total), available_ram_gb: gb(avail), os: std::env::consts::OS, arch: std::env::consts::ARCH, can_autostart: can_autostart(), echotype_model_installed, echotype_model_mb })
 }
 
 #[tauri::command]
@@ -1301,7 +1310,10 @@ pub fn run() {
                     emit_state(&h, card(&s, text, None, None));
                 });
             }
-            std::thread::spawn(move || stt::warm_up(&s));
+            std::thread::spawn(move || {
+                stt::warm_up(&s);
+                llm::apply(&s);
+            });
             Ok(())
         })
         .on_menu_event(|app, e| pill::on_menu(app, e.id.as_ref()))
@@ -1375,6 +1387,7 @@ pub fn run() {
         }
         if let RunEvent::Exit = event {
             stt::unload();
+            llm::stop();
         }
         let _ = (app, event);
     });
@@ -1415,6 +1428,7 @@ pub fn cli(args: &[String]) -> i32 {
     let t = std::time::Instant::now();
     let result = transcribe_path(&s, &file);
     stt::unload();
+    llm::stop();
     let (out, err, code) = cli_report(result, t.elapsed().as_millis());
     if !out.is_empty() {
         println!("{out}");

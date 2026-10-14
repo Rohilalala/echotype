@@ -73,9 +73,13 @@ pub fn cleanup(s: &Settings, text: &str) -> Result<String, String> {
 /// `text` inside <transcript> tags. Also used for meeting summaries.
 pub fn chat(s: &Settings, system: &str, text: &str, timeout: Duration) -> Result<String, String> {
     let c = &s.cleanup;
-    let base = settings::base_url(&c.provider, &c.base_url)?;
+    let (base, key) = if c.provider == "echotype" {
+        let (url, key) = crate::llm::ensure()?; // the built-in model's server, started on first use
+        (url, Some(key))
+    } else {
+        (settings::base_url(&c.provider, &c.base_url)?, settings::provider_key("llm", &c.provider))
+    };
     let model = if c.model.trim().is_empty() { settings::preset(&c.provider).map(|p| p.default_cleanup_model).unwrap_or_default() } else { c.model.trim() };
-    let key = settings::provider_key("llm", &c.provider);
     let client = reqwest::blocking::Client::builder().timeout(timeout).build().map_err(|e| e.to_string())?;
     let send = |off: bool| {
         let mut req = client.post(format!("{base}/chat/completions")).json(&request_body(model, system, text, off));

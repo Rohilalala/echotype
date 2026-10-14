@@ -324,8 +324,8 @@ pub fn presets() -> Vec<Preset> {
         p("openrouter", "OpenRouter", false, true, "https://openrouter.ai/api/v1", "", "openai/gpt-4.1-nano", true),
         p("ollama", "Ollama", false, true, "http://localhost:11434/v1", "", "gemma3:1b", false),
         p("lmstudio", "LM Studio", false, true, "http://localhost:1234/v1", "", "google/gemma-3-1b", false),
-        // mlx_lm.server answers the model id "default_model" with whatever --model it was started with.
-        p("echotype", "Echotype model (local)", false, true, "http://127.0.0.1:8899/v1", "", "default_model", false),
+        // Built in: llm.rs runs it on a free localhost port, so it has no fixed URL.
+        p("echotype", "Echotype model (local)", false, true, "", "", "echotype-clean", false),
         p("custom", "Custom (OpenAI-compatible)", true, true, "", "", "", false),
     ]
 }
