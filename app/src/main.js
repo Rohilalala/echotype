@@ -103,7 +103,7 @@ function bindAll() {
     const text = el.tagName === 'TEXTAREA' || ['text', 'url', 'password', 'number'].includes(el.type);
     el.addEventListener(text ? 'input' : 'change', () => {
       if (el.type === 'number' && !el.checkValidity()) return;
-      let v = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value;
+      let v = el.type === 'checkbox' ? el.checked : ['number', 'range'].includes(el.type) ? Number(el.value) : el.value;
       if ('null' in el.dataset && v === '') v = null;
       set(p, v);
       text ? saveSoon() : save();
@@ -129,6 +129,7 @@ function changed(p) {
   if (p.startsWith('local_api')) refreshApi();
   if (p === 'history_enabled') renderHistory();
   if (p === 'pill_idle' || p === 'show_in') renderPill();
+  if (p === 'pill_size' || p === 'ball_size') sizePreview();
   if (p === 'look') applyLook();
   renderChips();
 }
@@ -913,6 +914,8 @@ function renderPill() {
   $('#showInDesc').textContent = bar ? 'No pill on screen. The menu bar icon shows when Echotype listens; click it to dictate, right-click for options.'
     : 'Drag the pill anywhere on any display; double-click it to put it back.';
   $('#pillFollowRow').hidden = $('#pillIdleRow').hidden = $('#pillHideRow').hidden = $('#pillRecRow').hidden = bar;
+  $('#pillSizeRow').hidden = $('#ballSizeRow').hidden = $('#pillPreviewRow').hidden = bar;
+  sizePreview();
   const until = S.pill_hidden_until || 0, hidden = until > Date.now();
   const at = new Date(until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); // as the tray says it
   $('#pillHidden').textContent = !S.pill_idle ? 'The pill shows only while you dictate.'
@@ -922,6 +925,40 @@ function renderPill() {
   clearTimeout(pillTimer);
   if (hidden) pillTimer = setTimeout(renderPill, Math.min(until - Date.now() + 500, 2 ** 31 - 1));
 }
+// Settings → Pill size: the real overlay page in an iframe (overlay.html?preview, fed by mock.js,
+// never by the app), zoomed like the pill window and cycling ball → orb → card while it's on screen.
+const pillPreview = $('#pillPreview');
+function sizePreview() {
+  $('#pillSizeOut').textContent = `${Math.round((S.pill_size ?? 1.5) * 100)}%`;
+  $('#ballSizeOut').textContent = `${Math.round((S.ball_size ?? 1) * 100)}%`;
+  pillPreview.style.zoom = S.pill_size ?? 1.5;
+  pillPreview.contentDocument?.documentElement.style.setProperty('--ball', S.ball_size ?? 1);
+}
+for (const id of ['pill_size', 'ball_size']) {
+  // Dragging moves the preview at once; letting go saves (and the real pill follows).
+  $(`[data-bind="${id}"]`).addEventListener('input', e => { S[id] = Number(e.target.value); sizePreview(); });
+}
+const DEMO = [
+  [0, 'pill', { active: false, near: true }], [0, 'dictation-state', { state: 'idle' }],
+  [1400, 'pill', { active: true, near: true }], [0, 'dictation-state', { state: 'recording' }],
+  [2600, 'dictation-state', { state: 'transcribing' }],
+  [1500, 'dictation-state', { state: 'done', card: true, text: 'Let’s move the standup to 10:30 tomorrow.', warning: 'Nowhere to paste', paste_key: '⌃⌥V' }],
+  [3200, 'dictation-state', { state: 'idle' }], [0, 'pill', { active: false, near: true }],
+];
+let demoAt = 0, demoTimer, levelTimer;
+function demoStep() {
+  const m = pillPreview.contentWindow?.__mock;
+  if (!m || pillPreview.closest('[hidden]')) { demoTimer = setTimeout(demoStep, 500); return; } // not on screen: wait
+  const [, ev, payload] = DEMO[demoAt];
+  m.emit(ev, ev === 'pill' ? { hover: false, expand: false, hint: '', drag: false, ball: S.ball_size ?? 1, ...payload } : payload);
+  clearInterval(levelTimer);
+  if (payload.state === 'recording') levelTimer = setInterval(() => m.emit('audio-level', { meter: 0.25 + Math.random() * 0.6, muted: false }), 60);
+  demoAt = (demoAt + 1) % DEMO.length;
+  demoTimer = setTimeout(demoStep, DEMO[demoAt][0]);
+}
+pillPreview.addEventListener('load', () => { sizePreview(); clearTimeout(demoTimer); demoAt = 0; demoStep(); });
+demoStep(); // if the frame loaded before this script ran; it waits for the frame otherwise
+
 $('#pillHide').addEventListener('click', () => {
   S.pill_hidden_until = S.pill_hidden_until > Date.now() ? 0 : Date.now() + HIDE_MS;
   save();

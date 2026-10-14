@@ -13,14 +13,26 @@ use tauri::menu::Menu;
 use tauri::{AppHandle, Emitter, LogicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Wry};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
-/// The overlay page is laid out in CSS pixels (every size below but MARGIN) and shown this much
-/// larger (webview zoom), so ball, orb, capsule and card all scale together.
-pub const ZOOM: f64 = 1.5;
+/// The overlay page is laid out in CSS pixels (every size below but MARGIN) and shown `zoom()`
+/// times larger (webview zoom, Settings → Pill size), so orb, capsule and card scale together;
+/// the idle ball also has its own scale. The loop sets both from settings; the placement maths
+/// reads them everywhere, hence one static.
+static SIZE: std::sync::Mutex<(f64, f64)> = std::sync::Mutex::new((1.5, 1.0));
+
+pub fn zoom() -> f64 {
+    lock(&SIZE).0
+}
+
+fn ball() -> f64 {
+    lock(&SIZE).1
+}
 /// The overlay page: the "nowhere to paste" card plus room for its soft shadow (CSS px). Every
 /// capsule sits on one line ANCHOR above the page's bottom edge; the card grows up from it.
 const PAGE: (f64, f64) = (260.0, 100.0);
 /// The overlay window in points.
-pub const WIN: (f64, f64) = (PAGE.0 * ZOOM, PAGE.1 * ZOOM);
+pub fn win() -> (f64, f64) {
+    (PAGE.0 * zoom(), PAGE.1 * zoom())
+}
 const ANCHOR: f64 = 16.0;
 /// The card: as wide as the widest notice; why it could not paste on one 15 px line, the text on
 /// one or two 15 px lines, then a 22 px row (overlay.html).
@@ -31,8 +43,11 @@ const CARD_LINE: usize = 26;
 const MARGIN: f64 = 10.0;
 const LINE_H: f64 = 22.0;
 const MAX_W: f64 = 240.0;
-/// The idle ball is 10 pt across to look at and 24x22 to hit.
-const IDLE_HIT: (f64, f64) = (24.0, 22.0);
+/// The idle ball is 10 px across (times its own scale) to look at and at least 24x22 to hit.
+fn idle_hit() -> (f64, f64) {
+    let d = 10.0 * ball();
+    ((d + 14.0).max(24.0), (d + 12.0).max(22.0))
+}
 /// The thinking orb (recording, transcribing, cleaning); overlay.js draws it this size.
 const ORB: f64 = 36.0;
 /// While recording, ✕ and ✓ sit either side of the orb, so its hit area is this wide.
@@ -310,7 +325,7 @@ impl Pill {
     pub fn capsule(&self, expanded: bool, hint_chars: usize) -> (f64, f64) {
         match self.active {
             None if expanded => (text_w(hint_chars), LINE_H),
-            None => IDLE_HIT,
+            None => idle_hit(),
             // ✕ and ✓ (16 pt each) stay either side of the words.
             Some(a) if a.recording && self.muted => (text_w("Is your mic muted?".len()) + 36.0, LINE_H),
             Some(a) if a.recording => (REC_W, ORB),
@@ -411,14 +426,16 @@ pub fn cursor_pt((x, y): (f64, f64), primary_scale: f64) -> (f64, f64) {
 /// ANCHOR above the bottom edge, and a card (taller than a line) growing up from that line's bottom.
 /// `(w, h)` in CSS px; the rect in points.
 pub fn capsule_rect(win: (f64, f64), (w, h): (f64, f64)) -> Rect {
-    let (w, h) = (w * ZOOM, h * ZOOM);
-    let bottom = win.1 + WIN.1 - (ANCHOR - LINE_H.min(h / ZOOM) / 2.0) * ZOOM;
-    Rect { x: win.0 + (WIN.0 - w) / 2.0, y: bottom - h, w, h }
+    let (z, (ww, wh)) = (zoom(), self::win());
+    let (w, h) = (w * z, h * z);
+    let bottom = win.1 + wh - (ANCHOR - LINE_H.min(h / z) / 2.0) * z;
+    Rect { x: win.0 + (ww - w) / 2.0, y: bottom - h, w, h }
 }
 
 /// Window top-left: bottom-centre of the visible frame `work`, the tallest line MARGIN above it plus `dock`.
 pub fn place(work: Rect, dock: f64) -> (f64, f64) {
-    (work.x + (work.w - WIN.0) / 2.0, work.y + work.h - MARGIN - dock - (WIN.1 - (ANCHOR - LINE_H / 2.0) * ZOOM))
+    let (ww, wh) = win();
+    (work.x + (work.w - ww) / 2.0, work.y + work.h - MARGIN - dock - (wh - (ANCHOR - LINE_H / 2.0) * zoom()))
 }
 
 /// The window's top-left kept inside `work` (a display's visible frame), so no part of the pill,
@@ -426,7 +443,8 @@ pub fn place(work: Rect, dock: f64) -> (f64, f64) {
 // ponytail: so the idle bar stops ~68 pt below the top edge (room for the card above it); move the
 // window down while a card is up near the top if that ever bothers anyone.
 pub fn clamp(work: Rect, (x, y): (f64, f64)) -> (f64, f64) {
-    (x.clamp(work.x, work.x + (work.w - WIN.0).max(0.0)), y.clamp(work.y, work.y + (work.h - WIN.1).max(0.0)))
+    let (ww, wh) = win();
+    (x.clamp(work.x, work.x + (work.w - ww).max(0.0)), y.clamp(work.y, work.y + (work.h - wh).max(0.0)))
 }
 
 /// Dragged within this many points of a display's horizontal centre, the pill snaps onto it.
@@ -434,7 +452,7 @@ const SNAP: f64 = 24.0;
 
 /// The window's x while dragging on `work`: pulled onto the centre line when close to it.
 pub fn snap_x(work: Rect, x: f64) -> f64 {
-    let centre = work.x + (work.w - WIN.0) / 2.0;
+    let centre = work.x + (work.w - win().0) / 2.0;
     if (x - centre).abs() <= SNAP { centre } else { x }
 }
 
@@ -443,13 +461,17 @@ pub fn snap_x(work: Rect, x: f64) -> f64 {
 pub fn normalize(work: Rect, at: (f64, f64)) -> [f64; 2] {
     let (x, y) = clamp(work, at);
     let frac = |d: f64, room: f64| if room > 0.0 { d / room } else { 0.5 };
-    [frac(x - work.x, work.w - WIN.0), frac(y - work.y, work.h - WIN.1)]
+    let (ww, wh) = win();
+    [frac(x - work.x, work.w - ww), frac(y - work.y, work.h - wh)]
 }
 
 /// Window top-left on a display: where it was dropped there, else bottom-centre above the Dock.
 pub fn spot(work: Rect, saved: Option<[f64; 2]>, dock: f64) -> (f64, f64) {
     match saved {
-        Some([nx, ny]) => clamp(work, (work.x + nx * (work.w - WIN.0), work.y + ny * (work.h - WIN.1))),
+        Some([nx, ny]) => {
+            let (ww, wh) = win();
+            clamp(work, (work.x + nx * (work.w - ww), work.y + ny * (work.h - wh)))
+        }
         None => place(work, dock),
     }
 }
@@ -501,7 +523,7 @@ fn protect(s: &Settings) -> bool {
 pub fn create(app: &tauri::App, s: &Settings) -> tauri::Result<WebviewWindow> {
     let win = WebviewWindowBuilder::new(app, "overlay", WebviewUrl::App("overlay.html".into()))
         .title("Echotype")
-        .inner_size(WIN.0, WIN.1)
+        .inner_size(win().0, win().1)
         .decorations(false)
         .transparent(true)
         .shadow(false)
@@ -515,7 +537,7 @@ pub fn create(app: &tauri::App, s: &Settings) -> tauri::Result<WebviewWindow> {
         .content_protected(protect(s))
         .visible(false)
         .build()?;
-    win.set_zoom(ZOOM)?;
+    win.set_zoom(zoom())?;
     #[cfg(target_os = "macos")]
     {
         use tauri_nspanel::{CollectionBehavior, PanelLevel, StyleMask, WebviewWindowExt};
@@ -543,6 +565,8 @@ struct View {
     drag: bool,
     /// The cursor is within NEAR of the capsule: the idle ball shows at full strength.
     near: bool,
+    /// The idle ball's own scale (Settings → Pill).
+    ball: f64,
 }
 
 struct Screen {
@@ -682,6 +706,14 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
         loop {
             let now = Instant::now();
             let s = crate::current_settings(&app);
+            // Settings → Pill size changed: resize and re-zoom the window, then place it afresh.
+            if (s.pill_size, s.ball_size) != *lock(&SIZE) {
+                *lock(&SIZE) = (s.pill_size, s.ball_size);
+                let (w, h) = self::win();
+                let _ = win.set_size(tauri::LogicalSize::new(w, h));
+                let _ = win.set_zoom(s.pill_size);
+                placed_on = None;
+            }
             let c = ctx(&app, &s);
             let hint = hint(&s);
             let (active, expanded, size, deadline, glyph, meter, line, copy, card) = {
@@ -807,7 +839,7 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
                 shown = want;
             }
             // Picked up, the idle bar is a bar again: the hint is for hovering, not carrying.
-            let view = View { active, hover: inside, expand: expanded && !held, hint, drag: held && lock(&state(&app).drag).is_some_and(|d| d.moved), near: close || held };
+            let view = View { active, hover: inside, expand: expanded && !held, hint, drag: held && lock(&state(&app).drag).is_some_and(|d| d.moved), near: close || held, ball: s.ball_size };
             if emitted.as_ref() != Some(&view) {
                 let _ = app.emit_to("overlay", "pill", &view);
                 emitted = Some(view);
@@ -1162,7 +1194,7 @@ mod tests {
         assert_eq!(at, (1512.0, -275.0), "pinned to the visible frame's corner, below the menu bar");
         // Past the bottom-right: the whole window, so even the widest notice, stays above the Dock.
         let at = clamp(work, (5000.0, 5000.0));
-        assert_eq!(at, (1512.0 + 2560.0 - WIN.0, -300.0 + 1440.0 - 70.0 - WIN.1));
+        assert_eq!(at, (1512.0 + 2560.0 - win().0, -300.0 + 1440.0 - 70.0 - win().1));
         let r = capsule_rect(at, (MAX_W, LINE_H));
         assert!(r.x + r.w <= ext.x + ext.w && r.y + r.h <= work.y + work.h);
         // Inside the frame nothing changes.
@@ -1183,16 +1215,16 @@ mod tests {
         let bigger = Rect { h: 1555.0, ..portrait };
         let again = spot(bigger, Some(n), 0.0);
         assert_eq!(again.0, dropped.0);
-        assert!(((again.1 - bigger.y) / (bigger.h - WIN.1) - n[1]).abs() < 1e-9);
+        assert!(((again.1 - bigger.y) / (bigger.h - win().1) - n[1]).abs() < 1e-9);
         // A saved place never puts the window off-screen, even from a hand-edited file.
-        assert_eq!(spot(laptop, Some([3.0, -1.0]), 0.0), (1512.0 - WIN.0, 25.0));
+        assert_eq!(spot(laptop, Some([3.0, -1.0]), 0.0), (1512.0 - win().0, 25.0));
         // Double-click forgets this display's place; the others keep theirs.
         let mut s = Settings::default();
         s.pill_positions.insert("Bimawen-16".into(), n);
         s.pill_positions.insert("Built-in Retina Display".into(), [0.1, 0.1]);
         s.pill_positions.remove("Bimawen-16");
         assert_eq!(spot(portrait, s.pill_positions.get("Bimawen-16").copied(), 0.0), place(portrait, 0.0));
-        assert_eq!(spot(laptop, s.pill_positions.get("Built-in Retina Display").copied(), 0.0), clamp(laptop, (0.1 * (1512.0 - WIN.0), 25.0 + 0.1 * (957.0 - WIN.1))));
+        assert_eq!(spot(laptop, s.pill_positions.get("Built-in Retina Display").copied(), 0.0), clamp(laptop, (0.1 * (1512.0 - win().0), 25.0 + 0.1 * (957.0 - win().1))));
     }
 
     #[test]
@@ -1301,7 +1333,7 @@ mod tests {
         assert_eq!(p.tick(ms(200), true), (false, true));
         assert_eq!(p.capsule(true, 32), (text_w(32), LINE_H));
         assert_eq!(p.tick(ms(260), false), (false, false), "leaving closes it");
-        assert_eq!(p.capsule(false, 32), IDLE_HIT);
+        assert_eq!(p.capsule(false, 32), idle_hit());
         p.on_state(&st("recording"), ms(300));
         assert_eq!(p.tick(ms(600), true), (true, false), "only the idle bar expands (D11)");
         assert_eq!(p.capsule(false, 32), (REC_W, ORB), "the orb with ✕ and ✓ beside it");
@@ -1325,13 +1357,13 @@ mod tests {
         // The pill bottom-centre of the external visible frame (menu bar 25 pt, no Dock).
         let at = place(Rect { x: 1512.0, y: -675.0, w: 2560.0, h: 1575.0 }, 0.0);
         assert_eq!(at, (2597.0, 1575.0 - 675.0 - 10.0 - 142.5), "a 390x150 pt window (260x100 at 1.5x)");
-        let r = capsule_rect(at, IDLE_HIT);
+        let r = capsule_rect(at, idle_hit());
         assert_eq!((r.x, r.w, r.h), (2774.0, 36.0, 33.0), "hit areas scale with the zoom");
         // Every line capsule's bottom sits MARGIN above the visible frame; the card grows up from it.
         let line_bottom = |size: (f64, f64)| { let r = capsule_rect(at, size); r.y + r.h };
         assert_eq!(line_bottom((MAX_W, LINE_H)), 1575.0 - 675.0 - 10.0);
         assert_eq!(line_bottom((CARD_W, 87.0)), 1575.0 - 675.0 - 10.0);
-        assert_eq!(capsule_rect(at, IDLE_HIT).y, capsule_rect(at, (MAX_W, LINE_H)).y, "every line centred on one line");
+        assert_eq!(capsule_rect(at, idle_hit()).y, capsule_rect(at, (MAX_W, LINE_H)).y, "every line centred on one line");
         assert_eq!(line_bottom((ORB, ORB)), 1575.0 - 675.0 - 10.0, "the orb grows up from it too");
         assert!(capsule_rect(at, (CARD_W, 87.0)).y >= at.1, "the card fits in the window");
         // The cursor on the capsule centre, as Tauri reports it: points x PRIMARY scale (2), not 1.
@@ -1348,7 +1380,7 @@ mod tests {
     #[test]
     fn dragging_near_the_middle_snaps_to_the_centre() {
         let work = Rect { x: 0.0, y: 25.0, w: 1512.0, h: 900.0 };
-        let centre = (1512.0 - WIN.0) / 2.0;
+        let centre = (1512.0 - win().0) / 2.0;
         assert_eq!(snap_x(work, centre + 20.0), centre);
         assert_eq!(snap_x(work, centre - 24.0), centre);
         assert_eq!(snap_x(work, centre + 30.0), centre + 30.0, "further out it moves freely");

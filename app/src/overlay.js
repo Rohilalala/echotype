@@ -1,7 +1,13 @@
-if (!window.__TAURI__) await import('./mock.js');
+// ?preview: the live preview in Settings → Pill, driven by the settings page through mock.js and
+// never by (or able to reach) the real app.
+const preview = new URLSearchParams(location.search).has('preview');
+if (!window.__TAURI__ || preview) await import('./mock.js');
 import { resolvePreset, MODE_FRAMES } from './vendor/thinking-orbs.js';
-const { listen } = window.__TAURI__.event;
-const { invoke } = window.__TAURI__.core;
+const api = preview ? window.__mock.api : window.__TAURI__;
+// Same colour scheme as the Settings page around it, or the frame is painted opaque in dark mode.
+if (preview) document.documentElement.style.colorScheme = 'light dark';
+const { listen } = api.event;
+const { invoke } = api.core;
 const pill = document.getElementById('pill'), label = document.getElementById('label');
 const chipEl = document.getElementById('chip');
 const creason = document.getElementById('creason'), fixBtn = document.getElementById('fix');
@@ -75,7 +81,11 @@ listen('dictation-state', ({ payload: p }) => {
   render();
 });
 
-listen('pill', ({ payload }) => { view = payload; render(); });
+listen('pill', ({ payload }) => {
+  view = payload;
+  document.documentElement.style.setProperty('--ball', view.ball ?? 1);
+  render();
+});
 
 // ~20 Hz. `meter` is 0..1 above the room's own noise floor, so a whisper still moves the orb.
 let meter = 0;

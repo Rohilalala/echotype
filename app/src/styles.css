@@ -664,3 +664,10 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
   .transcript .line { grid-template-columns: 40px 1fr; }
   .transcript .said { grid-column: 2; }
 }
+
+/* Settings → Pill size: sliders and the live preview (the real overlay page on a stand-in desktop). */
+.range { display: flex; align-items: center; gap: 10px; flex: none; }
+.range input { width: 160px; accent-color: var(--accent); }
+.range output { min-width: 3.2em; text-align: right; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.pill-preview { display: flex; justify-content: center; align-items: flex-end; overflow: hidden; padding: 8px 0 4px; border-top: 1px solid var(--line-strong); border-radius: 0 0 var(--r-card) var(--r-card); background: linear-gradient(160deg, #9aa3ad, #6d7681); }
+.pill-preview iframe { display: block; width: 260px; height: 100px; border: 0; background: transparent; pointer-events: none; }

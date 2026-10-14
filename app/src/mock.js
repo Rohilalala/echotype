@@ -1,5 +1,5 @@
-// Browser preview only: fakes the Rust core (same commands and events) so the UI can be
-// opened in a normal browser for design QA. Never loaded inside the Tauri app.
+// Browser preview: fakes the Rust core (same commands and events) so the UI can be opened in a
+// normal browser for design QA. Inside the app it only drives the Settings → Pill preview.
 const q = new URLSearchParams(location.search);
 const listeners = {};
 const emit = (event, payload) => (listeners[event] || []).forEach(cb => cb({ event, payload }));
@@ -196,7 +196,7 @@ Object.assign(commands, {
   meeting_save: () => '/Users/you/Downloads/launch-review.md',
 });
 
-window.__TAURI__ = {
+const api = {
   core: {
     invoke: async (cmd, args = {}) => {
       if (!commands[cmd]) throw `Unknown command: ${cmd}`;
@@ -211,7 +211,9 @@ window.__TAURI__ = {
     },
   },
 };
-window.__mock = { emit, commands };
+// Inside the app the real __TAURI__ may not be replaceable; the pill preview uses `api` directly.
+try { if (!window.__TAURI__) window.__TAURI__ = api; } catch {}
+window.__mock = { emit, commands, api };
 
 // Say so on screen: everything in this preview is sample data.
 const sidebar = document.querySelector('.sidebar');

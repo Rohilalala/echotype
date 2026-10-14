@@ -79,6 +79,11 @@ pub struct Settings {
     pub pill_follow_cursor: bool,
     /// "pill" | "menubar" (macOS): in the menu bar the pill never shows and the status item is the live indicator.
     pub show_in: String,
+    /// Pill size (Settings → Pill): how much larger than its 1x design the pill, orb, capsules,
+    /// card and their text are drawn, 1.0 to 2.0.
+    pub pill_size: f64,
+    /// The idle ball's size relative to its 10 px design, 0.6 to 2.0 (on top of `pill_size`).
+    pub ball_size: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -152,6 +157,8 @@ impl Default for Settings {
             pill_screen: None,
             pill_follow_cursor: true,
             show_in: "pill".into(),
+            pill_size: 1.5,
+            ball_size: 1.0,
         }
     }
 }
@@ -216,6 +223,9 @@ impl Settings {
         if self.local_api.port < MIN_PORT {
             self.local_api.port = LocalApi::default().port; // older builds saved 0 from a cleared field
         }
+        let fit = |v: f64, lo: f64, hi: f64, def: f64| if v.is_finite() { v.clamp(lo, hi) } else { def };
+        self.pill_size = fit(self.pill_size, 1.0, 2.0, 1.5);
+        self.ball_size = fit(self.ball_size, 0.6, 2.0, 1.0);
     }
 
     pub fn save(&self) -> Result<(), String> {
