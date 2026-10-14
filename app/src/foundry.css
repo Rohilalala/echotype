@@ -197,7 +197,7 @@
 :root[data-look="foundry"] .menu-item { border-radius: 6px; }
 
 /* Alerts: a raised strip with a toned hairline; the tone names the kind. */
-:root[data-look="foundry"] :is(.notice, .banner, .status-line, .note, .stats-empty) { --tone: var(--muted); background: var(--raised); border: 1px solid color-mix(in oklab, var(--tone) 38%, var(--hairline)); border-radius: 6px; }
+:root[data-look="foundry"] :is(.notice, .banner, .status-line, .note, .stats-empty) { --tone: var(--muted); background: var(--raised); border: 1px solid color-mix(in oklab, var(--tone) 38%, var(--hairline)); border-radius: 6px; box-shadow: none; }
 :root[data-look="foundry"] .notice { --tone: var(--ink); }
 :root[data-look="foundry"] :is(.status-line, .note.warn) { --tone: var(--warning); }
 :root[data-look="foundry"] .status-line { color: var(--text); }
@@ -244,3 +244,6 @@
 
 /* States: an error names its cause in marsala; empty and loading stay muted. */
 :root[data-look="foundry"] .empty[role="alert"] { color: var(--error); }
+
+/* The browser preview narrower than the app's 720 px minimum. */
+@media (max-width: 620px) { :root[data-look="foundry"] .hero-line { font-size: 24px; line-height: 30px; } }
