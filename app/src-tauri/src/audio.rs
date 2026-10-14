@@ -475,17 +475,29 @@ pub(crate) fn open_stream(device: Option<String>, buf: Arc<Mutex<Vec<f32>>>, los
         .or_else(|| host.default_input_device())
         .ok_or("No microphone found")?;
     let cfg = dev.default_input_config().map_err(|e| format!("Microphone unavailable: {e}"))?;
+    start(&dev, cfg, buf, lost)
+}
+
+/// Windows: what the default output plays (WASAPI loopback; cpal records an output device that way).
+#[cfg(target_os = "windows")]
+pub(crate) fn open_loopback(buf: Arc<Mutex<Vec<f32>>>, lost: Arc<std::sync::atomic::AtomicBool>) -> Result<(cpal::Stream, u32), String> {
+    let dev = cpal::default_host().default_output_device().ok_or("No audio output found")?;
+    let cfg = dev.default_output_config().map_err(|e| format!("Computer audio unavailable: {e}"))?;
+    start(&dev, cfg, buf, lost)
+}
+
+fn start(dev: &cpal::Device, cfg: cpal::SupportedStreamConfig, buf: Arc<Mutex<Vec<f32>>>, lost: Arc<std::sync::atomic::AtomicBool>) -> Result<(cpal::Stream, u32), String> {
     let rate = cfg.sample_rate().0;
     let sc: cpal::StreamConfig = cfg.clone().into();
     use cpal::SampleFormat as F;
     let stream = match cfg.sample_format() {
-        F::F32 => build::<f32>(&dev, &sc, buf, lost),
-        F::I16 => build::<i16>(&dev, &sc, buf, lost),
-        F::U16 => build::<u16>(&dev, &sc, buf, lost),
-        F::I32 => build::<i32>(&dev, &sc, buf, lost),
-        F::I8 => build::<i8>(&dev, &sc, buf, lost),
-        F::U8 => build::<u8>(&dev, &sc, buf, lost),
-        F::F64 => build::<f64>(&dev, &sc, buf, lost),
+        F::F32 => build::<f32>(dev, &sc, buf, lost),
+        F::I16 => build::<i16>(dev, &sc, buf, lost),
+        F::U16 => build::<u16>(dev, &sc, buf, lost),
+        F::I32 => build::<i32>(dev, &sc, buf, lost),
+        F::I8 => build::<i8>(dev, &sc, buf, lost),
+        F::U8 => build::<u8>(dev, &sc, buf, lost),
+        F::F64 => build::<f64>(dev, &sc, buf, lost),
         f => return Err(format!("Unsupported microphone sample format {f}")),
     }
     .map_err(|e| format!("Could not open the microphone: {e}"))?;

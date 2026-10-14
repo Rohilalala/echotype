@@ -185,7 +185,7 @@ let meetingList = mq === 'empty' ? [] : mq === 'live' ? [liveMeeting, doneMeetin
   { id: '2026-10-12-140000-hiring-loop', title: 'Hiring loop debrief', started_ms: now - 3 * 86400000, duration_s: 1520, state: 'done', speakers: {}, segments: [], notices: [], summary: null },
   { id: '2026-10-10-100000-meeting', title: 'Meeting', started_ms: now - 5 * 86400000, duration_s: 312, state: 'interrupted', speakers: {}, segments: [], notices: [], summary: null }];
 Object.assign(commands, {
-  meeting_status: () => ({ live: mq === 'live' ? { id: liveMeeting.id, started_ms: liveMeeting.started_ms, recording: true } : null, screen_recording: !q.has('noscreen'), download_mb: mq === 'empty' ? 36 : 0 }),
+  meeting_status: () => ({ live: mq === 'live' ? { id: liveMeeting.id, started_ms: liveMeeting.started_ms, recording: true } : null, computer_audio: !q.has('miconly'), speakers: !q.has('miconly'), screen_recording: !q.has('noscreen'), download_mb: mq === 'empty' ? 36 : 0 }),
   meeting_list: () => meetingList.map(m => ({ ...m, segments: [], summary: null })),
   meeting_get: ({ id }) => structuredClone(meetingList.find(m => m.id === id)),
   meeting_start: () => { throw 'Browser preview: meetings are not recorded here.'; },
