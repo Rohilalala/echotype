@@ -176,7 +176,6 @@ fn rank(s: &DictationState) -> u8 {
 #[derive(Debug, Clone, Copy)]
 struct Active {
     recording: bool,
-    locked: bool,
     /// Characters on the line (notices, transcribing, cleaning).
     chars: usize,
     /// A notice: its rank and when it ends. None while recording/transcribing/cleaning.
@@ -228,8 +227,8 @@ impl Pill {
         self.active = match s.state {
             "idle" if lingering.is_some() => return false,
             "idle" => None,
-            "recording" => Some(Active { recording: true, locked: s.locked, chars, notice: None, card: false }),
-            "transcribing" | "cleaning" => Some(Active { recording: false, locked: false, chars, notice: None, card: false }),
+            "recording" => Some(Active { recording: true, chars, notice: None, card: false }),
+            "transcribing" | "cleaning" => Some(Active { recording: false, chars, notice: None, card: false }),
             _ => {
                 let r = rank(s);
                 if lingering.is_some_and(|cur| cur > r) {
@@ -240,7 +239,7 @@ impl Pill {
                 let linger = Duration::from_millis(if s.card { CARD_FOR } else if s.chip.is_some() { 2500 } else { 1200 });
                 // Wide characters (CJK, emoji) count double: about two Latin letters each.
                 let chars = if s.card { s.text.as_deref().unwrap_or_default().chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum() } else { chars };
-                Some(Active { recording: false, locked: false, chars, notice: Some((r, now + linger)), card: s.card })
+                Some(Active { recording: false, chars, notice: Some((r, now + linger)), card: s.card })
             }
         };
         if s.state != "recording" {

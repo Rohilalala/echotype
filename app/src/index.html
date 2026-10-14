@@ -286,8 +286,12 @@
           <select id="mic" data-bind="input_device" data-null></select></label>
         <div class="row tip" id="btTip" hidden><span class="row-text"><span class="row-desc">This is a Bluetooth mic. Bluetooth drops to a low-quality mode while it records, so quiet speech is harder to catch. The built-in mic works better for whispering.</span></span>
           <button class="btn" id="btTipOk" type="button">Got it</button></div>
-        <label class="row" id="soundsRow"><span class="row-text"><span class="row-title">Sounds</span><span class="row-desc">A short tone when dictation starts, stops or locks.</span></span>
+        <label class="row" id="soundsRow"><span class="row-text"><span class="row-title">Sounds</span><span class="row-desc">A short tone when dictation starts, stops or locks, and a different one when your words could not be pasted.</span></span>
           <input type="checkbox" class="switch" data-bind="sounds" /></label>
+        <div class="row" id="soundPackRow"><span class="row-text"><span class="row-title" id="soundPackLabel">Sound pack</span><span class="row-desc">Play to hear start, stop and not pasted.</span></span>
+          <span class="actions"><select data-bind="sound_pack" aria-labelledby="soundPackLabel">
+            <option value="classic">Classic</option><option value="glass">Glass</option><option value="wood">Wood</option><option value="pop">Pop</option><option value="soft">Soft</option>
+          </select><button class="btn" id="soundPlay" type="button" aria-label="Play the sound pack">Play</button></span></div>
       </div>
 
       <h2 class="group-title">Appearance</h2>

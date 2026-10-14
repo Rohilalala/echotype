@@ -19,7 +19,7 @@ const settings = {
   talk_key: q.get('talk') || 'accelerator',
   paste_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+V',
   copy_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+C',
-  autostart: !q.has('upgrade'), sounds: true,
+  autostart: !q.has('upgrade'), sounds: true, sound_pack: 'classic', pill_size: 1.5, ball_size: 1,
   look: q.get('look') === 'v2' ? 'v2' : 'classic',
   pill_idle: !q.has('pilloff'), pill_hidden_until: q.has('pillhidden') ? now + 42 * 60000 : 0, pill_in_recordings: false,
   pill_positions: {}, pill_screen: null, pill_follow_cursor: true, show_in: q.has('menubar') ? 'menubar' : 'pill',
@@ -193,6 +193,7 @@ Object.assign(commands, {
   meeting_rename_speaker: ({ id, speaker, name }) => { const m = meetingList.find(x => x.id === id); m.speakers[speaker] = name.trim(); return structuredClone(m); },
   meeting_delete: ({ id }) => { meetingList = meetingList.filter(m => m.id !== id); return null; },
   meeting_export: () => 'sample export',
+  preview_sounds: () => null,
   meeting_save: () => '/Users/you/Downloads/launch-review.md',
 });
 

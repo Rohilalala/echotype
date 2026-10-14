@@ -130,6 +130,8 @@ function changed(p) {
   if (p === 'history_enabled') renderHistory();
   if (p === 'pill_idle' || p === 'show_in') renderPill();
   if (p === 'pill_size' || p === 'ball_size') sizePreview();
+  if (p === 'sounds') $('#soundPackRow').hidden = !S.sounds;
+  if (p === 'sound_pack') invoke('preview_sounds', { pack: S.sound_pack }).catch(() => {}); // hear it as you pick it
   if (p === 'look') applyLook();
   renderChips();
 }
@@ -915,6 +917,7 @@ function renderPill() {
     : 'Drag the pill anywhere on any display; double-click it to put it back.';
   $('#pillFollowRow').hidden = $('#pillIdleRow').hidden = $('#pillHideRow').hidden = $('#pillRecRow').hidden = bar;
   $('#pillSizeRow').hidden = $('#ballSizeRow').hidden = $('#pillPreviewRow').hidden = bar;
+  $('#soundPackRow').hidden = !S.sounds;
   sizePreview();
   const until = S.pill_hidden_until || 0, hidden = until > Date.now();
   const at = new Date(until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); // as the tray says it
@@ -925,6 +928,8 @@ function renderPill() {
   clearTimeout(pillTimer);
   if (hidden) pillTimer = setTimeout(renderPill, Math.min(until - Date.now() + 500, 2 ** 31 - 1));
 }
+$('#soundPlay').addEventListener('click', () => invoke('preview_sounds', { pack: S.sound_pack || 'classic' }).catch(() => {}));
+
 // Settings → Pill size: the real overlay page in an iframe (overlay.html?preview, fed by mock.js,
 // never by the app), zoomed like the pill window and cycling ball → orb → card while it's on screen.
 const pillPreview = $('#pillPreview');

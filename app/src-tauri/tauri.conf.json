@@ -36,7 +36,7 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "sounds/*.wav"
+      "sounds/*/*.wav"
     ],
     "macOS": {
       "entitlements": "Entitlements.plist",

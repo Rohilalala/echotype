@@ -84,7 +84,12 @@ pub struct Settings {
     pub pill_size: f64,
     /// The idle ball's size relative to its 10 px design, 0.6 to 2.0 (on top of `pill_size`).
     pub ball_size: f64,
+    /// Which bundled sound pack plays (one of SOUND_PACKS) when `sounds` is on.
+    pub sound_pack: String,
 }
+
+/// The bundled sound packs (sounds/<pack>/{start,stop,lock,nopaste}.wav).
+pub const SOUND_PACKS: [&str; 5] = ["classic", "glass", "wood", "pop", "soft"];
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
@@ -159,6 +164,7 @@ impl Default for Settings {
             show_in: "pill".into(),
             pill_size: 1.5,
             ball_size: 1.0,
+            sound_pack: "classic".into(),
         }
     }
 }
@@ -226,6 +232,9 @@ impl Settings {
         let fit = |v: f64, lo: f64, hi: f64, def: f64| if v.is_finite() { v.clamp(lo, hi) } else { def };
         self.pill_size = fit(self.pill_size, 1.0, 2.0, 1.5);
         self.ball_size = fit(self.ball_size, 0.6, 2.0, 1.0);
+        if !SOUND_PACKS.contains(&self.sound_pack.as_str()) {
+            self.sound_pack = "classic".into();
+        }
     }
 
     pub fn save(&self) -> Result<(), String> {

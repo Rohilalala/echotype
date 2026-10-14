@@ -664,46 +664,109 @@ mod tests {
         assert_eq!(st.floor_and_speech(), Some((-90.0, -120.0)));
     }
 
-    /// Echotype's start, stop and lock sounds: original, synthesized here, written once to
-    /// app/src-tauri/sounds and bundled. `cargo test generate_sounds -- --ignored` rewrites them.
+    /// Echotype's sound packs: original, synthesized here, written once to
+    /// app/src-tauri/sounds/<pack>/ and bundled. `cargo test generate_sounds -- --ignored` rewrites them.
+    /// start, stop and lock stay under 120 ms (the mic ignores Echotype's own sound that long);
+    /// "nopaste" is a lower, falling pair in every pack: the words were not pasted anywhere.
     #[test]
     #[ignore = "writes the bundled sound files"]
     fn generate_sounds() {
-        // Two soft notes per sound: (frequency Hz, start ms, length ms).
-        let tone = |notes: &[(f32, f32, f32)], total_ms: f32| -> Vec<f32> {
-            let n = (RATE as f32 * total_ms / 1000.0) as usize;
+        const SR: f32 = 48_000.0;
+        // A timbre: partials (ratio to the note, level, decay per second) and a pitch drop at the
+        // onset (0 = none; 0.9 starts 1.9x high and falls, a bubble "pop").
+        struct Timbre(&'static [(f32, f32, f32)], f32);
+        let render = |t: &Timbre, notes: &[(f32, f32, f32)], total_ms: f32, peak: f32| -> Vec<f32> {
+            let n = (SR * total_ms / 1000.0) as usize;
             let mut out = vec![0.0f32; n];
             for &(f, at, len) in notes {
-                let (s0, len_n) = ((RATE as f32 * at / 1000.0) as usize, (RATE as f32 * len / 1000.0) as usize);
+                let (s0, len_n) = ((SR * at / 1000.0) as usize, (SR * len / 1000.0) as usize);
+                let mut phase = vec![0.0f32; t.0.len()];
                 for i in 0..len_n.min(n - s0) {
-                    let t = i as f32 / RATE as f32;
-                    let attack = (i as f32 / (RATE as f32 * 0.004)).min(1.0);
-                    let decay = (-t * 38.0).exp();
-                    let x = (2.0 * std::f32::consts::PI * f * t).sin() + 0.18 * (4.0 * std::f32::consts::PI * f * t).sin();
-                    out[s0 + i] += 0.22 * attack * decay * x;
+                    let secs = i as f32 / SR;
+                    let attack = (secs / 0.003).min(1.0);
+                    let release = ((len_n - i) as f32 / (SR * 0.012)).min(1.0); // no click at the cut
+                    let pitch = f * (1.0 + t.1 * (-secs * 60.0).exp());
+                    let mut x = 0.0;
+                    for (k, &(ratio, level, decay)) in t.0.iter().enumerate() {
+                        phase[k] += 2.0 * std::f32::consts::PI * pitch * ratio / SR;
+                        x += level * phase[k].sin() * (-secs * decay).exp();
+                    }
+                    out[s0 + i] += attack * release * x;
                 }
             }
-            out
+            let max = out.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-6);
+            out.iter().map(|v| v / max * peak).collect()
         };
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sounds");
-        std::fs::create_dir_all(&dir).unwrap();
-        for (name, pcm) in [
-            ("start", tone(&[(784.0, 0.0, 60.0), (1175.0, 45.0, 65.0)], 110.0)),
-            ("stop", tone(&[(1175.0, 0.0, 60.0), (784.0, 45.0, 65.0)], 110.0)),
-            ("lock", tone(&[(1047.0, 0.0, 50.0), (1568.0, 40.0, 50.0), (2093.0, 75.0, 40.0)], 115.0)),
-        ] {
-            assert!(pcm.len() <= RATE as usize * 120 / 1000, "{name} must be 120 ms or shorter");
-            std::fs::write(dir.join(format!("{name}.wav")), wav_bytes(&pcm)).unwrap();
+        // 16-bit mono WAV at 48 kHz (the bells need more than the 16 kHz speech rate).
+        let wav = |pcm: &[f32]| {
+            let data: Vec<u8> = pcm.iter().flat_map(|v| ((v.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes()).collect();
+            let mut b = Vec::with_capacity(44 + data.len());
+            b.extend_from_slice(b"RIFF");
+            b.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+            b.extend_from_slice(b"WAVEfmt ");
+            for v in [16u32, 1 | (1 << 16), SR as u32, SR as u32 * 2, 2 | (16 << 16)] {
+                b.extend_from_slice(&v.to_le_bytes());
+            }
+            b.extend_from_slice(b"data");
+            b.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            b.extend_from_slice(&data);
+            b
+        };
+        type Notes = &'static [(f32, f32, f32)];
+        // (pack, timbre, peak, [start, stop, lock, nopaste] as (notes, total ms))
+        type Pack = (&'static str, Timbre, f32, [(Notes, f32); 4]);
+        let packs: [Pack; 5] = [
+            ("classic", Timbre(&[(1.0, 1.0, 38.0), (2.0, 0.18, 38.0)], 0.0), 0.3, [
+                (&[(784.0, 0.0, 60.0), (1175.0, 45.0, 65.0)], 110.0),
+                (&[(1175.0, 0.0, 60.0), (784.0, 45.0, 65.0)], 110.0),
+                (&[(1047.0, 0.0, 50.0), (1568.0, 40.0, 50.0), (2093.0, 75.0, 40.0)], 115.0),
+                (&[(659.0, 0.0, 90.0), (494.0, 120.0, 130.0)], 260.0),
+            ]),
+            ("glass", Timbre(&[(1.0, 1.0, 14.0), (2.76, 0.5, 30.0), (5.4, 0.25, 55.0), (8.93, 0.12, 80.0)], 0.0), 0.28, [
+                (&[(1319.0, 0.0, 70.0), (1976.0, 40.0, 75.0)], 115.0),
+                (&[(1976.0, 0.0, 70.0), (1319.0, 40.0, 75.0)], 115.0),
+                (&[(1568.0, 0.0, 40.0), (2093.0, 35.0, 40.0), (2637.0, 70.0, 45.0)], 115.0),
+                (&[(880.0, 0.0, 110.0), (659.0, 130.0, 140.0)], 280.0),
+            ]),
+            ("wood", Timbre(&[(1.0, 1.0, 30.0), (3.93, 0.35, 70.0), (9.2, 0.08, 120.0)], 0.0), 0.34, [
+                (&[(392.0, 0.0, 60.0), (587.0, 45.0, 70.0)], 115.0),
+                (&[(587.0, 0.0, 60.0), (392.0, 45.0, 70.0)], 115.0),
+                (&[(392.0, 0.0, 40.0), (587.0, 35.0, 40.0), (784.0, 70.0, 45.0)], 115.0),
+                (&[(440.0, 0.0, 90.0), (330.0, 120.0, 130.0)], 250.0),
+            ]),
+            ("pop", Timbre(&[(1.0, 1.0, 45.0), (2.0, 0.1, 60.0)], 0.9), 0.3, [
+                (&[(700.0, 0.0, 45.0), (1050.0, 55.0, 55.0)], 110.0),
+                (&[(1050.0, 0.0, 45.0), (700.0, 55.0, 55.0)], 110.0),
+                (&[(800.0, 0.0, 30.0), (1000.0, 40.0, 30.0), (1300.0, 80.0, 35.0)], 115.0),
+                (&[(520.0, 0.0, 70.0), (390.0, 120.0, 110.0)], 230.0),
+            ]),
+            ("soft", Timbre(&[(1.0, 1.0, 22.0)], 0.0), 0.2, [
+                (&[(660.0, 0.0, 100.0)], 110.0),
+                (&[(495.0, 0.0, 100.0)], 110.0),
+                (&[(660.0, 0.0, 45.0), (880.0, 55.0, 55.0)], 110.0),
+                (&[(440.0, 0.0, 90.0), (392.0, 130.0, 120.0)], 250.0),
+            ]),
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sounds");
+        for (pack, timbre, peak, sounds) in &packs {
+            assert!(crate::settings::SOUND_PACKS.contains(pack));
+            let dir = root.join(pack);
+            std::fs::create_dir_all(&dir).unwrap();
+            for (name, (notes, ms)) in ["start", "stop", "lock", "nopaste"].iter().zip(sounds) {
+                std::fs::write(dir.join(format!("{name}.wav")), wav(&render(timbre, notes, *ms, *peak))).unwrap();
+            }
         }
     }
 
     #[test]
     fn bundled_sounds_are_short_wavs() {
-        for name in ["start", "stop", "lock"] {
-            let bytes = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sounds").join(format!("{name}.wav"))).unwrap();
-            let pcm = decode(bytes, Some("wav")).unwrap();
-            assert!(pcm.len() <= RATE as usize * 120 / 1000, "{name}: {} samples", pcm.len());
-            assert!(pcm.iter().any(|s| s.abs() > 0.05), "{name} is silent");
+        for pack in crate::settings::SOUND_PACKS {
+            for (name, max_ms) in [("start", 120), ("stop", 120), ("lock", 120), ("nopaste", 300)] {
+                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sounds").join(pack).join(format!("{name}.wav"));
+                let pcm = decode(std::fs::read(&path).unwrap(), Some("wav")).unwrap();
+                assert!(pcm.len() <= RATE as usize * max_ms / 1000, "{pack}/{name}: {} samples", pcm.len());
+                assert!(pcm.iter().any(|s| s.abs() > 0.05), "{pack}/{name} is silent");
+            }
         }
     }
 

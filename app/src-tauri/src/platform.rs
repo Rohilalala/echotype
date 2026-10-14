@@ -54,17 +54,21 @@ pub fn wait_for_modifiers_up(max: Duration) -> bool {
     true
 }
 
-/// Plays bundled `sounds/<name>.wav` (start, stop, lock).
+/// Plays bundled `sounds/<pack>/<name>.wav` (start, stop, lock, nopaste) from the chosen pack.
 // ponytail: macOS only (NSSound); Windows/Linux get sounds when someone wants them (cpal output or rodio).
 pub fn play_sound(app: &AppHandle, name: &'static str) {
+    play_from(app, &crate::current_settings(app).sound_pack, name);
+}
+
+pub fn play_from(app: &AppHandle, pack: &str, name: &'static str) {
     #[cfg(target_os = "macos")]
     {
         use tauri::Manager;
-        let Ok(path) = app.path().resource_dir().map(|d| d.join("sounds").join(format!("{name}.wav"))) else { return };
-        let _ = app.run_on_main_thread(move || mac::play(name, &path));
+        let Ok(path) = app.path().resource_dir().map(|d| d.join("sounds").join(pack).join(format!("{name}.wav"))) else { return };
+        let _ = app.run_on_main_thread(move || mac::play(&path));
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = (app, name);
+    let _ = (app, pack, name);
 }
 
 fn clipboard() -> Result<std::sync::MutexGuard<'static, Option<arboard::Clipboard>>, String> {
@@ -366,12 +370,12 @@ mod mac {
         unsafe { CGEventSourceFlagsState(1) & (0x0002_0000 | 0x0004_0000 | 0x0008_0000) != 0 }
     }
 
-    /// One NSSound per name, created on first use and kept (three tiny sounds, no release needed).
+    /// One NSSound per file, created on first use and kept (at most 20 tiny sounds, no release needed).
     /// Main thread only.
-    pub fn play(name: &'static str, path: &std::path::Path) {
+    pub fn play(path: &std::path::Path) {
         use std::collections::HashMap;
         use std::sync::Mutex;
-        static SOUNDS: Mutex<Option<HashMap<&'static str, usize>>> = Mutex::new(None);
+        static SOUNDS: Mutex<Option<HashMap<std::path::PathBuf, usize>>> = Mutex::new(None);
         let mut g = SOUNDS.lock().unwrap_or_else(|e| e.into_inner());
         let sounds = g.get_or_insert_with(HashMap::new);
         // SAFETY: objc_msgSend is cast to each selector's exact signature: alloc/play/stop take no
@@ -380,7 +384,7 @@ mod mac {
         unsafe {
             let msg0: extern "C" fn(*const c_void, *const c_void) -> *const c_void = std::mem::transmute(objc_msgSend as *const ());
             let sel = |s: &std::ffi::CStr| sel_registerName(s.as_ptr());
-            let sound = match sounds.get(name) {
+            let sound = match sounds.get(path) {
                 Some(&p) => p as *const c_void,
                 None => {
                     let Ok(cpath) = std::ffi::CString::new(path.to_string_lossy().as_bytes()) else { return };
@@ -396,7 +400,7 @@ mod mac {
                         eprintln!("echotype: could not load sound {}", path.display());
                         return;
                     }
-                    sounds.insert(name, s as usize);
+                    sounds.insert(path.to_path_buf(), s as usize);
                     s
                 }
             };

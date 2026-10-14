@@ -458,7 +458,13 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
                 match res {
                     Ok(()) => DictationState { state: "done", text: Some(out.text), warning, copied: !paste, chip, ..Default::default() },
                     // Nowhere to paste, or the keystroke blocked (secure input): the card, with Copy.
-                    Err((e, true)) => card(&s, out.text, Some(e), chip),
+                    Err((e, true)) => {
+                        // Not pasted anywhere: a sound of its own, so it's noticed without looking.
+                        if s.sounds {
+                            platform::play_sound(&app, "nopaste");
+                        }
+                        card(&s, out.text, Some(e), chip)
+                    }
                     Err((e, false)) => DictationState { state: "error", text: Some(out.text), error: Some(e), warning, ..Default::default() },
                 }
             }
@@ -1000,6 +1006,19 @@ async fn pill_open(app: AppHandle) -> R<()> {
     Ok(())
 }
 
+/// Settings → Sounds: plays a pack's start, stop and not-pasted sounds in turn.
+#[tauri::command]
+async fn preview_sounds(app: AppHandle, pack: String) -> R<()> {
+    let pack = settings::SOUND_PACKS.iter().find(|p| **p == pack).ok_or("Unknown sound pack")?;
+    std::thread::spawn(move || {
+        for (name, wait) in [("start", 450), ("stop", 650), ("nopaste", 0)] {
+            platform::play_from(&app, pack, name);
+            std::thread::sleep(Duration::from_millis(wait));
+        }
+    });
+    Ok(())
+}
+
 /// Copy on the card (and the menu-bar menu's copy item): the last transcript to the clipboard.
 #[tauri::command]
 async fn pill_copy(app: AppHandle) -> R<()> {
@@ -1332,6 +1351,7 @@ pub fn run() {
             pill_drag,
             pill_reset,
             pill_copy,
+            preview_sounds,
             pill_dismiss,
             meeting::meeting_start,
             meeting::meeting_stop,
