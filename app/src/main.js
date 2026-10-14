@@ -115,6 +115,7 @@ function bindAll() {
       let v = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value;
       if ('null' in el.dataset && v === '') v = null;
       set(p, v);
+      if (p === 'look') S.look_chosen = true; // an explicit pick survives the Foundry migration
       text ? saveSoon() : save();
       changed(p);
     });
