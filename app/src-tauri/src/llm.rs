@@ -320,9 +320,10 @@ fn listens_on(pid: u32, port: u16) -> bool {
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().any(|p| p == pid.to_string()))
 }
 
+/// Off macOS there is no built-in model server and no ownership check yet, so never trust one.
 #[cfg(not(target_os = "macos"))]
 fn listens_on(_: u32, _: u16) -> bool {
-    true // no built-in model server off macOS
+    false
 }
 
 /// Polls GET /health (503 while the model loads, 200 once it answers) until ready, dead or timed out.
