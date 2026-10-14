@@ -9,7 +9,7 @@ const now = Date.now();
 const settings = {
   hotkey: 'Alt+Space', mode: 'hold', input_device: null, language: 'auto', translate_to_english: false,
   local_api: { enabled: false, port: 7811 },
-  stt: { provider: 'local', local_model: q.has('onboarding') ? '' : 'large-v3-turbo', model: '', base_url: '' },
+  stt: { provider: 'local', local_model: q.has('onboarding') ? '' : 'large-v3-turbo-q5_0', model: '', base_url: '' },
   cleanup: { enabled: !q.has('nocleanup'), provider: 'ollama', model: 'gemma3:4b', base_url: '', style: 'default', custom_instructions: '' },
   dictionary: ['Echotype', 'Tauri', 'Hinglish', 'Supabase'],
   replacements: [{ from: 'my email', to: 'aditya@example.com' }],
@@ -35,17 +35,18 @@ const presets = [
   { id: 'lmstudio', label: 'LM Studio', stt: false, cleanup: true, base_url: 'http://localhost:1234/v1', default_stt_model: '', default_cleanup_model: 'qwen3-4b', needs_key: false },
   { id: 'custom', label: 'Custom', stt: true, cleanup: true, base_url: '', default_stt_model: '', default_cleanup_model: '', needs_key: false },
 ];
+// The same catalog, sizes and notes as stt.rs MODELS.
 const models = [
-  { id: 'tiny.en', label: 'Tiny', size_mb: 75, ram_mb: 273, english_only: true, translates: false, downloaded: false, note: 'Fastest. Fine for short English notes.' },
-  { id: 'base.en', label: 'Base', size_mb: 142, ram_mb: 388, english_only: true, translates: false, downloaded: true, note: 'Small and quick, English only.' },
-  { id: 'small', label: 'Small', size_mb: 466, ram_mb: 852, english_only: false, translates: true, downloaded: false, note: 'Multilingual. A good floor for Hindi and Hinglish.' },
-  { id: 'medium', label: 'Medium', size_mb: 1533, ram_mb: 2100, english_only: false, translates: true, downloaded: false, note: 'Best for Hinglish to English. Slower than Turbo.' },
-  { id: 'large-v3-turbo', label: 'Large v3 Turbo', size_mb: 1624, ram_mb: 2300, english_only: false, translates: false, downloaded: !q.has('onboarding'), note: 'Near large-v3 accuracy at a fraction of the time. Cannot translate.' },
-  { id: 'large-v3', label: 'Large v3', size_mb: 3095, ram_mb: 3900, english_only: false, translates: true, downloaded: false, note: 'Most accurate, and the slowest.' },
+  { id: 'large-v3-turbo-q5_0', label: 'Large v3 Turbo (Q5)', size_mb: 547, ram_mb: 800, downloaded: !q.has('onboarding'), note: 'Best default: near-large accuracy, fast, 99 languages. Cannot translate.' },
+  { id: 'large-v3-turbo', label: 'Large v3 Turbo', size_mb: 1624, ram_mb: 1700, downloaded: false, note: 'Full-precision turbo. Slightly more accurate, twice the size. Cannot translate.' },
+  { id: 'medium', label: 'Medium', size_mb: 1533, ram_mb: 1800, downloaded: false, note: 'Multilingual and translates to English (Hinglish → English).' },
+  { id: 'small', label: 'Small', size_mb: 488, ram_mb: 852, downloaded: false, note: 'Multilingual, translates; lighter and less accurate than medium.' },
+  { id: 'base.en', label: 'Base (English)', size_mb: 148, ram_mb: 388, downloaded: true, note: 'English only. For low-memory machines.' },
+  { id: 'tiny.en', label: 'Tiny (English)', size_mb: 78, ram_mb: 273, downloaded: false, note: 'English only. Fastest, least accurate.' },
 ];
 const sys = { total_ram_gb: 24, available_ram_gb: 5.1, os: 'macos', arch: 'aarch64', can_autostart: q.get('appdir') !== '0' };
-for (const m of models) m.fits = m.ram_mb + 2048 <= sys.available_ram_gb * 1024;
-models.find(m => m.id === 'large-v3-turbo').recommended = true;
+for (const m of models) Object.assign(m, { english_only: m.id.endsWith('.en'), translates: ['medium', 'small'].includes(m.id), fits: m.ram_mb + 2048 <= sys.available_ram_gb * 1024 });
+models.find(m => m.fits).recommended = true;
 
 const ago = min => Math.floor((now - min * 60000) / 1000);
 let history = [
