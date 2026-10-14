@@ -94,6 +94,8 @@ A thin bar waits at the bottom of the screen your cursor is on. Click it to dict
 
 Drag the pill anywhere, on any display. Each display remembers where you left it, and a double-click puts it back at the bottom centre. It never goes off-screen or under the menu bar. The pill moves to the screen you are using; turn off **Move to the screen I'm using** to keep it on the screen you last dragged it to.
 
+When nothing focused can take text (the desktop, a list, or Accessibility is off for Echotype), Echotype does not send ⌘V into nowhere. The pill opens into a small card with your words, **Copy** and your paste-last shortcut, and closes by itself after 6 seconds; resting the pointer on it holds it open, ✕ or Esc closes it. The text is still your last transcript and in History.
+
 Prefer nothing on screen? Set **Show Echotype in** to **Menu bar** under Settings → Pill. The pill then never shows, not even while you dictate. The menu bar icon becomes the indicator instead: a live waveform while it listens, dots while it transcribes, a brief check when it pastes and a warning sign if something went wrong. Click the icon to dictate hands-free and click again to finish. Right-click it for the microphone, language, paste last, history and settings; its first line says what went wrong, if anything did.
 
 The pill stays out of screenshots and screen sharing unless you turn on **Show pill in screen recordings**. This is best effort: macOS honours it for screenshots and most recorders, but some screen-sharing apps may still capture it.
