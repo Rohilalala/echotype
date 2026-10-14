@@ -151,6 +151,41 @@ const commands = {
   },
 };
 
+// Meetings: ?meetings=empty|live|done (default done). Sample data only.
+const mq = q.get('meetings') || 'done';
+const sampleSegments = [
+  { start: 2, end: 7, speaker: 'you', text: 'Morning, everyone. Let’s get started with the launch review for the mobile app.' },
+  { start: 8, end: 14, speaker: 's1', text: 'Thanks. The beta went out to our testers last week, and the crash rate dropped a lot.' },
+  { start: 15, end: 19, speaker: 'you', text: 'Great news. What did testers say about onboarding?' },
+  { start: 20, end: 29, speaker: 's1', text: 'Most liked it, but several found the permissions screen confusing. We should simplify it before launch.' },
+  { start: 30, end: 36, speaker: 's2', text: 'I can take that. I’ll redesign the permissions screen and share a draft by Thursday.' },
+  { start: 37, end: 43, speaker: 'you', text: 'Perfect. So we ship next month, as long as the new permissions screen is ready.' },
+  { start: 44, end: 49, speaker: 's1', text: 'Agreed. I’ll update the release notes and send them to marketing tomorrow.' },
+];
+const doneMeeting = {
+  id: '2026-10-14-083000-launch-review', title: 'Launch review', started_ms: now - 26 * 3600000, duration_s: 2873, state: 'done',
+  speakers: { you: 'You', s1: 'Priya', s2: 'Speaker 2' }, segments: sampleSegments, notices: [],
+  summary: '## Summary\nThe beta went out last week and the crash rate dropped. Testers liked onboarding but found the permissions screen confusing.\n## Decisions\n- Ship next month if the new permissions screen is ready.\n## Action items\n- Speaker 2: redesign the permissions screen and share a draft by Thursday.\n- Priya: update the release notes and send them to marketing tomorrow.',
+};
+const liveMeeting = {
+  id: '2026-10-15-091500-design-sync', title: 'Design sync', started_ms: now - 754000, duration_s: 754, state: 'recording',
+  speakers: { you: 'You', s1: 'Speaker 1', s2: 'Speaker 2' }, segments: sampleSegments.slice(0, 5), notices: [], summary: null,
+};
+let meetingList = mq === 'empty' ? [] : mq === 'live' ? [liveMeeting, doneMeeting] : [doneMeeting,
+  { id: '2026-10-12-140000-hiring-loop', title: 'Hiring loop debrief', started_ms: now - 3 * 86400000, duration_s: 1520, state: 'done', speakers: {}, segments: [], notices: [], summary: null },
+  { id: '2026-10-10-100000-meeting', title: 'Meeting', started_ms: now - 5 * 86400000, duration_s: 312, state: 'interrupted', speakers: {}, segments: [], notices: [], summary: null }];
+Object.assign(commands, {
+  meeting_status: () => ({ live: mq === 'live' ? { id: liveMeeting.id, started_ms: liveMeeting.started_ms, recording: true } : null, screen_recording: !q.has('noscreen'), download_mb: mq === 'empty' ? 36 : 0 }),
+  meeting_list: () => meetingList.map(m => ({ ...m, segments: [], summary: null })),
+  meeting_get: ({ id }) => structuredClone(meetingList.find(m => m.id === id)),
+  meeting_start: () => { throw 'Browser preview: meetings are not recorded here.'; },
+  meeting_stop: () => null,
+  meeting_rename_speaker: ({ id, speaker, name }) => { const m = meetingList.find(x => x.id === id); m.speakers[speaker] = name.trim(); return structuredClone(m); },
+  meeting_delete: ({ id }) => { meetingList = meetingList.filter(m => m.id !== id); return null; },
+  meeting_export: () => 'sample export',
+  meeting_save: () => '/Users/you/Downloads/launch-review.md',
+});
+
 window.__TAURI__ = {
   core: {
     invoke: async (cmd, args = {}) => {

@@ -629,3 +629,38 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
   *, *::before, *::after { transition: none !important; }
   .working::after { animation: none; border-top-color: var(--line-strong); }
 }
+
+/* Meetings (meetings.js): a start card, the list, and one meeting's transcript. */
+#meetings .group > .row > input[type="text"] { flex: 1; }
+.consent { color: var(--fg); }
+.meeting-row { all: unset; display: flex; align-items: center; gap: 10px; width: 100%; box-sizing: border-box; cursor: default; }
+.meeting-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.meeting-row .tag { flex: none; }
+.rec-line { display: inline-flex; align-items: center; gap: 7px; font-variant-numeric: tabular-nums; }
+.rec-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--bad); }
+.back { margin: -6px 0 8px -8px; }
+.meeting-meta { color: var(--fg-3); font-size: 12px; margin: 0 0 4px; display: flex; gap: 8px; align-items: center; font-variant-numeric: tabular-nums; }
+#meetings .note { margin: 10px 0 0; }
+.summary { margin: 16px 0 0; padding: 4px 16px 12px; border: 1px solid var(--line-strong); border-radius: var(--r-card); background: var(--pane); }
+.summary h3 { font-size: 13px; font-weight: var(--fw-semi); margin: 12px 0 4px; }
+.summary p, .summary ul { margin: 0; line-height: 1.5; }
+.summary ul { padding-left: 18px; }
+.export { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 0; }
+.speakers { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 18px 0 6px; }
+.speakers-label { color: var(--fg-3); font-size: 12px; margin-right: 4px; }
+.chip.spk { all: unset; display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 13px; background: var(--soft); font-weight: var(--fw-med); font-size: 12.5px; }
+.chip.spk:hover { background: var(--selected); }
+.chip.spk:focus-visible { outline: 2px solid var(--accent); }
+.chip.spk.editing { padding: 0 2px 0 10px; }
+.chip.spk input { height: 22px; width: 140px; font-size: 12.5px; }
+.spk-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; }
+.transcript { margin: 6px 0 0; display: flex; flex-direction: column; }
+.transcript .line { display: grid; grid-template-columns: 44px 120px 1fr; gap: 10px; padding: 7px 2px; line-height: 1.5; }
+.transcript .line + .line { border-top: 1px solid var(--line); }
+.transcript time { color: var(--fg-3); font-size: 12px; font-variant-numeric: tabular-nums; padding-top: 1px; }
+.transcript .who { display: inline-flex; align-items: baseline; gap: 6px; font-weight: var(--fw-med); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.transcript .who .spk-dot { transform: translateY(-1px); }
+@media (max-width: 620px) {
+  .transcript .line { grid-template-columns: 40px 1fr; }
+  .transcript .said { grid-column: 2; }
+}
