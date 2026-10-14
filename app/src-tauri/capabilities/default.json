@@ -32,7 +32,7 @@
     "allow-get-system-info",
     "allow-local-api-status",
     "allow-toggle-dictation",
-    "allow-pill-cancel",
+    "allow-cancel-dictation",
     "allow-shortcut-status",
     "allow-relaunch",
     "allow-retry-last",

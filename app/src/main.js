@@ -462,7 +462,8 @@ function renderRecent(fresh) {
     copy.onclick = () => copyText(r.text, copy);
     const text = h('span', { className: 'text spoken' }), line = r.text.replace(/:\s*\n\s*[-*•]?\s*/g, ': ').replace(/\s*\n\s*[-*•]?\s*/g, ' · ');
     if (fresh && i === 0) cast(text, line, 30); else text.textContent = line;
-    return h('div', { className: 'row entry' }, h('time', { className: 'when num', title: fmtWhen(r.ts, true) }, fmtWhen(r.ts)), text, copy);
+    const when = fmtWhen(r.ts);
+    return h('div', { className: 'row entry' }, h('time', { className: /^\d/.test(when) ? 'when num' : 'when', title: fmtWhen(r.ts, true) }, when), text, copy);
   }));
 }
 
@@ -1042,7 +1043,7 @@ for (const b of $$('[data-perm]')) b.addEventListener('click', () => invoke('ope
 let obStep = 1;
 const OB_STEPS = $$('.ob-step').length;
 function obShow(n) {
-  if (obStep === 2 && n !== 2 && dictation.state === 'recording') invoke('pill_cancel').catch(() => {}); // a mic test left running
+  if (obStep === 2 && n !== 2) cancelTest(); // a mic test left running
   obStep = n;
   $$('.ob-step').forEach(s => (s.hidden = +s.dataset.step !== n));
   $$('#obSteps i').forEach((i, k) => i.classList.toggle('on', k < n));
@@ -1078,11 +1079,25 @@ function renderObModel() {
   if (dictation.state === 'idle' || dictation.state === 'done' || dictation.state === 'hint') {
     $('#obTryState').textContent = ready ? 'Say a sentence. Your words are set below.' : `Model downloading ${Math.round((p || 0) * 100)}%. You can try as soon as it finishes.`;
   }
-  $('#obToggle').disabled = !ready && dictation.state !== 'recording';
+  $('#obToggle').disabled = $('#obMicTest').disabled = !ready && dictation.state !== 'recording';
+  obPct = ready ? null : Math.round((p || 0) * 100);
+  renderMeterNote();
 }
+// The microphone test records through the dictation path, which opens the mic only once a model is
+// ready. ponytail: no record-only meter in the core yet; add one if waiting on the download hurts.
+let obPct = null;
+function renderMeterNote() {
+  const st = dictation.state;
+  $('#obMeterNote').textContent = st === 'recording' ? (muted ? 'Echotype hears nothing. Check that the microphone below is not muted.' : 'Listening. Talk, then stop the test.')
+    : st === 'hint' || st === 'error' ? dictation.message || dictation.error || ''
+    : obPct != null ? `The test can start once the speech model is ready (${obPct}%).` : '';
+}
+// Onboarding never pastes; a recording still running when it closes would, so it is dropped.
+const cancelTest = () => dictation.state === 'recording' && invoke('cancel_dictation').catch(() => {});
 $$('[data-next]').forEach(b => b.addEventListener('click', () => obShow(obStep + 1)));
 $$('[data-recheck]').forEach(b => b.addEventListener('click', refreshPerms));
 async function finishOnboarding(page) {
+  cancelTest();
   // New installs get the new shortcuts and (when allowed) launch at login; upgraders are only offered them.
   const [p, c] = DEFAULT_LAST();
   S.paste_last_hotkey ||= p;
@@ -1106,7 +1121,7 @@ $('#obDone').addEventListener('click', () => {
 });
 $('#obToggle').addEventListener('click', () => invoke('toggle_dictation'));
 // The mic test records without transcribing: Stop cancels it (onboarding never pastes either way).
-$('#obMicTest').addEventListener('click', () => invoke(dictation.state === 'recording' ? 'pill_cancel' : 'toggle_dictation').catch(e => { $('#obMeterNote').textContent = String(e); }));
+$('#obMicTest').addEventListener('click', () => dictation.state === 'recording' ? cancelTest() : invoke('toggle_dictation').catch(e => { $('#obMeterNote').textContent = String(e); }));
 
 // ---------- clipboard ----------
 async function copyText(text, btn) {
@@ -1142,7 +1157,7 @@ listen('dictation-state', ({ payload }) => {
   if (payload.state === 'done' && payload.text && !$('#onboard').hidden) cast(res, payload.text, 110);
   $('#obToggle').textContent = payload.state === 'recording' ? 'Stop' : 'Start with a click';
   $('#obMicTest').textContent = payload.state === 'recording' ? 'Stop the test' : 'Test the microphone';
-  $('#obMeterNote').textContent = payload.state === 'recording' ? (muted ? 'Echotype hears nothing. Check that the microphone below is not muted.' : 'Listening. Talk, then stop the test.') : '';
+  renderMeterNote();
   if (payload.state === 'idle') renderObModel();
 });
 
@@ -1161,7 +1176,7 @@ listen('audio-level', ({ payload }) => {
   if (!!payload.muted !== muted) {
     muted = !!payload.muted;
     renderHero();
-    if (muted) $('#obMeterNote').textContent = 'Echotype hears nothing. Check that the microphone below is not muted.';
+    renderMeterNote();
   }
   meterTo(Math.max(0, Math.min(1, payload.meter)));
 });

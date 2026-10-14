@@ -137,7 +137,8 @@ const commands = {
     return null;
   },
   pill_click: () => (busy ? null : commands.toggle_dictation()),
-  pill_cancel: () => { cancelled = true; return null; },
+  pill_cancel: () => null,
+  cancel_dictation: () => { cancelled = true; return null; },
   pill_open: () => null,
   pill_menu: () => null,
   pill_drag: () => null,
