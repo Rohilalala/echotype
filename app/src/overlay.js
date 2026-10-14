@@ -184,7 +184,7 @@ function frame(now) {
   const ball = idle || pill.classList.contains('collapse');
   for (const [k, to] of [['x', b.x], ['y', b.y], ['w', b.width], ['h', b.height], ['r', card ? 10 : Math.min(b.height / 2, b.width / 2, 18)]]) box[k] = follow(box[k], to, dt, 70);
   // Idle, the ball fades back unless the cursor is near it (or holding it).
-  const want = idle && view && !view.near ? 0.35 : 1;
+  const want = idle && view && view.fade !== false && !view.near ? 0.35 : 1;
   alpha = follow(alpha, want, dt, 140);
   level = follow(level, cur.state === 'recording' ? meter : 0, dt, 70);
   if (!still) {

@@ -19,7 +19,7 @@ const settings = {
   talk_key: q.get('talk') || 'accelerator',
   paste_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+V',
   copy_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+C',
-  autostart: !q.has('upgrade'), sounds: true, sound_pack: 'classic', pill_size: 1.5, ball_size: 1,
+  autostart: !q.has('upgrade'), sounds: true, sound_pack: 'classic', pill_fade: true, pill_size: 1.5, ball_size: 1,
   look: q.get('look') === 'v2' ? 'v2' : 'classic',
   pill_idle: !q.has('pilloff'), pill_hidden_until: q.has('pillhidden') ? now + 42 * 60000 : 0, pill_in_recordings: false,
   pill_positions: {}, pill_screen: null, pill_follow_cursor: true, show_in: q.has('menubar') ? 'menubar' : 'pill',

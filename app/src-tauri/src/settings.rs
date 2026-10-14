@@ -84,6 +84,8 @@ pub struct Settings {
     pub pill_size: f64,
     /// The idle ball's size relative to its 10 px design, 0.6 to 2.0 (on top of `pill_size`).
     pub ball_size: f64,
+    /// The idle ball fades back while the pointer is away and brightens as it comes near; off = always full strength.
+    pub pill_fade: bool,
     /// Which bundled sound pack plays (one of SOUND_PACKS) when `sounds` is on.
     pub sound_pack: String,
 }
@@ -165,6 +167,7 @@ impl Default for Settings {
             pill_size: 1.5,
             ball_size: 1.0,
             sound_pack: "classic".into(),
+            pill_fade: true,
         }
     }
 }

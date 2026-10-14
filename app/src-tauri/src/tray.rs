@@ -155,13 +155,14 @@ impl Tray {
             }
             *self = Tray { mode: Some(bar), ..Tray::default() };
         }
-        if !bar {
-            return;
-        }
+        // The icon shows the live state in both modes: it moves with your voice while you dictate.
         let px = draw(glyph, crate::pill::now_ms() / 125, meter);
         if self.icon.as_ref() != Some(&px) {
             let _ = tray.set_icon_with_as_template(Some(Image::new_owned(px.clone(), PX as u32, PX as u32)), true);
             self.icon = Some(px);
+        }
+        if !bar {
+            return; // the pill's own menu stays on the icon; only menu-bar mode rebuilds it
         }
         // ponytail: the microphone list is re-read every 5 s; a CoreAudio device listener if that ever lags.
         if self.mics.as_ref().is_none_or(|(t, _)| t.elapsed() > Duration::from_secs(5)) {

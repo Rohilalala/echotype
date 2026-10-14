@@ -274,6 +274,8 @@
           <button class="btn" id="pillHide" type="button"></button></div>
         <label class="row" id="pillRecRow"><span class="row-text"><span class="row-title">Show pill in screen recordings</span><span class="row-desc">Off keeps it out of screenshots and screen sharing. Some screen-sharing apps may still show it.</span></span>
           <input type="checkbox" class="switch" data-bind="pill_in_recordings" /></label>
+        <label class="row" id="pillFadeRow"><span class="row-text"><span class="row-title">Fade when the pointer is away</span><span class="row-desc">The ball dims until your pointer comes near it. Off keeps it at full strength.</span></span>
+          <input type="checkbox" class="switch" data-bind="pill_fade" /></label>
         <div class="row" id="pillSizeRow"><span class="row-text"><span class="row-title" id="pillSizeLabel">Pill size</span><span class="row-desc">The orb, notices and the card, with their text.</span></span>
           <span class="range"><input type="range" min="1" max="2" step="0.05" data-bind="pill_size" aria-labelledby="pillSizeLabel" /><output id="pillSizeOut" for="pillSizeRow"></output></span></div>
         <div class="row" id="ballSizeRow"><span class="row-text"><span class="row-title" id="ballSizeLabel">Ball size</span><span class="row-desc">The ball that waits at the bottom of the screen.</span></span>
@@ -382,6 +384,8 @@
               <option value="cloud">Echotype Cloud</option>
               <option value="key">My own API key</option>
             </select></label>
+          <label class="row" id="obFadeRow"><span class="row-text"><span class="row-title">Fade the pill when you're not near it</span><span class="row-desc">The ball at the bottom of the screen dims until your pointer comes close.</span></span>
+            <input type="checkbox" class="switch" data-bind="pill_fade" /></label>
           <label class="row" id="obAutostartRow"><span class="row-text"><span class="row-title">Launch at login</span><span class="row-desc" id="obAutostartDesc">Echotype starts quietly in the menu bar.</span></span>
             <input type="checkbox" class="switch" id="obAutostart" checked /></label>
         </div>
