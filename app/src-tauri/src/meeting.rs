@@ -685,6 +685,9 @@ fn transcriber(s: &Settings) -> Result<Transcribe, String> {
 
 /// Loads the fingerprint model, downloading both speaker models first when missing.
 fn embedder(mut progress: impl FnMut(&str, u64, Option<u64>)) -> Result<Embedder, String> {
+    if !SPEAKERS {
+        return Embedder::new(); // says why; nothing to download for it
+    }
     speakers::ensure(&mut progress)?;
     Embedder::new()
 }
@@ -808,12 +811,22 @@ pub fn stop(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Speaker detection (sherpa-onnx) is linked on macOS only; elsewhere other voices are "Others".
+const SPEAKERS: bool = cfg!(target_os = "macos");
+
 /// For the Meetings page: the live meeting (after a reload), whether computer audio can be
-/// captured, and what the first meeting will download.
+/// captured on this OS and is allowed, whether voices are told apart, and what the first meeting
+/// will download.
 pub fn status() -> serde_json::Value {
     let live = lock(&LIVE).as_ref().map(|l| serde_json::json!({ "id": l.id, "started_ms": l.started_ms, "recording": l.capture.is_some() }));
-    let download_mb: u64 = speakers::MODELS.iter().filter(|m| !speakers::path(m).is_file()).map(|m| m.size_mb).sum();
-    serde_json::json!({ "live": live, "screen_recording": capture::screen_recording_allowed(), "download_mb": download_mb })
+    let download_mb: u64 = speakers::MODELS.iter().filter(|m| SPEAKERS && !speakers::path(m).is_file()).map(|m| m.size_mb).sum();
+    serde_json::json!({
+        "live": live,
+        "computer_audio": cfg!(any(target_os = "macos", target_os = "windows")),
+        "speakers": SPEAKERS,
+        "screen_recording": capture::screen_recording_allowed(),
+        "download_mb": download_mb,
+    })
 }
 
 pub(crate) fn refresh_tray(app: &AppHandle, elapsed: Option<Duration>) {

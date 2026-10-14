@@ -1,6 +1,7 @@
-//! Live capture for meeting notes: the microphone and, on macOS, the computer's own audio
-//! (ScreenCaptureKit, Echotype's own sounds excluded). Each arrives as 16 kHz mono pieces
-//! tagged with the time since the meeting started, so the two line up on one timeline.
+//! Live capture for meeting notes: the microphone and the computer's own audio (macOS:
+//! ScreenCaptureKit, Echotype's own sounds excluded; Windows: WASAPI loopback; Linux: none yet).
+//! Each arrives as 16 kHz mono pieces tagged with the time since the meeting started, so the
+//! two line up on one timeline.
 
 use crate::audio::{self, StreamResampler};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,12 +59,17 @@ impl Drop for Capture {
 }
 
 fn mic(device: Option<String>, started: Instant, tx: Sender<Piece>, stop: Arc<AtomicBool>) -> Result<JoinHandle<()>, String> {
+    pump(Source::Mic, move |buf, lost| audio::open_stream(device, buf, lost), started, tx, stop)
+}
+
+/// Runs one cpal input stream on its own thread, sending 16 kHz mono pieces tagged `src`.
+fn pump(src: Source, open: impl FnOnce(Arc<Mutex<Vec<f32>>>, Arc<AtomicBool>) -> Result<(cpal::Stream, u32), String> + Send + 'static, started: Instant, tx: Sender<Piece>, stop: Arc<AtomicBool>) -> Result<JoinHandle<()>, String> {
     let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
     let t = std::thread::spawn(move || {
         let buf = Arc::new(Mutex::new(Vec::<f32>::new()));
         let lost = Arc::new(AtomicBool::new(false));
         // The cpal stream is !Send on macOS, so it lives and dies on this thread.
-        let (stream, rate) = match audio::open_stream(device, buf.clone(), lost) {
+        let (stream, rate) = match open(buf.clone(), lost) {
             Ok(s) => s,
             Err(e) => {
                 let _ = ready_tx.send(Err(e));
@@ -83,7 +89,7 @@ fn mic(device: Option<String>, started: Instant, tx: Sender<Piece>, stop: Arc<At
             if done {
                 out.extend(rs.finish());
             }
-            if !out.is_empty() && tx.send((Source::Mic, out, started.elapsed())).is_err() {
+            if !out.is_empty() && tx.send((src, out, started.elapsed())).is_err() {
                 return;
             }
             if done {
@@ -106,13 +112,14 @@ unsafe extern "C" {
     fn CGRequestScreenCaptureAccess() -> bool;
 }
 
-/// Screen Recording permission, which macOS requires for capturing other apps' audio.
+/// Screen Recording permission, which macOS requires for capturing other apps' audio. Other
+/// systems have no such permission, so nothing is blocked there.
 pub fn screen_recording_allowed() -> bool {
     #[cfg(target_os = "macos")]
     // SAFETY: no arguments, returns a BOOL.
     return unsafe { CGPreflightScreenCaptureAccess() };
     #[cfg(not(target_os = "macos"))]
-    false
+    true
 }
 
 /// Shows macOS's one-time Screen Recording prompt (and lists Echotype in the pane).
@@ -126,9 +133,17 @@ pub fn request_screen_recording() {
 
 pub const NO_SCREEN_RECORDING: &str = "Only your microphone is being transcribed. To include the other people in the call, allow Echotype under Screen Recording in System Settings, then start a new meeting.";
 
-#[cfg(not(target_os = "macos"))]
+/// Windows: WASAPI loopback of the default output. Unlike macOS it includes Echotype's own sounds.
+#[cfg(target_os = "windows")]
+fn system_audio(started: Instant, tx: Sender<Piece>, stop: Arc<AtomicBool>) -> Result<JoinHandle<()>, String> {
+    pump(Source::System, audio::open_loopback, started, tx, stop).map_err(|e| format!("Only your microphone is being transcribed: {e}"))
+}
+
+// ponytail: Linux meetings are mic-only. Capturing the PulseAudio/PipeWire monitor source needs a
+// Pulse or PipeWire client (cpal's ALSA host cannot pick the monitor for one stream only).
+#[cfg(target_os = "linux")]
 fn system_audio(_: Instant, _: Sender<Piece>, _: Arc<AtomicBool>) -> Result<JoinHandle<()>, String> {
-    Err("Only your microphone is being transcribed: computer audio is macOS-only for now.".into())
+    Err("Only your microphone is being transcribed: computer audio is not captured on Linux yet.".into())
 }
 
 /// Audio-only ScreenCaptureKit stream of the main display's output mix, Echotype excluded.

@@ -1,7 +1,7 @@
 // Meetings page: start/stop meeting notes, the list of meetings, and one meeting's live
 // transcript, speakers (renamable), summary, copy/export and delete. main.js passes its helpers.
 let $, h, invoke, copyText;
-let meetings = [], status = { live: null, screen_recording: true, download_mb: 0 };
+let meetings = [], status = { live: null, computer_audio: true, speakers: true, screen_recording: true, download_mb: 0 };
 let open = null; // the meeting being viewed
 let editing = null; // speaker id being renamed
 let confirmDelete = false, startError = '', timer, starting = false, draftTitle = '';
@@ -82,6 +82,9 @@ function startCard() {
       h('span', { className: 'row-desc consent' }, 'Let everyone know this meeting is being transcribed.'),
       status.download_mb > 0 && h('span', { className: 'row-desc' }, `The first meeting downloads ${status.download_mb} MB of speaker models.`),
       startError && h('span', { className: 'row-desc error', role: 'alert' }, startError))),
+    !status.computer_audio && h('div', { className: 'row' },
+      h('span', { className: 'row-text' }, h('span', { className: 'row-title' }, 'Microphone only on this OS'),
+        h('span', { className: 'row-desc' }, 'Echotype transcribes your microphone. Capturing the other people in the call from the computer’s audio is not available here yet.'))),
     !status.screen_recording && h('div', { className: 'row' },
       h('span', { className: 'row-text' }, h('span', { className: 'row-title' }, 'Computer audio is off'),
         h('span', { className: 'row-desc' }, 'Without Screen Recording permission only your microphone is transcribed. Echotype records sound only, never your screen.')),
@@ -95,7 +98,9 @@ function viewList() {
     h('span', { className: 'when' }, `${when(m.started_ms)} · ${clock(m.duration_s)}`)));
   return [
     h('h1', {}, 'Meetings'),
-    h('p', { className: 'lede' }, 'Notes for calls and meetings. Your microphone is You; everyone else comes from the computer’s audio and is told apart on this Mac.'),
+    h('p', { className: 'lede' }, !status.computer_audio ? 'Notes for calls and meetings, transcribed from your microphone.'
+      : status.speakers ? 'Notes for calls and meetings. Your microphone is You; everyone else comes from the computer’s audio and is told apart on this Mac.'
+      : 'Notes for calls and meetings. Your microphone is You; everyone else comes from the computer’s audio, labelled Others.'),
     startCard(),
     h('h2', { className: 'group-title' }, 'Past meetings'),
     h('div', { className: 'list' }, rows.length ? rows : h('p', { className: 'empty' }, 'Your meetings show up here.')),
