@@ -1075,7 +1075,13 @@ async fn retry_last(app: AppHandle) -> R<()> {
 
 #[tauri::command]
 async fn check_permissions() -> R<serde_json::Value> {
-    Ok(serde_json::json!({ "microphone": platform::microphone_status(), "accessibility": platform::accessibility_granted(), "screen_recording": capture::screen_recording_allowed() }))
+    Ok(serde_json::json!({
+        "microphone": platform::microphone_status(),
+        "accessibility": platform::accessibility_granted(),
+        "screen_recording": capture::screen_recording_allowed(),
+        "wayland": platform::wayland(),
+        "paste_tool": platform::paste_tool(),
+    }))
 }
 
 #[tauri::command]
@@ -1177,7 +1183,10 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());
     // On-screen tests (ECHOTYPE_NO_MAIN) run beside the installed app instead of opening its window.
-    let builder = if std::env::var_os("ECHOTYPE_NO_MAIN").is_some() { builder } else { builder.plugin(tauri_plugin_single_instance::init(|app, _, _| show_main(app))) };
+    let builder = if std::env::var_os("ECHOTYPE_NO_MAIN").is_some() { builder } else { builder.plugin(tauri_plugin_single_instance::init(|app, args, _| {
+        // `echotype --toggle` from a desktop shortcut: on Wayland the global shortcut only fires in X11 apps.
+        if args.iter().any(|a| a == "--toggle") { send(app, Cmd::Key(Ev::Toggle)) } else { show_main(app) }
+    })) };
     let app = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
