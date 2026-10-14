@@ -21,8 +21,9 @@ const ANCHOR: f64 = 16.0;
 const CARD_W: f64 = 264.0;
 const CARD_H: f64 = 74.0;
 const CARD_LINE_H: f64 = 16.0;
-// ponytail: ~6.5 pt a character at 12 px over 242 pt; a long word wraps sooner, so this errs towards two lines.
-const CARD_LINE: usize = 32;
+// ponytail: ~6.5 pt an average character at 12 px over 242 pt is ~37, but capitals and digits are
+// wider and a long word wraps sooner, so 26 errs towards a two-line (taller) hit area, never a short one.
+const CARD_LINE: usize = 26;
 /// Gap between the tallest capsule and the bottom of the visible frame (or the auto-hidden Dock).
 const MARGIN: f64 = 10.0;
 const LINE_H: f64 = 22.0;
@@ -32,7 +33,11 @@ const IDLE_HIT: (f64, f64) = (48.0, 14.0);
 /// Recording capsule widths; overlay.html sets the same.
 const REC_W: f64 = 96.0;
 const REC_LOCKED_W: f64 = 110.0;
-/// "● Meeting · 1:23:45" at its widest (overlay.html), 20 pt tall like the recording capsule.
+/// The ink "Pasted" / "Copied" capsule is at least this wide; overlay.html sets the same.
+const DONE_W: f64 = 96.0;
+/// "● Meeting · 1:23:45" at its widest (overlay.html caps it there), 20 pt tall like the recording capsule.
+// ponytail: under an hour it draws ~121 pt, so ~10 pt each side catch clicks meant for the app
+// below; size it from the elapsed time if that ever bites.
 const MEET: (f64, f64) = (140.0, 20.0);
 /// Hover must rest this long before the idle bar opens into its hint (D1), so passing over it
 /// on the way to the Dock does nothing.
@@ -63,6 +68,8 @@ pub struct Ctx {
     pub main_home: bool,
     /// Show Echotype in the menu bar: the status item is the indicator and the pill never shows.
     pub menubar: bool,
+    /// Echotype's window is key on Meetings, which shows a running meeting itself.
+    pub main_meetings: bool,
 }
 
 impl Ctx {
@@ -82,6 +89,14 @@ pub fn visible(c: &Ctx, active: bool) -> bool {
         return active && !c.main_home;
     }
     active || (c.mac && c.onboarded && c.idle_on && !c.hidden_for_now())
+}
+
+/// On screen for a dictation state, or for a recording meeting the same way, even with the idle
+/// pill off: the loop's one visibility call. The meeting state alone gives way to "Hide for 1
+/// hour" (the menu bar title still shows it) and to the Meetings page, which shows it already.
+pub fn shows(c: &Ctx, active: bool, meeting: bool) -> bool {
+    let meeting = meeting && !c.hidden_for_now() && !(c.main_key && c.main_meetings);
+    visible(c, active || meeting)
 }
 
 /// What the tray's pill item does now (D12/X5).
@@ -249,14 +264,6 @@ impl Pill {
         self.meeting = on;
     }
 
-    /// The meeting state is what shows: a meeting records and no dictation state outranks it.
-    /// overlay.js applies the same rule (View sends the meeting whenever one records, so the
-    /// overlay never waits on this loop to bring it back after a notice).
-    #[cfg(test)]
-    fn meeting_up(&self) -> bool {
-        self.meeting && self.active.is_none()
-    }
-
     pub fn set_level(&mut self, muted: bool, meter: f32) {
         self.muted = muted && self.active.is_some_and(|a| a.recording);
         self.meter = meter;
@@ -333,6 +340,8 @@ impl Pill {
             Some(a) if a.recording && self.muted => (text_w("Is your mic muted?".len()) + 36.0, LINE_H),
             Some(a) if a.recording => (if a.locked { REC_LOCKED_W } else { REC_W }, 20.0),
             Some(a) if a.card => (CARD_W, CARD_H + CARD_LINE_H * if a.chars > CARD_LINE { 2.0 } else { 1.0 }),
+            // "Pasted" / "Copied": rank 2 is a result.
+            Some(Active { notice: Some((2, _)), chars, .. }) => (text_w(chars).max(DONE_W), LINE_H),
             Some(a) => (text_w(a.chars), LINE_H),
         }
     }
@@ -654,6 +663,7 @@ fn ctx(app: &AppHandle, s: &Settings) -> Ctx {
         main_key: state(app).main_key.load(std::sync::atomic::Ordering::SeqCst),
         main_home: state(app).main_home.load(std::sync::atomic::Ordering::SeqCst) || !s.onboarded,
         menubar: in_menu_bar(s),
+        main_meetings: state(app).main_meetings.load(std::sync::atomic::Ordering::SeqCst),
     }
 }
 
@@ -708,8 +718,7 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
                 let _ = if want_esc { gs.register(crate::escape()) } else { gs.unregister(crate::escape()) };
                 esc = want_esc;
             }
-            // A recording meeting shows like a dictation does: even with the idle pill off or hidden.
-            let mut want = visible(&c, active || meeting.is_some());
+            let mut want = shows(&c, active, meeting.is_some());
             let mut near = false;
             let mut held = false;
             let mut dropped: Option<(String, [f64; 2])> = None;
@@ -1017,7 +1026,7 @@ mod tests {
     }
 
     fn ctx() -> Ctx {
-        Ctx { mac: true, onboarded: true, idle_on: true, hidden_until: 0, now_ms: 1_000_000, main_key: false, main_home: false, menubar: false }
+        Ctx { mac: true, onboarded: true, idle_on: true, hidden_until: 0, now_ms: 1_000_000, main_key: false, main_home: false, menubar: false, main_meetings: false }
     }
 
     #[test]
@@ -1127,9 +1136,12 @@ mod tests {
         let mut p = Pill::default();
         p.on_state(&card(&"word ".repeat(30)), t0);
         assert_eq!(p.capsule(false, 0), (CARD_W, 106.0), "two lines, then an ellipsis");
-        let mut wide = Pill::default();
-        wide.on_state(&card(&"漢字".repeat(12)), t0);
-        assert_eq!(wide.capsule(false, 0).1, 106.0, "24 wide characters fill two lines");
+        // The boundary: 26 units is one line, 27 two; a wide character counts as two.
+        for (text, h) in [("x".repeat(26), 90.0), ("x".repeat(27), 106.0), ("漢".repeat(13), 90.0), ("漢".repeat(14), 106.0)] {
+            let mut b = Pill::default();
+            b.on_state(&card(&text), t0);
+            assert_eq!(b.capsule(false, 0).1, h, "{} units", text.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum::<usize>());
+        }
         p.tick(ms(2000), false);
         for t in (2066..=5000).step_by(66) {
             assert!(p.tick(ms(t), true).0, "paused while hovered (at {t} ms)");
@@ -1250,6 +1262,7 @@ mod tests {
         assert!(p.on_state(&DictationState { state: "done", ..Default::default() }, t0));
         assert_eq!(p.tick(ms(800), false), (true, false));
         assert_eq!(p.tick(ms(899), false).0, true);
+        assert_eq!(p.capsule(false, 0), (DONE_W, LINE_H), "the ink capsule's hit area is as wide as it is drawn");
         assert_eq!(p.tick(ms(900), false).0, false, "Pasted: the 900 ms ink moment");
 
         let mut p = Pill::default();
@@ -1279,36 +1292,40 @@ mod tests {
         let ms = |n| t0 + Duration::from_millis(n);
         let mut p = Pill::default();
         p.set_meeting(true);
-        assert!(p.meeting_up());
         assert_eq!(p.capsule(false, 32), MEET);
         assert_eq!(p.tick(t0, true), (false, false));
         assert_eq!(p.tick(ms(400), true), (false, false), "hovering a meeting never opens the dictation hint");
         // Dictating during a meeting: every dictation state and its notice come first.
         p.on_state(&st("recording"), ms(500));
-        assert!(!p.meeting_up());
         assert_eq!(p.capsule(false, 32), (REC_W, 20.0));
         p.on_state(&st("transcribing"), ms(600));
-        assert!(!p.meeting_up() && p.capsule(false, 32).1 == LINE_H);
+        assert_eq!(p.capsule(false, 32).1, LINE_H);
         p.on_state(&st("done"), ms(700));
-        assert!(!p.meeting_up(), "Pasted shows over the meeting");
+        assert_eq!(p.capsule(false, 32), (DONE_W, LINE_H), "Pasted shows over the meeting");
         assert!(!p.on_state(&st("idle"), ms(800)), "the notice still lingers");
         assert_eq!(p.tick(ms(1600), false), (false, false));
-        assert!(p.meeting_up(), "and the meeting comes back once it ends");
-        assert_eq!(p.capsule(false, 32), MEET);
+        assert_eq!(p.capsule(false, 32), MEET, "and the meeting comes back once it ends");
         // An error or the card outrank it the same way, and the menu-bar glyph ignores it.
         p.on_state(&DictationState { state: "error", error: Some("Microphone access is off".into()), ..Default::default() }, ms(2000));
-        assert!(!p.meeting_up());
+        assert_ne!(p.capsule(false, 32), MEET);
         assert_eq!(p.glyph(), Glyph::Warning);
         p.tick(ms(5000), false);
-        assert_eq!((p.meeting_up(), p.glyph()), (true, Glyph::Idle), "the menu bar shows the meeting in its title, not its glyph");
+        assert_eq!((p.capsule(false, 32), p.glyph()), (MEET, Glyph::Idle), "the menu bar shows the meeting in its title, not its glyph");
         p.set_meeting(false);
-        assert!(!p.meeting_up());
         assert_eq!(p.capsule(false, 32), IDLE_HIT);
         p.tick(ms(5300), true);
         assert_eq!(p.tick(ms(5500), true), (false, true), "without a meeting the hint opens again");
-        // On screen while it records, even with the idle pill off or hidden for the hour.
-        let c = Ctx { idle_on: false, hidden_until: u64::MAX, ..ctx() };
-        assert!(visible(&c, true) && !visible(&Ctx { menubar: true, ..c }, true));
+        // On screen while it records, even with the idle pill off.
+        let c = Ctx { idle_on: false, ..ctx() };
+        assert!(shows(&c, false, true) && !shows(&c, false, false), "a meeting alone keeps the pill up");
+        assert!(!shows(&Ctx { menubar: true, ..c }, false, true), "menu-bar mode: the title carries it");
+        let hidden = Ctx { hidden_until: c.now_ms + 1, ..c };
+        assert!(!shows(&hidden, false, true), "Hide for 1 hour hides the meeting state too");
+        assert!(shows(&hidden, true, true), "but never a dictation");
+        let meetings = Ctx { main_key: true, main_meetings: true, ..c };
+        assert!(!shows(&meetings, false, true), "Meetings shows the running meeting itself");
+        assert!(shows(&Ctx { main_meetings: false, ..meetings }, false, true), "other pages still get the pill");
+        assert!(shows(&meetings, true, true), "a dictation still shows over Meetings");
     }
 
     #[test]

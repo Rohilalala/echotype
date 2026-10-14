@@ -54,6 +54,8 @@ struct AppState {
     main_key: AtomicBool,
     /// The settings window shows Home (main.js emits `main-page` on every page change).
     main_home: AtomicBool,
+    /// ...showing Meetings, which shows a running meeting itself.
+    main_meetings: AtomicBool,
     clicks: Mutex<pill::Debounce>,
     /// The press on the pill that may be a drag (pill.rs moves the window while it is held).
     drag: Mutex<Option<pill::Drag>>,
@@ -514,9 +516,10 @@ fn paste_last(app: &AppHandle, paste: bool) {
         if res.is_ok() && state(&app).recording.load(Ordering::SeqCst) {
             return; // the pill is showing a live recording; a successful paste is its own feedback
         }
+        // A result like a dictation's: the pill's ink "Pasted" / "Copied, ⌘V to paste" moment.
         emit_state(&app, match res {
-            Ok(()) if paste => hint("Pasted", None),
-            Ok(()) | Err((_, true)) => hint("Copied, ⌘V to paste", None),
+            Ok(()) if paste => simple("done"),
+            Ok(()) | Err((_, true)) => DictationState { state: "done", copied: true, ..Default::default() },
             Err((e, false)) => DictationState { state: "error", error: Some(e), ..Default::default() },
         });
     });
@@ -1208,6 +1211,7 @@ pub fn run() {
                 pill_wake,
                 main_key: AtomicBool::new(false),
                 main_home: AtomicBool::new(true),
+                main_meetings: AtomicBool::new(false),
                 clicks: Mutex::new(pill::Debounce::default()),
                 drag: Mutex::new(None),
                 tray_pill: Mutex::new(None),
@@ -1223,6 +1227,7 @@ pub fn run() {
             app.listen_any("main-page", move |e| {
                 let st = state(&h);
                 st.main_home.store(e.payload() == "\"home\"", Ordering::SeqCst);
+                st.main_meetings.store(e.payload() == "\"meetings\"", Ordering::SeqCst);
                 let _ = st.pill_wake.send(());
             });
             pill::run(app.handle().clone(), pill::create(app, &s)?, woken);
