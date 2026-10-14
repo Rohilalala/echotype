@@ -1071,27 +1071,31 @@ fn cli_run(s: &Settings, file: &str, mic: Option<&str>, n: Option<i32>) -> Resul
     drop(session); // the speaker models go with it
     stt::free_vad();
     eprintln!(
-        "audio {secs:.1} s, transcription {:.1} s, final diarization {:.1} s, total {total:.1} s, real-time factor {:.3}, RSS before {before} MB, peak {} MB, after {} MB",
+        "audio {secs:.1} s, transcription {:.1} s, final diarization {:.1} s, total {total:.1} s, real-time factor {:.3}, RSS (footprint) before {} ({}) MB, peak {} MB, after {} ({}) MB",
         stt_ms as f32 / 1000.0,
         diarize_ms as f32 / 1000.0,
         total / secs.max(0.001),
+        before.0,
+        before.1,
         peak_rss_mb(),
-        rss_mb()
+        rss_mb().0,
+        rss_mb().1
     );
     Ok(out)
 }
 
-/// Resident memory right now, MB.
-fn rss_mb() -> u64 {
+/// (resident, physical footprint) right now, MB. Footprint leaves out freed memory the allocator
+/// has not handed back yet, which resident still counts.
+fn rss_mb() -> (u64, u64) {
     #[cfg(target_os = "macos")]
     // SAFETY: proc_pid_rusage fills a zeroed rusage_info_v2 for this process.
     unsafe {
         let mut ri: libc::rusage_info_v2 = std::mem::zeroed();
         if libc::proc_pid_rusage(std::process::id() as i32, libc::RUSAGE_INFO_V2, &mut ri as *mut _ as *mut _) == 0 {
-            return ri.ri_resident_size >> 20;
+            return (ri.ri_resident_size >> 20, ri.ri_phys_footprint >> 20);
         }
     }
-    0
+    (0, 0)
 }
 
 fn peak_rss_mb() -> u64 {
