@@ -106,7 +106,8 @@ def report(kit, run):
     out = {json.loads(l)["id"]: json.loads(l).get("output") or "" for l in open(run)}
     lines = ["Echotype v1 on your own recordings", ""]
     for cond in ("quiet", "noisy", "whisper"):
-        s = [c for c in cs if c["cond"] == cond and not c["translate"] and c["id"] in out]
+        # Hinglish rows are left out of WER: whisper may write them in Devanagari, the references are romanized
+        s = [c for c in cs if c["cond"] == cond and not c["translate"] and c["id"] in out and "kind:hinglish" not in c["tags"]]
         if not s:
             continue
         er = eo = n = 0
@@ -117,7 +118,8 @@ def report(kit, run):
             er, eo, n = er + e1, eo + e2, n + k
         exact = sum(out[c["id"]] == c["reference"] for c in s)
         lines.append(f"{cond:8s} {len(s):3d} sentences  WER raw whisper {100 * er / max(n, 1):5.1f}%  cleaned {100 * eo / max(n, 1):5.1f}%  exact {exact}/{len(s)}")
-    lines += ["", "Every sentence that is not exactly right (check the meaning by eye):", ""]
+    lines += ["(WER and exact match leave out the Hinglish rows; they are listed below for a look.)",
+              "", "Every sentence that is not exactly right (check the meaning by eye):", ""]
     for c in cs:
         o = out.get(c["id"])
         if o is not None and o != c["reference"]:
