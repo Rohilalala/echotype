@@ -2,6 +2,7 @@
 const preview = !window.__TAURI__;
 if (preview) await import('./mock.js'); // browser preview for design QA
 const meetingsPage = await import('./meetings.js');
+const { createOrb } = await import('./orb.js'); // onboarding's orb
 
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -204,7 +205,7 @@ function renderHotkey() {
     ? 'Press once to start, again to stop. Esc cancels.'
     : 'Hold while you speak, let go to paste. Tap twice to go hands-free.';
   renderHero();
-  $('#obTry').replaceChildren(verb(), ...talkCaps(), 'and say a sentence');
+  if (!$('#onboard').hidden) renderObKeys();
 }
 
 let recording = null;
@@ -287,6 +288,7 @@ function renderTalk() {
     el.classList.toggle('warn', S.talk_key !== 'accelerator' && !status.talk_key_active);
   }
   $('#obTalk').value = S.talk_key;
+  if (!$('#onboard').hidden) obFoot(); // "Finish and relaunch" once the talk key needs it
   for (const field of status.unregistered_shortcuts || []) {
     const err = errEl(field);
     if (err.hidden) { err.textContent = `${hotkeyText(S[field])} isn't working: another app may be using it. Pick another.`; err.hidden = false; }
@@ -937,8 +939,10 @@ async function renderMics() {
   try { devices = await invoke('list_input_devices'); $('#micError').hidden = true; }
   catch (e) { devices = []; $('#micError').textContent = `Couldn't list microphones (${e}). Echotype uses the system default.`; $('#micError').hidden = false; }
   const def = devices.find(d => d.default);
-  $('#mic').replaceChildren(h('option', { value: '' }, def ? `System default (${def.name})` : 'System default'), ...devices.map(d => h('option', { value: d.name }, d.name)));
-  $('#mic').value = S.input_device ?? '';
+  for (const sel of [$('#mic'), $('#obMicPick')]) { // Settings, and onboarding's "Wrong microphone?"
+    sel.replaceChildren(h('option', { value: '' }, def ? `System default (${def.name})` : 'System default'), ...devices.map(d => h('option', { value: d.name }, d.name)));
+    sel.value = S.input_device ?? '';
+  }
   renderMicNote();
 }
 // D13: a persistent info glyph for a Bluetooth mic, plus a one-time tip.
@@ -975,7 +979,7 @@ function renderStartup() {
   $('#autostart').disabled = !ok && !S.autostart;
   $('#autostartDesc').textContent = ok ? pc('Echotype starts quietly in the menu bar.') : 'Move Echotype to your Applications folder first.';
   $('#obAutostartRow').hidden = !ok;
-  $('#talkRow').hidden = $('#obTalkRow').hidden = !isMac; // talk keys are macOS-only
+  $('#talkRow').hidden = $('#obTalkRow').hidden = !isMac; // talk keys are macOS-only; sounds play everywhere
   $('#pillTitle').hidden = $('#pillGroup').hidden = !isMac; // so is the idle pill
   $('#meetingsTitle').hidden = $('#meetingsGroup').hidden = !isMac; // and call detection (calls.rs)
 }
@@ -1072,9 +1076,6 @@ async function refreshPerms() {
   const im = isMac && S.talk_key !== 'accelerator' && [row('Input Monitoring', 'Only for the talk key: Echotype watches that one key, and never records what you type.',
     status.input_monitoring ? ['Allowed', '', false] : ['Needed for the talk key', 'warn', true], 'input_monitoring')];
   $('#perms').replaceChildren(...rows(), ...(im || []));
-  $('#obPerms').replaceChildren(...isMac ? [rows()[1] ?? rows()[0]] : rows().slice(1));
-  $('#obMic').replaceChildren(rows()[0]);
-  $('#obPasteNext').textContent = p.accessibility ? 'Continue' : 'Continue without pasting';
   $('#axLine').hidden = failed || p.accessibility;
   renderHero();
 }
@@ -1083,49 +1084,463 @@ window.addEventListener('focus', () => S && refreshStatus()); // Input Monitorin
 for (const b of $$('[data-perm]')) b.addEventListener('click', () => invoke('open_permission_settings', { kind: b.dataset.perm }));
 
 // ---------- onboarding ----------
-// D9: the model downloads in the background while the mic is set up; the first dictation lands in
-// a practice field (never pasted); Accessibility comes after; extras last. Nothing blocks the next step.
-let obStep = 1;
-function obShow(n) {
-  obStep = n;
-  $$('.ob-step').forEach(s => (s.hidden = +s.dataset.step !== n));
-  $$('#obSteps li').forEach((li, i) => { li.className = i + 1 === n ? 'on' : i + 1 < n ? 'done' : ''; li.toggleAttribute('aria-current', i + 1 === n); });
-  renderObModel();
-  if (n === 4) refreshStatus();
-  $(`.ob-step[data-step="${n}"] h2`).focus();
+// Five steps in one card (.notes/ONBOARDING.md): the microphone with a sound check, a practice
+// dictation into a field here, Accessibility and a real paste in another app, a few personal
+// touches, then the recap. The orb (orb.js) moves between the steps' .ob-orb slots. The speech
+// model downloads from the first frame, tiny.en first when nothing is on this Mac yet, so the
+// practice run needn't wait for the big one (Automatic uses whatever is downloaded).
+const obStill = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const SAY = 'Echotype, meet my Mac.';
+const BUSY = ['recording', 'transcribing', 'cleaning'];
+const PACKS = [['classic', 'Classic'], ['glass', 'Glass'], ['wood', 'Wood'], ['pop', 'Pop'], ['soft', 'Soft']];
+const wait = ms => new Promise(r => setTimeout(r, ms));
+// Per-viewer memory that may be missing (private storage): only what makes cleanup tidier.
+const local = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { return null; } };
+let obStep = 1, orb = null, obPoll = 0, obSeq = 0;
+const obT = {}; // timers by name
+const ob = { mic: null, heard: 0, checked: false, quiet: false, paused: false, ax: null, axSince: 0, asked: false, pressed: false, offerClick: false, watched: false, recAt: 0, secs: 0, hinglish: false };
+const later = (name, ms, fn) => { clearTimeout(obT[name]); obT[name] = setTimeout(fn, ms); };
+// Show something that appears within a step with a short rise.
+function pop(el, on = true) {
+  if (el.hidden === !on) return;
+  el.hidden = !on;
+  el.classList.remove('ob-pop');
+  if (on) { void el.offsetWidth; el.classList.add('ob-pop'); }
 }
+
 function showOnboarding(on) {
   $('#onboard').hidden = !on;
   $('aside').inert = $('main').inert = on; // keep Tab inside the dialog
+  document.documentElement.classList.toggle('ob-on', on);
 }
-// Start the recommended model downloading as soon as onboarding opens.
-function obStartModel() {
-  if (S.stt.provider !== 'local') return;
-  const chosen = S.advanced ? models.find(m => m.id === S.stt.local_model) : models.find(m => m.recommended);
-  if (chosen?.downloaded) return;
-  const pick = chosen && chosen.fits ? chosen : models.find(m => m.recommended);
-  if (!pick) return;
-  if (S.stt.local_model !== pick.id) { S.stt.local_model = pick.id; save(); }
-  if (progress[pick.id] == null) download(pick.id);
+
+function startOnboarding(step) {
+  showOnboarding(true);
+  window.__TAURI__.event.emit?.('main-page', 'onboarding'); // the real pill may show over this window
+  orb ??= createOrb($('#obCanvas'), obStill);
+  orb.set(obStill ? 'orb' : 'ball');
+  orb.start();
+  // The ball bursts into the orb once the card has come in, then breathes.
+  if (!obStill) later('burst', 520, () => orb.kind === 'ball' && orb.set('orb'));
+  $('.ob-card').classList.add('intro');
+  obStartModel();
+  obShow(step, true);
 }
-function renderObModel() {
-  if ($('#onboard').hidden) return;
-  const m = S.advanced ? sttModel() : models.find(x => x.recommended), p = m && progress[m.id];
-  const text = S.stt.provider !== 'local' ? `Using ${preset(S.stt.provider)?.label ?? S.stt.provider} for speech.`
-    : !m ? 'None of the local models fit in the memory free right now. You can use an API instead.'
-    : m.downloaded ? `${m.label} is ready.`
-    : modelErr[m.id] ? `Couldn't download ${m.label}: ${modelErr[m.id]}`
-    : `Downloading ${m.label} (${fmtMB(m.size_mb)}) · ${Math.round((p || 0) * 100)}%`;
-  $('#obModel').textContent = text;
-  const ready = S.stt.provider !== 'local' || m?.downloaded;
-  if (dictation.state === 'idle' || dictation.state === 'done' || dictation.state === 'hint') {
-    $('#obTryState').textContent = ready ? 'Say a sentence. Your words show up below.' : `Model downloading ${Math.round((p || 0) * 100)}%. You can try as soon as it finishes.`;
+
+// ----- moving between steps -----
+// View Transitions where the WebView has them: the old step leaves as a snapshot while the new
+// one's children come in, staggered, live. Without them the same in two beats; reduced motion
+// swaps at once and fades. The orb is outside the steps and follows its slot either way.
+function obShow(n, first = false) {
+  n = Math.max(1, Math.min(5, n));
+  const from = $(`.ob-step[data-step="${obStep}"]`), to = $(`.ob-step[data-step="${n}"]`);
+  document.documentElement.classList.toggle('ob-back', n < obStep);
+  obStep = n;
+  const seq = ++obSeq;
+  const swap = () => {
+    if (seq !== obSeq) return;
+    for (const s of $$('.ob-step')) { s.hidden = s !== to; s.classList.remove('enter', 'leave'); }
+    let i = 0;
+    for (const el of to.querySelectorAll(':scope > :not(.ob-orb), :scope > .ob-body > *')) el.style.setProperty('--i', i++);
+    void to.offsetWidth;
+    to.classList.add('enter');
+    obEnter(n);
+  };
+  if (first || from === to || obStill) swap();
+  else if (document.startViewTransition) document.startViewTransition(swap);
+  else { from.classList.add('leave'); setTimeout(swap, 140); }
+}
+
+function obEnter(n) {
+  const to = $(`.ob-step[data-step="${n}"]`);
+  if (S.onboard_step !== n) { S.onboard_step = n; save(true); } // a relaunch resumes here
+  $$('#obDots li').forEach((li, i) => { li.className = i + 1 === n ? 'on' : i + 1 < n ? 'done' : ''; });
+  $('#obDots').ariaLabel = `Setup, step ${n} of 5`;
+  orb.slot(to.querySelector('.ob-orb'));
+  orb.progress(null);
+  for (const k of ['adv', 'click', 'quiet', 'pause']) clearTimeout(obT[k]);
+  if (n !== 1) obListen(false);
+  // Permissions are polled while their step shows, so a grant in System Settings carries on by itself.
+  clearInterval(obPoll);
+  if (n === 1 || n === 3) { obPoll = setInterval(obTick, n === 1 ? 700 : 500); obTick(); }
+  if (n === 1) obMicRender();
+  if (n === 2) {
+    renderObKeys();
+    obTryRender();
+    if (!ob.pressed) later('click', 8000, () => { ob.offerClick = true; obFoot(); }); // the hotkey never fired
   }
-  $('#obToggle').disabled = !ready && dictation.state !== 'recording';
+  if (n === 3) { ob.axSince = Date.now(); $('#obStale').hidden = true; renderObKeys(); obAxRender(); }
+  if (n === 4) obPrefsRender();
+  if (n === 5) obDoneRender();
+  if (n !== 1 && !BUSY.includes(dictation.state)) orb.set('orb');
+  obFoot();
+  renderObModel();
+  to.querySelector('h2').focus({ preventScroll: true });
 }
-$$('[data-next]').forEach(b => b.addEventListener('click', () => obShow(obStep + 1)));
-$$('[data-recheck]').forEach(b => b.addEventListener('click', refreshPerms));
-async function finishOnboarding(page) {
+
+// The footer: Back (Quit on the first step), one quiet extra, and the primary action.
+function obFoot() {
+  if ($('#onboard').hidden) return;
+  const next = $('#obNext'), alt = $('#obAlt');
+  $('#obBack').textContent = obStep === 1 ? 'Quit' : 'Back';
+  $('#obSkip').hidden = obStep === 1 || obStep === 5;
+  let label = 'Continue', extra = '';
+  next.hidden = next.disabled = false;
+  if (obStep === 1) {
+    if (ob.mic === 'denied') label = 'Open System Settings';
+    next.hidden = ob.mic === 'restricted'; // an administrator decides; nothing here can help
+    next.disabled = ob.mic === 'asking' || ob.mic == null;
+    if (ob.mic === 'granted' && !ob.checked) extra = ob.paused ? 'Listen again' : $('#obMicPickRow').hidden ? 'Wrong microphone?' : '';
+  } else if (obStep === 2) {
+    if (ob.offerClick) extra = dictation.state === 'recording' ? 'Click to finish' : 'Click to start instead';
+  } else if (obStep === 3) {
+    if (!ob.ax) { label = 'Open System Settings'; extra = 'Not now: keep text on the clipboard'; }
+  } else if (obStep === 5) label = obRelaunch() ? 'Finish and relaunch' : 'Finish';
+  next.textContent = label;
+  alt.textContent = extra;
+  alt.hidden = !extra;
+}
+const obRelaunch = () => isMac && S.talk_key !== 'accelerator' && !!status.needs_relaunch;
+
+$('#obNext').addEventListener('click', async () => {
+  if (obStep === 1) {
+    if (ob.mic === 'denied') return invoke('open_permission_settings', { kind: 'microphone' }).catch(() => {});
+    if (ob.mic === 'unknown') {
+      ob.mic = 'asking';
+      obMicRender();
+      await invoke('request_microphone').catch(() => {});
+      if (!isMac) { ob.mic = 'granted'; obListen(true); obMicRender(); } // no prompt to wait for
+      return obTick();
+    }
+  }
+  if (obStep === 3 && !ob.ax) {
+    ob.asked = true;
+    obAxRender();
+    return invoke('open_permission_settings', { kind: 'accessibility' }).catch(() => {});
+  }
+  if (obStep === 5) return obFinish();
+  obShow(obStep + 1);
+});
+$('#obAlt').addEventListener('click', () => {
+  if (obStep === 1 && ob.paused) { obListen(true); return obMicRender(); }
+  if (obStep === 1) { pop($('#obMicPickRow')); $('#obMicPick').focus(); return obFoot(); }
+  if (obStep === 2) return invoke('toggle_dictation').catch(() => {});
+  if (obStep === 3) obShow(4);
+});
+$('#obBack').addEventListener('click', () => (obStep === 1 ? invoke('quit_app').catch(() => {}) : obShow(obStep - 1)));
+$('#obSkip').addEventListener('click', () => finishOnboarding('home'));
+// Enter is the primary action; Esc and ⌘[ go back. Esc never closes onboarding, and does
+// nothing while a dictation is running (Rust has Esc then, to cancel it).
+$('#onboard').addEventListener('keydown', e => {
+  const back = e.key === 'Escape' || (e.metaKey && e.key === '[');
+  if (back) {
+    e.preventDefault();
+    if (obStep > 1 && !BUSY.includes(dictation.state)) obShow(obStep - 1);
+  } else if (e.key === 'Enter' && !e.isComposing && !e.target.closest('button, select, a, textarea, input[type="checkbox"], input[type="radio"]')) {
+    e.preventDefault();
+    const n = $('#obNext');
+    if (!n.hidden && !n.disabled) n.click();
+  }
+});
+
+async function obTick() {
+  let p;
+  try { p = await invoke('check_permissions'); } catch { return; }
+  if (obStep === 1) obMicStatus(p);
+  if (obStep === 3) obAxStatus(!!p.accessibility);
+}
+
+// ----- 1: the microphone -----
+function obMicStatus(p) {
+  const was = ob.mic;
+  let m = p.microphone_restricted ? 'restricted' : p.microphone;
+  if (m === 'unknown' && was === 'asking') m = 'asking'; // the system prompt is up
+  if (m === was) return;
+  ob.mic = m;
+  if (m === 'granted') {
+    if (was === 'denied') invoke('focus_main').catch(() => {}); // granted in System Settings: come back
+    obListen(true);
+  } else obListen(false);
+  obMicRender();
+}
+
+// The sound check: the orb follows the mic's level; about 0.8 s of voice and it's done.
+function obListen(on) {
+  for (const k of ['quiet', 'pause']) clearTimeout(obT[k]);
+  if (!on) { if (ob.listening) invoke('mic_check', { on: false }).catch(() => {}); ob.listening = false; orb?.level(0); return; }
+  ob.listening = true;
+  ob.heard = 0;
+  ob.quiet = ob.paused = false;
+  invoke('mic_check', { on: true }).catch(e => { $('#obMicState').textContent = `Couldn't open the microphone: ${e}`; });
+  later('quiet', 10000, () => { ob.quiet = true; pop($('#obMicPickRow')); obMicRender(); });
+  later('pause', 60000, () => { obListen(false); ob.paused = true; obMicRender(); });
+}
+listen('mic-level', ({ payload }) => {
+  if (obStep !== 1 || !ob.listening || ob.checked) return;
+  orb.level(payload.meter);
+  if (payload.meter > 0.25) ob.heard += 50; // 20 windows a second
+  if (ob.heard < 800) return;
+  ob.checked = true;
+  obListen(false);
+  orb.set('check');
+  invoke('play_sound', { name: 'start' }).catch(() => {});
+  obMicRender();
+  later('adv', 1100, () => obStep === 1 && obShow(2));
+});
+$('#obMicPick').addEventListener('change', e => {
+  S.input_device = e.target.value || null;
+  syncBound();
+  renderMicNote();
+  save().then(() => obStep === 1 && ob.mic === 'granted' && !ob.checked && obListen(true));
+});
+
+const MIC_LINE = {
+  asking: 'Answer the macOS prompt to carry on.',
+  denied: "Microphone access is off for Echotype. Switch it on in System Settings and this page carries on by itself.",
+  restricted: "This Mac's administrator controls microphone access, so Echotype can't turn it on.",
+};
+function obMicRender() {
+  const st = $('#obMicState');
+  st.textContent = ob.mic !== 'granted' ? MIC_LINE[ob.mic] ?? ''
+    : ob.checked ? 'Got it. That’s your voice.'
+    : ob.paused ? 'Stopped listening after a minute of quiet.'
+    : ob.quiet ? 'Nothing yet. Is this the right microphone?'
+    : 'Say something. The orb is listening.';
+  st.dataset.tone = ob.mic === 'denied' || ob.mic === 'restricted' ? 'warn' : ob.checked ? 'ok' : '';
+  if (obStep === 1 && orb.kind !== 'ball') orb.set(ob.checked ? 'check' : 'orb');
+  obFoot();
+}
+
+// ----- 2: try it -----
+function renderObKeys() {
+  $('#obSay').replaceChildren(`${verb()} `, h('span', { className: 'keys' }, talkCaps()), ' and say: ', h('q', {}, SAY));
+  $('#obKeys').replaceChildren(...talkCaps().map(k => { k.classList.toggle('wide', k.textContent.length > 2); return k; }));
+  $('#obTryKeys').replaceChildren(verb().toLowerCase(), ' ', h('span', { className: 'keys' }, talkCaps()));
+  $('#obTip').replaceChildren('Tip: tap ', h('span', { className: 'keys' }, talkCaps()), ' twice to keep talking hands-free.');
+}
+// The model line counts the download; the orb wears a ring until a model is ready.
+function obTryRender() {
+  const ready = obReady(), m = obDownloading();
+  orb.progress(ready ? null : progress[m?.id] ?? 0);
+  const st = $('#obTryState'), wait = 'One moment… getting your speech model ready.';
+  if (!ready && !ob.tried && !BUSY.includes(dictation.state)) st.textContent = wait;
+  else if (ready && st.textContent === wait) st.textContent = '';
+}
+listen('hotkey-state', ({ payload: down }) => {
+  $('#obKeys').classList.toggle('down', !!down);
+  if (down && obStep === 2) { ob.pressed = true; clearTimeout(obT.click); }
+});
+
+function obDictation(p) {
+  if ($('#onboard').hidden) return;
+  if (obStep === 2) obPractice(p);
+  else if (obStep === 3 && ob.ax) obRealPaste(p);
+  else return;
+  if (p.state !== 'recording') orb.level(0);
+  obFoot();
+}
+const obHint = m => /^(Hold|Press) /.test(m || '') ? 'Hold the keys while you talk, then let go.'
+  : /^Model downloading/.test(m || '') ? 'One moment… the speech model is still downloading.'
+  : m === "Didn't catch that" ? "Didn't catch that. Hold the keys, talk, then let go." : m || '';
+function obPractice(p) {
+  const say = t => ($('#obTryState').textContent = t);
+  $('#obTryState').dataset.tone = '';
+  if (p.state === 'recording') {
+    ob.recAt = performance.now();
+    ob.offerClick = ob.offerClick && !ob.pressed;
+    orb.progress(null);
+    orb.set('orb');
+    if (!ob.watched) { // once: the real pill is down there
+      ob.watched = true;
+      const w = $('#obWatch');
+      w.hidden = false;
+      w.classList.add('pulse');
+    }
+    say(p.locked || S.mode === 'toggle' ? 'Listening. Press the keys again to finish.' : 'Listening… let go when you’re done.');
+  } else if (p.state === 'transcribing' || p.state === 'cleaning') {
+    if (ob.recAt) ob.secs = (performance.now() - ob.recAt) / 1000;
+    ob.recAt = 0;
+    orb.set('think');
+    say('Writing it down…');
+  } else if (p.state === 'done' && p.text) {
+    ob.tried = true;
+    obReveal(p.text);
+    orb.set('check');
+    later('orb', 1600, () => obStep === 2 && !BUSY.includes(dictation.state) && orb.set('orb'));
+    const n = p.text.split(/\s+/).filter(Boolean).length;
+    say(`That’s it. ${n} ${n === 1 ? 'word' : 'words'}${ob.secs >= 0.3 ? ` in ${ob.secs.toFixed(1)} s` : ''}.`);
+    $('#obTryState').dataset.tone = 'ok';
+    $('#obWatch').hidden = true;
+    pop($('#obTip'), isMac && S.mode !== 'toggle');
+    $('#obNext').focus();
+  } else if (p.state === 'hint' || p.state === 'error') {
+    orb.set('orb');
+    say(p.state === 'hint' ? obHint(p.message) : p.error || 'Something went wrong. Try again.');
+    if (p.state === 'hint') obTryRender();
+  }
+}
+// Word by word: 30 ms apart, the whole line within 600 ms. Reduced motion: all at once.
+function obReveal(text) {
+  const words = text.split(/\s+/).filter(Boolean), step = Math.min(30, 600 / words.length);
+  $('#obResult').replaceChildren(...words.flatMap((w, i) => [i ? ' ' : '', h('span', { className: 'w', style: `--d:${Math.round(i * step)}ms` }, w)]));
+}
+
+// ----- 3: Accessibility, then a real paste -----
+function obAxStatus(on) {
+  const was = ob.ax;
+  ob.ax = on;
+  if (!on && Date.now() - ob.axSince > 20000) pop($('#obStale')); // "on" in the list, off for macOS
+  if (was === on) return;
+  if (on && was === false) {
+    invoke('focus_main').catch(() => {});
+    invoke('play_sound', { name: 'lock' }).catch(() => {});
+    orb.set('check');
+    later('orb', 1400, () => obStep === 3 && !BUSY.includes(dictation.state) && orb.set('orb'));
+    $('#obPasteState').textContent = 'Pasting is on.';
+    $('#obPasteState').dataset.tone = 'ok';
+  }
+  obAxRender();
+}
+function obAxRender() {
+  $('#obAxAsk').hidden = !!ob.ax;
+  pop($('#obAxTry'), !!ob.ax);
+  $('#obTextEdit').hidden = !isMac;
+  $('#obAxState').textContent = ob.asked ? 'Switch on Echotype in the list. This page carries on by itself.' : 'Without it, your words wait on the clipboard for you to paste.';
+  obFoot();
+}
+$('#obReset').addEventListener('click', async () => {
+  $('#obStale').hidden = true;
+  ob.axSince = Date.now();
+  ob.asked = true;
+  try { await invoke('reset_accessibility'); $('#obAxState').textContent = 'Asked again. Switch on Echotype in the list.'; }
+  catch (e) { $('#obAxState').textContent = String(e); }
+});
+$('#obTextEdit').addEventListener('click', () => invoke('open_textedit').catch(e => ($('#obPasteState').textContent = String(e))));
+
+async function obRealPaste(p) {
+  const st = $('#obPasteState');
+  st.dataset.tone = '';
+  if (p.state === 'recording') { orb.set('orb'); st.textContent = 'Listening…'; return; }
+  if (p.state === 'transcribing' || p.state === 'cleaning') { orb.set('think'); st.textContent = 'Writing it down…'; return; }
+  if (p.state === 'hint' || p.state === 'error') { orb.set('orb'); st.textContent = p.state === 'hint' ? obHint(p.message) : p.error || ''; return; }
+  if (p.state !== 'done' || !p.text) return;
+  orb.set('orb');
+  if (p.card) { st.textContent = 'Nothing had the cursor, so your words are on the pill. Click into a text box first.'; return; }
+  if (p.copied) { st.textContent = 'That went to the clipboard, because Echotype was in front. Click into another app’s text box first.'; return; }
+  // Pasted for real: the orb pulses, then, once the text has landed, the window comes back and says where.
+  orb.set('check');
+  orb.burst(0.5);
+  st.textContent = 'Typed where your cursor was.';
+  st.dataset.tone = 'ok';
+  await wait(700);
+  const app = await invoke('focus_main').catch(() => null);
+  if (app && obStep === 3) st.textContent = `Typed into ${app}.`;
+  later('adv', 1800, () => obStep === 3 && obShow(4));
+}
+
+// ----- 4: make it yours -----
+function obPrefsRender() {
+  $('#obName').value = S.display_name || '';
+  obHello();
+  // Hindi among the Mac's languages: Hinglish is likely, so it starts selected (once).
+  if (local('ob-lang') == null && !(S.language === 'hi' && S.translate_to_english) && navigator.languages?.some(l => /^hi\b/i.test(l))) obLang('hinglish');
+  obLangRender();
+  const builtIn = obBuiltIn();
+  $('#obClean').hidden = !builtIn;
+  $('#obCleanup').hidden = builtIn;
+  $('#obClean').checked = S.cleanup.enabled && S.cleanup.provider === 'echotype';
+  obSounds();
+}
+const obHello = () => $('#obHello').replaceChildren(firstName() ? `Home will say “${hello()}”` : 'Home greets you by name.');
+$('#obName').addEventListener('input', e => { S.display_name = e.target.value; saveSoon(); obHello(); renderGreeting(); });
+
+// Hinglish: Hindi + English, typed as English. It needs a model that translates (Medium, or Small
+// if Medium doesn't fit), so it switches on once that model is on this Mac.
+const obHinglishModel = () => ['medium', 'small'].map(id => models.find(m => m.id === id)).find(m => m && (m.fits || m.downloaded));
+function obLang(v) {
+  local('ob-lang', v);
+  ob.hinglish = v === 'hinglish';
+  const m = obHinglishModel();
+  if (ob.hinglish && m) { if (m.downloaded) obModelLanded(m.id); else obFetch(m.id); }
+  if (!ob.hinglish && S.language === 'hi' && S.translate_to_english) { S.language = 'auto'; S.translate_to_english = false; syncBound(); save(); renderLangNote(); }
+  obLangRender();
+}
+function obLangRender() {
+  const on = ob.hinglish || (S.language === 'hi' && S.translate_to_english);
+  for (const r of $$('input[name="obLang"]')) r.checked = r.value === (on ? 'hinglish' : 'en');
+  const m = obHinglishModel();
+  $('#obLangDesc').textContent = !on ? 'Typed as you say it.'
+    : !m ? 'Hinglish needs the Medium model, and this Mac is short of memory for it right now.'
+    : m.downloaded ? `Typed in English, with ${m.label}.`
+    : `Typed in English, once ${m.label} (${fmtMB(m.size_mb)}) has downloaded.`;
+}
+for (const r of $$('input[name="obLang"]')) r.addEventListener('change', () => obLang(r.value));
+
+// The built-in cleanup model, when it's installed and fits; otherwise today's setup choices.
+function obBuiltIn() {
+  const c = sys.cleaners?.find(x => x.automatic);
+  return isMac && !!sys.echotype_model_installed && !!c && c.ram_mb + 2048 <= sys.available_ram_gb * 1024;
+}
+$('#obClean').addEventListener('change', e => {
+  if (e.target.checked) { S.cleanup.enabled = true; setProvider('cleanup', 'echotype'); }
+  else { S.cleanup.enabled = false; save(); }
+  syncBound();
+  setCleanupInert();
+  renderRaw();
+});
+
+function obSounds() {
+  $('#obSounds').replaceChildren(...[...PACKS, ['off', 'Off']].map(([id, label]) => {
+    const input = h('input', { type: 'radio', name: 'obPack', value: id, checked: id === 'off' ? !S.sounds : S.sounds && S.sound_pack === id });
+    // A click on the pack already chosen plays it again (change only fires on a new one).
+    input.addEventListener('click', () => id !== 'off' && S.sounds && S.sound_pack === id && invoke('preview_sounds', { pack: id }).catch(() => {}));
+    input.addEventListener('change', () => {
+      S.sounds = id !== 'off';
+      if (S.sounds) { S.sound_pack = id; invoke('preview_sounds', { pack: id }).catch(() => {}); }
+      syncBound();
+      save();
+      $('#soundPackRow').hidden = !S.sounds;
+    });
+    return h('label', {}, input, h('span', {}, label));
+  }));
+}
+
+// ----- 5: you're set -----
+function obDoneRender() {
+  $('#obT5').textContent = firstName() ? `You're set, ${firstName()}.` : "You're set.";
+  const toggle = S.mode === 'toggle', [pasteKey] = DEFAULT_LAST();
+  const item = (keys, text) => h('li', {}, h('span', { className: 'keys' }, keys), h('span', {}, text));
+  $('#obRecap').replaceChildren(
+    item(talkCaps(), toggle ? 'Press to talk, again to type' : 'Hold to talk, let go to type'),
+    !toggle && item([...talkCaps(), h('span', { className: 'times' }, '×2')], 'Keep talking hands-free'),
+    item([h('kbd', {}, 'esc')], 'Cancel while you talk'),
+    (S.paste_last_hotkey || pasteKey) && item(keycaps(S.paste_last_hotkey || pasteKey), 'Paste the last one again'),
+  );
+  $('#obAutostartRow').hidden = !sys.can_autostart;
+  refreshStatus();
+}
+
+async function obFinish() {
+  const how = $('#obCleanup').hidden ? 'off' : $('#obCleanup').value;
+  if (how !== 'off') { setupCleanup(how); return finishOnboarding('cleanup'); } // a key or a server to set up
+  const relaunch = obRelaunch();
+  // The orb folds back into the ball and drops out of the card, towards the real pill.
+  $('#obNext').disabled = true;
+  if (obStill) { $('.ob-card').classList.add('bye'); await wait(150); }
+  else {
+    orb.set('ball');
+    await wait(300);
+    const c = $('.ob-card').getBoundingClientRect();
+    orb.point(c.left + c.width / 2, innerHeight + 40);
+    $('.ob-card').classList.add('bye');
+    await wait(450);
+  }
+  await finishOnboarding('home', !relaunch);
+  if (relaunch) invoke('relaunch').catch(() => {});
+}
+
+// `away`: the window steps aside so the pill at the bottom of the screen is the next thing seen.
+async function finishOnboarding(page, away = false) {
   // New installs get the new shortcuts and (when allowed) launch at login; upgraders are only offered them.
   const [p, c] = DEFAULT_LAST();
   S.paste_last_hotkey ||= p;
@@ -1134,20 +1549,90 @@ async function finishOnboarding(page) {
   if (!S.dismissed.includes('upgrade_offer')) S.dismissed.push('upgrade_offer');
   S.onboarded = true;
   syncBound();
+  clearInterval(obPoll);
+  Object.values(obT).forEach(clearTimeout);
+  obListen(false);
   await save();
+  const pill = isMac && S.show_in !== 'menubar' && S.pill_idle;
+  if (away && pill && window.__TAURI__.window) {
+    await window.__TAURI__.window.getCurrentWindow().hide().catch(() => {});
+    setTimeout(() => window.__TAURI__.event.emit?.('pill-hello'), 350); // overlay.js: the ball pulses once
+  }
+  orb?.stop();
   showOnboarding(false);
+  $('.ob-card').classList.remove('bye', 'intro');
   renderHotkey();
   go(page);
+  obDropTiny();
 }
-$('#obSkip').addEventListener('click', () => finishOnboarding('home'));
-$('#onboard').addEventListener('keydown', e => { if (e.key === 'Escape') finishOnboarding('home'); });
-$('#obApi').addEventListener('click', () => finishOnboarding('speech'));
-$('#obDone').addEventListener('click', () => {
-  const how = $('#obCleanup').value;
-  if (how !== 'off') setupCleanup(how);
-  finishOnboarding(how === 'off' ? 'home' : 'cleanup');
-});
-$('#obToggle').addEventListener('click', () => invoke('toggle_dictation'));
+
+// ----- the speech model -----
+// The model onboarding waits for: Automatic's pick for this Mac, or the manual pick (advanced).
+const obWanted = () => (S.advanced ? models.find(m => m.id === S.stt.local_model) : models.find(m => m.recommended));
+const obReady = () => S.stt.provider !== 'local' || !!sttModel()?.downloaded;
+const obDownloading = () => models.find(m => progress[m.id] != null);
+let obQueue = [], obFetching = false;
+// One download at a time, in order: tiny.en is useful only if it lands first.
+async function obFetch(...ids) {
+  obQueue.push(...ids.filter(id => !obQueue.includes(id)));
+  if (obFetching) return;
+  obFetching = true;
+  while (obQueue.length) {
+    const id = obQueue.shift(), m = models.find(x => x.id === id);
+    if (m && !m.downloaded && progress[id] == null) await download(id);
+  }
+  obFetching = false;
+}
+function obStartModel() {
+  if (S.stt.provider !== 'local') return;
+  const want = obWanted();
+  if (S.advanced) {
+    const pick = want?.fits || want?.downloaded ? want : models.find(m => m.recommended);
+    if (pick && S.stt.local_model !== pick.id) { S.stt.local_model = pick.id; save(); }
+    if (pick && !pick.downloaded) obFetch(pick.id);
+    return;
+  }
+  if (!want || want.downloaded) return;
+  const tiny = models.find(m => m.id === 'tiny.en');
+  if (tiny && !models.some(m => m.downloaded)) { local('ob-tiny', '1'); obFetch(tiny.id, want.id); }
+  else obFetch(want.id);
+}
+function obModelLanded(id) {
+  const m = obHinglishModel();
+  if (ob.hinglish && m?.id === id && m.downloaded) {
+    S.language = 'hi';
+    S.translate_to_english = true;
+    syncBound();
+    save();
+    renderLangNote();
+  }
+  if (obStep === 4 && !$('#onboard').hidden) obLangRender();
+  obDropTiny();
+}
+// tiny.en was only for the first practice run: once the real model is here and onboarding is
+// done, it goes, unless the user picked it themselves.
+function obDropTiny() {
+  const want = models.find(m => m.recommended), tiny = models.find(m => m.id === 'tiny.en');
+  if (!local('ob-tiny') || !S.onboarded || !want?.downloaded || !tiny?.downloaded) return;
+  if (S.stt.local_model === 'tiny.en') return local('ob-tiny', null);
+  if (BUSY.includes(dictation.state)) return later('tiny', 5000, obDropTiny);
+  local('ob-tiny', null);
+  invoke('delete_model', { id: 'tiny.en' }).catch(() => {}).then(refreshModels);
+}
+
+// Under the card: how the download is going, with the API option as a link.
+function renderObModel() {
+  if ($('#onboard').hidden) return;
+  const el = $('#obModel'), want = obWanted(), dl = obDownloading();
+  const pct = m => `${Math.round((progress[m.id] || 0) * 100)}%`;
+  const api = h('button', { className: 'link', type: 'button', onclick: () => finishOnboarding('speech') }, 'Use an API instead');
+  if (S.stt.provider !== 'local' || want?.downloaded) fill(el, null);
+  else if (!want) fill(el, 'No speech model fits in the memory free right now. ', api);
+  else if (modelErr[want.id]) fill(el, `Couldn't download ${want.label}: ${modelErr[want.id]} `, h('button', { className: 'link', type: 'button', onclick: () => obFetch(want.id) }, 'Try again'));
+  else if (obReady() && dl) fill(el, `Ready to practise. Getting the full model · `, h('span', { className: 'pct' }, pct(dl)));
+  else fill(el, 'Getting your speech model ready · ', h('span', { className: 'pct' }, dl ? pct(dl) : '0%'), ' ', api);
+  if (obStep === 2) obTryRender();
+}
 
 // ---------- clipboard ----------
 async function copyText(text, btn) {
@@ -1173,16 +1658,7 @@ listen('dictation-state', ({ payload }) => {
   }
   if (payload.state === 'done' || payload.state === 'error') refreshCloud(); // words used went up
   if (payload.state !== 'recording') muted = false;
-  // The practice field fills from the result itself; nothing is pasted during onboarding.
-  const st = $('#obTryState'), res = $('#obResult');
-  st.textContent = payload.state === 'error' ? payload.error || 'Something went wrong. Try again.'
-    : payload.state === 'hint' ? payload.message
-    : payload.state === 'done' ? 'That is what Echotype heard. Try another, or continue.'
-    : payload.state === 'idle' ? 'Say a sentence. Your words show up below.'
-    : `${STATE_LABEL[payload.state]}…`;
-  if (payload.state === 'done' && payload.text) res.textContent = payload.text;
-  $('#obToggle').textContent = payload.state === 'recording' ? 'Stop' : 'Start with a click';
-  if (payload.state === 'idle') renderObModel();
+  obDictation(payload);
 });
 
 // Rust is the source of truth; keep any edit made here that has not been saved yet.
@@ -1201,13 +1677,14 @@ listen('audio-level', ({ payload }) => {
   const bars = $$('#heroMeter i');
   const lvl = Math.max(0, Math.min(1, payload.meter));
   bars.forEach((b, i) => { b.style.transform = `scaleY(${Math.max(0.15, Math.min(1, lvl * METER[i] * (0.75 + Math.random() * 0.5)))})`; });
+  if (orb && dictation.state === 'recording') orb.level(lvl);
 });
 
 listen('model-download', ({ payload: p }) => {
   if (p.error) { delete progress[p.id]; modelErr[p.id] = p.error; renderModels(); renderObModel(); return; }
   if (p.done) {
     delete progress[p.id];
-    refreshModels().then(renderObModel);
+    refreshModels().then(() => { renderObModel(); obModelLanded(p.id); });
     return;
   }
   const frac = p.total ? p.downloaded / p.total : 0;
@@ -1243,7 +1720,7 @@ try {
 }
 isMac = /mac|darwin/i.test(sys.os);
 // No Echotype Cloud in this build: no sign-in, plan or provider anywhere (presets already leave it out).
-if (!sys.cloud) { $('#setupCloud').remove(); $('#obCloud').remove(); }
+if (!sys.cloud) $('#setupCloud').remove();
 // macOS gets the translucent sidebar (windowEffects in tauri.conf.json); elsewhere it stays opaque (D19).
 document.documentElement.dataset.os = isMac ? 'mac' : 'other';
 if (!isMac) for (const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); w.nextNode();) w.currentNode.nodeValue = pc(w.currentNode.nodeValue);
@@ -1277,14 +1754,16 @@ fitZoom();
 // a small set, picked when the window opens. Settings → Advanced can turn it off (`greetings`).
 const PROMPTS = ["What's on the speak list today?", "Let's get going.", 'Ready when you are.', 'What are we writing today?', 'Talk it out, Echotype types it.', 'Say the first sentence.'];
 const prompt = PROMPTS[Math.floor(Math.random() * PROMPTS.length)];
+const firstName = () => (S.display_name || '').trim().split(/\s+/)[0];
+// "Good morning, Aditya." (onboarding previews it as the name is typed).
+function hello() {
+  const h = new Date().getHours(), name = firstName();
+  return `${h >= 5 && h < 12 ? 'Good morning' : h >= 12 && h < 17 ? 'Good afternoon' : h >= 17 && h < 22 ? 'Good evening' : 'Working late'}${name ? `, ${name}` : ''}.`;
+}
 function renderGreeting() {
   const el = $('#greeting'), on = S.greetings !== false;
   el.hidden = !on;
-  if (!on) return;
-  const h = new Date().getHours();
-  const hello = h >= 5 && h < 12 ? 'Good morning' : h >= 12 && h < 17 ? 'Good afternoon' : h >= 17 && h < 22 ? 'Good evening' : 'Working late';
-  const name = (S.display_name || '').trim().split(/\s+/)[0];
-  el.textContent = `${hello}${name ? `, ${name}` : ''}. ${prompt}`;
+  if (on) el.textContent = `${hello()} ${prompt}`;
 }
 
 function renderAll() {
@@ -1317,4 +1796,5 @@ try { (await import('./stats.js')).init({ invoke, listen, h, go, settings: () =>
 catch (e) { console.error('Stats did not load', e); } // the rest of the window still works
 const start = location.hash.slice(1);
 go($(`main > section[data-page="${start}"]`) ? start : 'home');
-if (!S.onboarded) { showOnboarding(true); obStartModel(); obShow(+new URLSearchParams(location.search).get('step') || 1); }
+if (!S.onboarded) startOnboarding(+new URLSearchParams(location.search).get('step') || S.onboard_step || 1);
+else obDropTiny(); // a practice model left from a relaunch mid-download

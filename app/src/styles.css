@@ -577,38 +577,203 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 #cloudAccount input { width: 200px; }
 #cloudAccount input.code { width: 96px; font-variant-numeric: tabular-nums; }
 
-/* First run: a full-window centred column, light headings, one solid pill per step. */
+/* First run: one card on the window's own backdrop (the vibrancy in the app, Ink's desk), five
+   steps inside it and the orb (orb.js) on a canvas over everything, so it can move between the
+   steps' slots and drop out of the card at the end. Motion: things that enter use --ob-ease;
+   UI moves within 300 ms; reduced motion keeps only short fades (end of this file). */
 .onboard {
+  --ob-ease: cubic-bezier(0.23, 1, 0.32, 1);
+  --ob-orb: var(--fg);
+  --ob-desk-fg: var(--fg-3);
   position: fixed;
   inset: 0;
   z-index: 10;
-  background: var(--pane);
-  display: grid;
-  align-items: start;
-  justify-items: center;
-  padding: max(44px, 14vh) 24px 24px;
-  overflow-y: auto;
+  background: var(--side); /* WebKit before Safari 16.2 has no color-mix */
+  background: color-mix(in srgb, var(--side), var(--fg) 4%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 36px 20px 14px;
 }
-.ob-card { width: min(520px, 100%); display: flex; flex-direction: column; max-height: 100%; }
-.ob-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 28px; }
-.ob-steps { list-style: none; display: flex; gap: 16px; padding: 0; margin: 0; color: var(--fg-3); font-size: 12px; }
-.ob-steps li { display: flex; align-items: center; gap: 6px; }
-.ob-steps li::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--switch-off); }
-.ob-steps li.on { color: var(--fg); }
-.ob-steps li.on::before { background: var(--fg); }
-.ob-steps li.done { color: var(--fg-2); }
-.ob-steps li.done::before { background: var(--fg-2); }
-.ob-step { display: flex; flex-direction: column; min-height: 0; }
-.ob-step h2 { font-size: 32px; line-height: 1.2; letter-spacing: -0.02em; font-weight: 400; margin: 0 0 10px; outline: none; text-wrap: balance; }
-.ob-step > .lede { font-size: 15px; line-height: 24px; text-wrap: pretty; }
-.ob-step .group.scroll { overflow-y: auto; max-height: 300px; }
-.ob-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 24px; }
-.ob-foot .btn.primary { height: 36px; padding: 0 18px; border-radius: 18px; }
-.ob-step h2.ob-try { font-size: 28px; display: flex; align-items: center; gap: 0.28em; flex-wrap: wrap; }
-.ob-try kbd { font-size: 0.66em; }
-.ob-result { background: var(--soft); border-radius: var(--r-card); padding: 12px 14px; margin: 0; min-height: 64px; font-size: 14px; white-space: pre-line; }
+:root[data-vibrant] .onboard { background: transparent; }
+.ob-canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 2; color: var(--ob-orb); }
+.ob-card {
+  position: relative;
+  z-index: 1;
+  width: min(680px, 100%);
+  height: min(520px, 100%);
+  flex: none;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  background: var(--pane);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-float);
+  box-shadow: var(--shadow-float), 0 24px 48px -28px rgba(0, 0, 0, 0.22);
+  transition: opacity 260ms ease, transform 260ms var(--ob-ease);
+}
+.ob-card.intro { animation: ob-card-in 420ms var(--ob-ease) both; }
+.ob-card.bye, .ob-card.bye + .ob-model { opacity: 0; transform: scale(0.98); }
+.ob-card.intro + .ob-model { animation: ob-fade 400ms 240ms ease both; }
+.ob-model { transition: opacity 260ms ease; }
+/* A panel or line that appears within a step. */
+.ob-pop { animation: ob-in 240ms var(--ob-ease) both; }
+@keyframes ob-card-in { from { opacity: 0; transform: translateY(12px) scale(0.985); } }
+
+.ob-top { display: flex; align-items: center; justify-content: space-between; height: 48px; padding: 0 14px 0 24px; }
+.ob-dots { list-style: none; display: flex; gap: 6px; margin: 0; padding: 0; }
+.ob-dots li { width: 6px; height: 6px; border-radius: 3px; background: var(--switch-off); transition: width 240ms var(--ob-ease), background-color 240ms ease; }
+.ob-dots li.done { background: var(--fg-3); }
+.ob-dots li.on { width: 18px; background: var(--fg); }
+#obSkip { height: 26px; font-size: 12.5px; }
+
+.ob-stage { position: relative; min-height: 0; }
+.ob-step { position: absolute; inset: 0 40px; display: flex; flex-direction: column; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+/* Centred while it fits, scrolling from the top when it doesn't (a long talk-key note at 720 x 520). */
+.ob-step.center > :first-child { margin-top: auto; }
+.ob-step.center > :last-child { margin-bottom: auto; }
+.ob-step:not([hidden]) { view-transition-name: ob-step; }
+.ob-step h2 { font-size: 28px; line-height: 1.18; letter-spacing: -0.02em; font-weight: 400; margin: 0 0 10px; outline: none; text-wrap: balance; }
+.ob-step .lede { font-size: 14.5px; line-height: 22px; margin: 0 0 14px; text-wrap: pretty; }
+.ob-orb { flex: none; }
+
+/* Steps 1 and 5: centred under a large orb. 2-4: the orb keeps a column on the left. */
+.ob-step.center { align-items: center; text-align: center; }
+.ob-step.center .ob-orb { width: 132px; height: 132px; margin-bottom: 18px; flex: none; }
+.ob-step.center .lede { max-width: 50ch; }
+/* Top-aligned, so a status or tip line appearing below never moves what's above it. */
+.ob-step.split { display: grid; grid-template-columns: 136px minmax(0, 1fr); column-gap: 28px; align-content: start; align-items: start; padding-top: clamp(8px, 7vh, 64px); }
+.ob-step.split .ob-orb { width: 104px; height: 104px; justify-self: center; margin-top: 2px; }
+.ob-step[data-step="4"] { align-content: center; padding-top: 0; }
+/* The footer's "Finish and relaunch" is the relaunch here. */
+#obTalkStatus .btn.primary { display: none; }
+.ob-body { min-width: 0; padding: 2px; margin: -2px; }
+
+.ob-status { min-height: 20px; margin: 0; font-size: 13px; color: var(--fg-2); text-wrap: pretty; }
+.ob-status:empty { visibility: hidden; }
+.ob-status[data-tone="ok"] { color: var(--fg); }
+.ob-status[data-tone="ok"]::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 8px; border-radius: 50%; background: var(--ok); vertical-align: 1px; }
+.ob-status[data-tone="warn"] { color: var(--warn); }
+.ob-pick { display: inline-flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 12.5px; color: var(--fg-2); }
+.ob-pick select { width: 240px; }
+/* Its room is kept while hidden, so the step doesn't shift when it appears. */
+#obMicPickRow[hidden] { display: inline-flex !important; visibility: hidden; }
+.keys { display: inline-flex; gap: 3px; vertical-align: baseline; }
+.ob-say q { color: var(--fg); quotes: "“" "”"; }
+
+/* Step 2: the keys press down with the real ones (hotkey-state). */
+.ob-keys { display: flex; gap: 10px; margin: 2px 0 16px; }
+.ob-keys kbd {
+  font-size: 20px;
+  height: 52px;
+  min-width: 52px;
+  padding: 0 14px;
+  border-radius: 10px;
+  border-bottom-width: 4px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  transition: transform 100ms ease, border-bottom-width 100ms ease, background-color 100ms ease, box-shadow 100ms ease;
+}
+.ob-keys kbd.wide { min-width: 132px; font-size: 15px; justify-content: flex-start; align-items: flex-end; padding-bottom: 8px; }
+.ob-keys.down kbd { transform: translateY(3px); border-bottom-width: 1px; background: var(--selected); box-shadow: none; }
+.ob-result { background: var(--soft); border-radius: var(--r-card); padding: 12px 14px; margin: 0 0 10px; min-height: 48px; font-size: 14px; line-height: 1.5; color: var(--fg); -webkit-user-select: text; user-select: text; }
 .ob-result:empty::before { content: attr(data-empty); color: var(--fg-3); }
-.ob-model { margin: 10px 2px 0; font-size: 12px; color: var(--fg-2); font-variant-numeric: tabular-nums; min-height: 1.4em; }
+.ob-result .w { display: inline-block; animation: ob-word 220ms var(--ob-ease) both; animation-delay: var(--d); }
+@keyframes ob-word { from { opacity: 0; transform: translateY(4px); filter: blur(2px); } }
+.ob-tip { margin: 6px 0 0; font-size: 12.5px; color: var(--fg-2); }
+.ob-watch { display: inline-flex; align-items: center; gap: 6px; margin: 6px 0 0; font-size: 12.5px; color: var(--fg-2); }
+.ob-watch svg { width: 14px; height: 14px; }
+.ob-watch.pulse { animation: ob-watch 1.4s var(--ob-ease) both; }
+@keyframes ob-watch { 0% { opacity: 0; transform: translateY(-4px); } 25% { opacity: 1; transform: translateY(2px); } 45%, 100% { opacity: 1; transform: none; } }
+
+/* Step 3: a small picture of the switch to flip, looping every 2 s. */
+.ob-ax-demo { display: inline-flex; flex-direction: column; gap: 6px; margin: 0 0 12px; padding: 10px 12px; border-radius: var(--r-card); background: var(--soft); font-size: 12px; color: var(--fg-2); }
+.ob-ax-row { display: flex; align-items: center; gap: 8px; min-width: 220px; color: var(--fg); font-size: 13px; }
+.ob-ax-row img { border-radius: 5px; }
+.ob-ax-switch { margin-left: auto; position: relative; width: 26px; height: 15px; border-radius: 8px; background: var(--switch-off); animation: ob-flip-track 2s ease infinite; }
+.ob-ax-switch::before { content: ""; position: absolute; top: 2px; left: 2px; width: 11px; height: 11px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25); animation: ob-flip-knob 2s var(--ob-ease) infinite; }
+@keyframes ob-flip-track { 0%, 38% { background: var(--switch-off); } 50%, 92% { background: var(--accent); } 100% { background: var(--switch-off); } }
+@keyframes ob-flip-knob { 0%, 38% { transform: none; } 50%, 92% { transform: translateX(11px); } 100% { transform: none; } }
+.ob-note { display: flex; align-items: center; gap: 12px; margin-top: 12px; padding: 10px 12px; border-radius: var(--r-card); background: var(--soft); font-size: 12.5px; color: var(--fg-2); animation: ob-in 240ms var(--ob-ease) both; }
+.ob-note .btn { flex: none; }
+#obAxTry .ob-say { font-size: 14.5px; line-height: 22px; color: var(--fg-2); margin: 0 0 10px; }
+#obAxTry .btn { margin-top: 12px; }
+
+/* Steps 4-5: settings rows inside the card. */
+.ob-group { width: 100%; text-align: left; }
+.ob-group .row { min-height: 40px; padding: 8px 12px; gap: 12px; }
+.ob-group .row + .row::before { left: 12px; right: 12px; }
+.ob-group input[type="text"] { width: 168px; }
+.ob-group select { width: 200px; }
+.ob-hello { min-height: 1.4em; }
+.ob-chips { display: flex; flex-wrap: wrap; gap: 4px; flex: none; }
+.ob-chips label { position: relative; }
+.ob-chips input { position: absolute; inset: 0; opacity: 0; margin: 0; }
+.ob-chips span { display: block; padding: 3px 9px; border-radius: 12px; border: 1px solid var(--outline); font-size: 12px; color: var(--fg-2); transition: background-color var(--dur) ease, color var(--dur) ease, border-color var(--dur) ease; }
+.ob-chips label:hover span { background: var(--hover); }
+.ob-chips input:checked + span { background: var(--solid); border-color: transparent; color: var(--solid-ink); }
+.ob-chips input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 1px; }
+#obSoundRow { flex-wrap: wrap; }
+.ob-recap { list-style: none; display: grid; grid-template-columns: repeat(2, minmax(0, auto)); justify-content: center; gap: 8px 28px; margin: 6px 0 18px; padding: 0; font-size: 13px; color: var(--fg-2); text-align: left; }
+.ob-recap li { display: flex; align-items: center; gap: 10px; }
+.ob-recap .keys { min-width: 64px; justify-content: flex-end; color: var(--fg); }
+.ob-recap .times { font-size: 12px; color: var(--fg-2); margin-left: 2px; }
+.ob-step[data-step="5"] .ob-group { max-width: 460px; }
+
+.ob-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; height: 64px; padding: 0 16px 0 14px; }
+.ob-foot-end { display: flex; align-items: center; gap: 6px; }
+.ob-foot .btn.primary { height: 34px; min-width: 104px; padding: 0 18px; border-radius: 17px; }
+.ob-foot .btn.primary:active { transform: scale(0.97); }
+.ob-foot .btn { transition: background var(--dur) ease, border-color var(--dur) ease, opacity var(--dur) ease, transform 120ms ease; }
+
+.ob-model { position: relative; z-index: 1; min-height: 18px; margin: 0; font-size: 12px; color: var(--ob-desk-fg); font-variant-numeric: tabular-nums; text-align: center; }
+.ob-model .pct { color: inherit; min-width: 0; }
+.ob-model .link { all: unset; color: inherit; text-decoration: underline; text-underline-offset: 2px; margin-left: 6px; }
+.ob-model .link:hover { color: var(--fg); }
+.ob-model .link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+
+/* Entering a step: children rise 10 px and fade in, 35 ms apart. Leaving: up 6 px and out, 140 ms.
+   With View Transitions the old step is a snapshot; without, .leave runs on it first. */
+.ob-step.enter > *, .ob-step.enter > .ob-body > * { animation: ob-in 240ms var(--ob-ease) both; animation-delay: calc(60ms + var(--i, 0) * 35ms); }
+.ob-step.enter > .ob-orb { animation: none; }
+.ob-step.leave { animation: ob-out 140ms ease-in both; }
+@keyframes ob-in { from { opacity: 0; transform: translateY(10px); } }
+@keyframes ob-out { to { opacity: 0; transform: translateY(-6px); } }
+:root.ob-back .ob-step.enter > *, :root.ob-back .ob-step.enter > .ob-body > * { animation-name: ob-in-back; }
+:root.ob-back .ob-step.leave { animation-name: ob-out-back; }
+@keyframes ob-in-back { from { opacity: 0; transform: translateY(-10px); } }
+@keyframes ob-out-back { to { opacity: 0; transform: translateY(6px); } }
+/* Only the step animates: the rest of the window (and the orb's canvas) stays live. */
+:root.ob-on { view-transition-name: none; }
+::view-transition-group(ob-step) { animation: none; }
+::view-transition-old(ob-step) { animation: ob-out 140ms ease-in both; }
+::view-transition-new(ob-step) { animation: none; }
+:root.ob-back::view-transition-old(ob-step) { animation-name: ob-out-back; }
+
+/* The window's minimum (720 x 520): a shorter card, a smaller orb, tighter type. */
+@media (max-height: 640px) {
+  .onboard { padding-top: 34px; gap: 8px; }
+  .ob-top { height: 42px; }
+  .ob-foot { height: 56px; }
+  .ob-step h2 { font-size: 24px; margin-bottom: 8px; }
+  .ob-step .lede { font-size: 13.5px; line-height: 20px; margin-bottom: 10px; }
+  .ob-step.center .ob-orb { width: 96px; height: 96px; margin-bottom: 12px; }
+  .ob-step.split { grid-template-columns: 112px minmax(0, 1fr); column-gap: 20px; }
+  .ob-step.split .ob-orb { width: 84px; height: 84px; }
+  .ob-keys { margin-bottom: 12px; }
+  .ob-keys kbd { height: 44px; min-width: 44px; font-size: 17px; }
+  .ob-keys kbd.wide { min-width: 112px; font-size: 13px; padding-bottom: 6px; }
+  .ob-result { min-height: 40px; padding: 9px 12px; }
+  .ob-ax-demo { margin-bottom: 8px; }
+  .ob-group .row { min-height: 36px; padding: 6px 12px; }
+  .ob-recap { margin-bottom: 12px; gap: 6px 24px; }
+}
+@media (max-width: 620px) {
+  .ob-step { inset: 0 24px; }
+  .ob-step.split { grid-template-columns: 1fr; }
+  .ob-step.split .ob-orb { width: 56px; height: 56px; justify-self: start; margin-bottom: 8px; }
+  .ob-recap { grid-template-columns: 1fr; }
+}
 
 /* A narrow window (the browser preview; the app's minimum is 720px): icon-only sidebar. */
 @media (max-width: 620px) {
@@ -626,14 +791,23 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
   #cloudAccount .actions input { flex: 1; min-width: 0; }
   section > .seg { flex-wrap: wrap; }
   section > .seg span { white-space: nowrap; }
-  .ob-step h2 { font-size: 26px; }
 }
 
 /* Reduced motion keeps every state change, minus the movement. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; }
   .working::after { animation: none; border-top-color: var(--line-strong); }
+  /* Onboarding: 150 ms fades only; no rise, stagger, word reveal, pulse or looping switch. */
+  .ob-card.intro, .ob-step.enter > *, .ob-step.enter > .ob-body > *, .ob-note, .ob-watch.pulse, .ob-pop { animation: ob-fade 150ms ease both !important; }
+  .ob-step.leave, .ob-result .w { animation: none !important; }
+  .ob-ax-switch, .ob-ax-switch::before { animation: none; }
+  .ob-ax-switch { background: var(--accent); }
+  .ob-ax-switch::before { transform: translateX(11px); }
+  .ob-card { transition: opacity 150ms ease !important; }
+  .ob-card.bye { transform: none; }
+  .ob-keys.down kbd { transform: none; }
 }
+@keyframes ob-fade { from { opacity: 0; } }
 
 /* Meetings (meetings.js): a start card, the list, and one meeting's transcript. */
 #meetings .group > .row > input[type="text"] { flex: 1; }

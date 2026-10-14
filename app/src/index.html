@@ -379,68 +379,121 @@
     </section>
   </main>
 
-  <!-- First run -->
-  <div class="onboard" id="onboard" data-tauri-drag-region role="dialog" aria-modal="true" aria-labelledby="obTitle" hidden>
-    <div class="ob-card">
-      <div class="ob-top">
-        <ol class="ob-steps" id="obSteps"><li>Microphone</li><li>Try it</li><li>Paste</li><li>Extras</li></ol>
-        <button class="btn quiet" id="obSkip" type="button">Set up later</button>
+  <!-- First run: five steps in one card, with the orb (orb.js) moving between their .ob-orb slots. -->
+  <div class="onboard" id="onboard" data-tauri-drag-region role="dialog" aria-modal="true" aria-labelledby="obT1" hidden>
+    <div class="ob-card" data-tauri-drag-region>
+      <div class="ob-top" data-tauri-drag-region>
+        <ol class="ob-dots" id="obDots" aria-label="Setup, step 1 of 5"><li></li><li></li><li></li><li></li><li></li></ol>
+        <button class="btn quiet" id="obSkip" type="button">Skip setup</button>
       </div>
 
-      <div class="ob-step" data-step="1">
-        <h2 id="obTitle" tabindex="-1">Let Echotype hear you</h2>
-        <p class="lede">Echotype listens only while you hold the shortcut. Your speech model is downloading meanwhile, and it runs on this Mac.</p>
-        <div class="group" id="obMic"></div>
-        <p class="ob-model" id="obModel" aria-live="polite"></p>
-        <div class="ob-foot"><button class="btn quiet" id="obApi" type="button">Use an API instead</button><button class="btn primary" data-next type="button">Continue</button></div>
+      <div class="ob-stage">
+        <section class="ob-step center" data-step="1" aria-labelledby="obT1">
+          <div class="ob-orb" aria-hidden="true"></div>
+          <h2 id="obT1" tabindex="-1">Hold a key. Talk. Let&nbsp;go.</h2>
+          <p class="lede">Echotype types what you say, in any app. First it needs your microphone. It listens only while you hold the key, and your voice never leaves this Mac.</p>
+          <p class="ob-status" id="obMicState" aria-live="polite"></p>
+          <label class="ob-pick" id="obMicPickRow" hidden><span>Microphone</span><select id="obMicPick"></select></label>
+        </section>
+
+        <section class="ob-step split" data-step="2" aria-labelledby="obT2" hidden>
+          <div class="ob-orb" aria-hidden="true"></div>
+          <div class="ob-body">
+            <h2 id="obT2" tabindex="-1">Try it</h2>
+            <p class="lede ob-say" id="obSay"></p>
+            <div class="ob-keys" id="obKeys" aria-hidden="true"></div>
+            <p class="ob-result" id="obResult" data-empty="Your words show up here, not in another app."></p>
+            <p class="ob-status" id="obTryState" aria-live="polite"></p>
+            <p class="ob-tip" id="obTip" hidden></p>
+            <p class="ob-watch" id="obWatch" hidden><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v9.5M4.5 9 8 12.5 11.5 9"/></svg>Watch the bottom of your screen</p>
+          </div>
+        </section>
+
+        <section class="ob-step split" data-step="3" aria-labelledby="obT3" hidden>
+          <div class="ob-orb" aria-hidden="true"></div>
+          <div class="ob-body">
+            <h2 id="obT3" tabindex="-1">Let Echotype type for&nbsp;you</h2>
+            <p class="lede">With Accessibility on, Echotype presses ⌘V where your cursor is, then puts your clipboard back. It doesn't read your screen or your keys.</p>
+            <div class="ob-ax" id="obAxAsk">
+              <div class="ob-ax-demo" aria-hidden="true">
+                <span class="ob-ax-path">Privacy &amp; Security › Accessibility</span>
+                <span class="ob-ax-row"><img src="icon.svg" alt="" width="20" height="20" /><span>Echotype</span><i class="ob-ax-switch"></i></span>
+              </div>
+              <p class="ob-status" id="obAxState" aria-live="polite"></p>
+              <div class="ob-note" id="obStale" hidden>
+                <span>Already switched on? macOS sometimes keeps an old copy after updates.</span>
+                <button class="btn" id="obReset" type="button">Reset and ask again</button>
+              </div>
+            </div>
+            <div class="ob-ax" id="obAxTry" hidden>
+              <p class="ob-say">Now try it for real: click into any text box and <span id="obTryKeys"></span>.</p>
+              <p class="ob-status" id="obPasteState" aria-live="polite"></p>
+              <button class="btn" id="obTextEdit" type="button">Open TextEdit</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="ob-step split" data-step="4" aria-labelledby="obT4" hidden>
+          <div class="ob-orb" aria-hidden="true"></div>
+          <div class="ob-body">
+            <h2 id="obT4" tabindex="-1">Make it yours</h2>
+            <div class="group ob-group">
+              <label class="row"><span class="row-text"><span class="row-title">What should I call you?</span><span class="row-desc ob-hello" id="obHello" aria-live="polite"></span></span>
+                <input type="text" id="obName" autocomplete="given-name" spellcheck="false" placeholder="Your first name" maxlength="40" /></label>
+              <div class="row"><span class="row-text"><span class="row-title" id="obLangLabel">I speak</span><span class="row-desc" id="obLangDesc"></span></span>
+                <span class="seg" role="radiogroup" aria-labelledby="obLangLabel">
+                  <label><input type="radio" name="obLang" value="en" /><span>English</span></label>
+                  <label><input type="radio" name="obLang" value="hinglish" /><span>Hindi + English</span></label>
+                </span></div>
+              <label class="row" id="obCleanRow"><span class="row-text"><span class="row-title">Clean up my words</span><span class="row-desc">Drops the ums and keeps your corrections: “um so four, no wait, five” becomes “5”.</span></span>
+                <input type="checkbox" class="switch" id="obClean" />
+                <select id="obCleanup" aria-label="Cleanup" hidden>
+                  <option value="off">Off for now</option>
+                  <option value="local">A local server (Ollama, LM Studio)</option>
+                  <option value="key">My own API key</option>
+                </select></label>
+              <div class="row" id="obSoundRow"><span class="row-text"><span class="row-title" id="obSoundLabel">Sounds</span><span class="row-desc">Click one to hear it.</span></span>
+                <span class="ob-chips" id="obSounds" role="radiogroup" aria-labelledby="obSoundLabel"></span></div>
+              <label class="row" id="obFadeRow"><span class="row-text"><span class="row-title">Fade the pill when you're not near it</span><span class="row-desc">The ball at the bottom of the screen dims until your pointer comes close.</span></span>
+                <input type="checkbox" class="switch" data-bind="pill_fade" /></label>
+            </div>
+          </div>
+        </section>
+
+        <section class="ob-step center" data-step="5" aria-labelledby="obT5" hidden>
+          <div class="ob-orb" aria-hidden="true"></div>
+          <h2 id="obT5" tabindex="-1">You're set</h2>
+          <ul class="ob-recap" id="obRecap"></ul>
+          <div class="group ob-group">
+            <label class="row" id="obAutostartRow"><span class="row-text"><span class="row-title">Launch at login</span><span class="row-desc">Echotype starts quietly in the menu bar.</span></span>
+              <input type="checkbox" class="switch" id="obAutostart" checked /></label>
+            <label class="row" id="obTalkRow"><span class="row-text"><span class="row-title">Talk key</span><span class="row-desc">Optional: dictate with one key as well, held on its own.</span><span class="row-desc" id="obTalkStatus" role="status"></span></span>
+              <select id="obTalk" aria-label="Talk key">
+                <option value="accelerator">None</option>
+                <option value="fn">fn (Globe)</option>
+                <option value="left_control">Left ⌃ Control</option>
+                <option value="right_control">Right ⌃ Control</option>
+                <option value="left_option">Left ⌥ Option</option>
+                <option value="right_option">Right ⌥ Option</option>
+                <option value="left_command">Left ⌘ Command</option>
+                <option value="right_command">Right ⌘ Command</option>
+                <option value="left_shift">Left ⇧ Shift</option>
+                <option value="right_shift">Right ⇧ Shift</option>
+              </select></label>
+          </div>
+        </section>
       </div>
 
-      <div class="ob-step" data-step="2" hidden>
-        <h2 class="ob-try" id="obTry" tabindex="-1"></h2>
-        <p class="lede" id="obTryState" aria-live="polite">Say a sentence. Your words show up below.</p>
-        <p class="ob-result text" id="obResult" data-empty="Your words show up here"></p>
-        <div class="ob-foot"><button class="btn quiet" id="obToggle" type="button">Start with a click</button><button class="btn primary" data-next id="obTryNext" type="button">Continue</button></div>
-      </div>
-
-      <div class="ob-step" data-step="3" hidden>
-        <h2 tabindex="-1">Let Echotype type for you</h2>
-        <p class="lede">With Accessibility on, Echotype presses ⌘V in the app you are using. Without it, your text waits on the clipboard.</p>
-        <div class="group" id="obPerms"></div>
-        <div class="ob-foot"><button class="btn quiet" data-recheck type="button">Check again</button><button class="btn primary" data-next id="obPasteNext" type="button">Continue</button></div>
-      </div>
-
-      <div class="ob-step" data-step="4" hidden>
-        <h2 tabindex="-1">A few extras</h2>
-        <p class="lede">All optional. You can change them in Settings.</p>
-        <div class="group">
-          <label class="row" id="obTalkRow"><span class="row-text"><span class="row-title">Talk key</span><span class="row-desc">Dictate with one key as well as the shortcut.</span><span class="row-desc" id="obTalkStatus" role="status"></span></span>
-            <select id="obTalk" aria-label="Talk key">
-              <option value="accelerator">Shortcut only</option>
-              <option value="fn">fn (Globe)</option>
-              <option value="left_control">Left ⌃ Control</option>
-              <option value="right_control">Right ⌃ Control</option>
-              <option value="left_option">Left ⌥ Option</option>
-              <option value="right_option">Right ⌥ Option</option>
-              <option value="left_command">Left ⌘ Command</option>
-              <option value="right_command">Right ⌘ Command</option>
-              <option value="left_shift">Left ⇧ Shift</option>
-              <option value="right_shift">Right ⇧ Shift</option>
-            </select></label>
-          <label class="row"><span class="row-text"><span class="row-title">Cleanup</span><span class="row-desc">Removes fillers and fixes punctuation with a language model.</span></span>
-            <select id="obCleanup" aria-label="Cleanup">
-              <option value="off">Off for now</option>
-              <option value="local">Local server (Ollama, LM Studio)</option>
-              <option value="cloud" id="obCloud">Echotype Cloud</option>
-              <option value="key">My own API key</option>
-            </select></label>
-          <label class="row" id="obFadeRow"><span class="row-text"><span class="row-title">Fade the pill when you're not near it</span><span class="row-desc">The ball at the bottom of the screen dims until your pointer comes close.</span></span>
-            <input type="checkbox" class="switch" data-bind="pill_fade" /></label>
-          <label class="row" id="obAutostartRow"><span class="row-text"><span class="row-title">Launch at login</span><span class="row-desc" id="obAutostartDesc">Echotype starts quietly in the menu bar.</span></span>
-            <input type="checkbox" class="switch" id="obAutostart" checked /></label>
-        </div>
-        <div class="ob-foot"><span></span><button class="btn primary" id="obDone" type="button">Finish</button></div>
+      <div class="ob-foot">
+        <button class="btn quiet" id="obBack" type="button">Back</button>
+        <span class="ob-foot-end">
+          <button class="btn quiet" id="obAlt" type="button" hidden></button>
+          <button class="btn primary" id="obNext" type="button">Continue</button>
+        </span>
       </div>
     </div>
+    <p class="ob-model" id="obModel" aria-live="polite"></p>
+    <canvas class="ob-canvas" id="obCanvas" aria-hidden="true"></canvas>
   </div>
 </body>
 </html>
