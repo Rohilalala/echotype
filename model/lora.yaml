@@ -1,0 +1,23 @@
+# mlx_lm.lora config for the Echotype cleanup model.
+# Run from model/:  .venv/bin/mlx_lm.lora -c lora.yaml 2>&1 | tee out/train.log
+# Then fuse + quantize: see train.sh.
+model: Qwen/Qwen2.5-1.5B-Instruct   # Apache-2.0
+train: true
+data: out/data                     # train.jsonl / valid.jsonl from gen.py (chat "messages" format)
+fine_tune_type: lora
+mask_prompt: true                  # loss on the cleaned text only
+num_layers: -1                     # all 28 layers
+lora_parameters: {rank: 16, scale: 20.0, dropout: 0.0}
+optimizer: adamw
+batch_size: 16
+iters: 1500                        # ~0.8 epoch; val loss flattens by ~800 (v1 run)
+learning_rate: 5.0e-5
+lr_schedule: {name: cosine_decay, warmup: 100, warmup_init: 1.0e-7, arguments: [5.0e-5, 1500, 5.0e-6]}
+max_seq_length: 512                # longest example is ~330 tokens
+grad_checkpoint: true              # keeps peak RAM low on a shared 24 GB machine
+val_batches: 20
+steps_per_report: 25
+steps_per_eval: 200
+save_every: 500
+adapter_path: out/adapters
+seed: 0

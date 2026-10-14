@@ -1,0 +1,6 @@
+[project]
+name = "echotype-cleaner"
+version = "0.1.0"
+description = "Training and eval scripts for Echotype's dictation-cleanup model"
+requires-python = ">=3.11"
+dependencies = ["mlx==0.32.3", "mlx-lm==0.32.0"]
