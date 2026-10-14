@@ -54,7 +54,8 @@ Set up Echotype (https://github.com/Rohilalala/echotype) on this computer.
 1. Install what's missing: Rust (rustup), CMake and Node 20+. A Mac needs macOS 13 or later.
    On Linux also install
    libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev libxdo-dev.
-2. Clone the repo, then in app/ run `npm install` and `npm run tauri build`.
+2. Clone the repo, then in app/ run `npm install`, on a Mac `scripts/build-llama-server.sh`,
+   and `npm run tauri build`.
 3. Install the built app (macOS: copy Echotype.app from
    app/src-tauri/target/release/bundle/macos to /Applications) and open it.
 4. Check how much memory is free. In Echotype's Speech model page, download the model it
@@ -74,10 +75,11 @@ Don't load any local language model unless I ask. If I want cleanup, ask me whic
 git clone https://github.com/Rohilalala/echotype
 cd echotype/app
 npm install
+scripts/build-llama-server.sh    # Mac only: the runner for Echotype's cleanup model
 npm run tauri build
 ```
 
-Needs Rust, CMake and Node 20+, and macOS 13 or later on a Mac. Transcribe a file without opening the window:
+Needs Rust, CMake and Node 20+, and macOS 13 or later on a Mac. `build-llama-server.sh` builds a pinned llama.cpp release (MIT) into `src-tauri/binaries/`, which the Mac build bundles. Transcribe a file without opening the window:
 
 ```sh
 echotype --transcribe note.opus
@@ -138,25 +140,28 @@ Turbo models can't translate, so with translation on Echotype switches to a mult
 
 ### Echotype's own cleanup model
 
-A small cleanup model trained for Echotype: Qwen2.5-1.5B-Instruct (Apache-2.0) with a LoRA fine-tune on generated pairs of messy dictation and the text the speaker meant to type, then quantized to 4-bit for MLX. It removes fillers, applies "no wait" corrections, spells your dictionary words and formats spoken lists, all on your Mac.
+A small cleanup model trained for Echotype: Qwen2.5-1.5B-Instruct (Apache-2.0) with a LoRA fine-tune on generated pairs of messy dictation and the text the speaker meant to type, then quantized to a 4-bit GGUF (Q4_K_M). It removes fillers, applies "no wait" corrections, spells your dictionary words and formats spoken lists, all on your Mac.
 
 On the 198 hand-written test cases in `model/eval/handwritten.jsonl`, measured on an M5 Pro:
 
 | | Exact match | Word error rate | Checks passed |
 |---|---|---|---|
-| Echotype model | 70.7% | 6.1% | 93.9% |
+| Echotype model | 70.7% | 6.5% | 94.9% |
 | Same base model, prompted | 7.1% | 42.6% | 35.4% |
 
-It answers in about 94 ms on average and uses about 1 GB of memory. Its weak spot is translating Hinglish to English, where it can drop a negation and flip the meaning, so check those results. Style and custom instructions are not used with this model, since it was trained on one short prompt, and it does not write meeting summaries.
+It answers in about 100 ms on average and uses about 1.2 GB of memory. Its weak spot is translating Hinglish to English, where it can drop a negation and flip the meaning, so check those results. Style and custom instructions are not used with this model, since it was trained on one short prompt, and it does not write meeting summaries.
 
-The weights are not distributed yet, so you train them yourself. From `model/` (needs [uv](https://docs.astral.sh/uv/) and an Apple silicon Mac with about 10 GB of free memory; training took 35 to 56 minutes on an M5 Pro):
+It runs inside Echotype: pick **Echotype model (local)** as the cleanup provider and Echotype starts it on your Mac when needed, through a bundled llama.cpp `llama-server` that only Echotype can talk to. There is nothing to install or start.
+
+The weights are not distributed yet, so you train them yourself. From `model/` (needs [uv](https://docs.astral.sh/uv/) and an Apple silicon Mac with about 10 GB of free memory; training took 35 to 56 minutes on an M5 Pro), then quantize with llama.cpp from `app/scripts/build-llama-server.sh`:
 
 ```sh
-sh train.sh                      # generate data, LoRA train, fuse, quantize to out/fused-4bit, evaluate
-.venv/bin/mlx_lm.server --model out/fused-4bit --host 127.0.0.1 --port 8899
+sh train.sh                      # generate data, LoRA train, fuse, evaluate, write out/echotype-clean-f16.gguf
+L=../app/src-tauri/target/llama.cpp/build-arm64
+cmake --build $L --target llama-quantize
+$L/bin/llama-quantize out/echotype-clean-f16.gguf \
+  ~/Library/Application\ Support/app.echotype.desktop/models/echotype-clean-q4_k_m.gguf Q4_K_M
 ```
-
-Then pick **Echotype model (local)** as the cleanup provider. `.venv/bin/python serve.py --model out/fused-4bit` checks the running server with a few sample requests. `train.sh` also builds a GGUF for Ollama, but only the Echotype model provider sends the prompt the model was trained on.
 
 ## Meeting notes
 
