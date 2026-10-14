@@ -1310,6 +1310,24 @@ pub fn run() {
                     emit_state(&h, card(&s, text, None, None));
                 });
             }
+            // On-screen checks: listening (with a made-up voice level), thinking, then the card,
+            // without a microphone, a key press or a paste.
+            if std::env::var_os("ECHOTYPE_TEST_DEMO").is_some() {
+                let (h, s) = (app.handle().clone(), s.clone());
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(2));
+                    emit_state(&h, DictationState { state: "recording", ..Default::default() });
+                    for i in 0..50 {
+                        let meter = (0.35 + 0.3 * (i as f32 / 3.0).sin()).clamp(0.0, 1.0);
+                        let _ = h.emit("audio-level", audio::Level { meter, ..Default::default() });
+                        std::thread::sleep(Duration::from_millis(60));
+                    }
+                    emit_state(&h, DictationState { state: "transcribing", ..Default::default() });
+                    std::thread::sleep(Duration::from_millis(1500));
+                    *lock(&state(&h).last_output) = Some("Let's move the standup to 10:30 tomorrow.".into());
+                    emit_state(&h, card(&s, "Let's move the standup to 10:30 tomorrow.".into(), Some("Nowhere to paste".into()), None));
+                });
+            }
             std::thread::spawn(move || {
                 stt::warm_up(&s);
                 llm::apply(&s);
