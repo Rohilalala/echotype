@@ -28,6 +28,9 @@ use tauri::{AppHandle, Emitter, Listener, Manager, RunEvent, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
 
+/// Below this much rise above the room (dB) a clip is noise, not speech (normal speech is 30-45).
+// ponytail: one threshold from the meter's dB stats; tune with recorded noise clips if it bites.
+const NOISE_SNR_DB: f32 = 15.0;
 const MIN_SAMPLES: usize = audio::RATE as usize * 3 / 10; // under 0.3 s there is nothing to transcribe
 /// A recording this long stops itself and is transcribed as usual (toggle mode left on, a stuck key).
 // ponytail: the whole clip stays in memory, ~460 MB at 30 min of 48 kHz f32 plus the 16 kHz copy;
@@ -330,7 +333,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                         continue;
                     }
                     let warning = l.lost.load(Ordering::SeqCst).then(|| "Microphone disconnected. Transcribed what was captured.".to_string());
-                    let clip = Clip { quality: st.quality(), muted_seen: st.muted_seen(), warning, speaking_ms: st.speaking_ms() };
+                    let clip = Clip { quality: st.quality(), muted_seen: st.muted_seen(), warning, speaking_ms: st.speaking_ms(), snr_db: st.floor_and_speech().map(|(floor, speech)| speech - floor) };
                     drop(st);
                     process(&app, pcm, busy.clone(), clip, true);
                 }
@@ -392,6 +395,8 @@ struct Clip {
     warning: Option<String>,
     /// Recording time minus the silence around the speech, for words per minute.
     speaking_ms: Option<u64>,
+    /// How far the loudest part rose above the room (dB): low means noise, not a voice.
+    snr_db: Option<f32>,
 }
 
 /// Clears the busy flag when dropped, so even a panicking worker can't leave dictation stuck.
@@ -434,7 +439,8 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
         *lock(&state(&app).last_failed) = failed.then_some(pcm);
         let ev = match result {
             Err(e) => DictationState { state: "error", action: error_action(&e), error: Some(e), retry: true, ..Default::default() },
-            Ok(out) if out.text.is_empty() => {
+            // Whisper invents "Thank you." and the like from noise; with no voice above the room, it's noise.
+            Ok(out) if out.text.is_empty() || (cleanup::whisper_filler(&out.raw) && clip.snr_db.is_some_and(|d| d < NOISE_SNR_DB)) => {
                 hint(if clip.muted_seen { "No audio. Check your mic" } else { "Didn't catch that" }, clip.muted_seen.then_some("microphone"))
             }
             Ok(out) => {

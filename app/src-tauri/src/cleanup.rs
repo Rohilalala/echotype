@@ -190,6 +190,15 @@ pub fn lost_a_number(raw: &str, cleaned: &str) -> bool {
     })
 }
 
+/// What whisper writes for noise or silence ("Thank you.", "Thanks for watching!"): its training
+/// subtitles. Dropped only when the clip also had no voice in it (lib.rs NOISE_SNR_DB).
+pub fn whisper_filler(text: &str) -> bool {
+    const PHRASES: [&str; 12] = ["thank you", "thank you very much", "thanks", "thanks for watching", "thank you for watching", "thank you so much for watching", "please subscribe", "you", "bye", "music", "applause", "subtitles by the amaraorg community"];
+    let t: String = text.to_lowercase().chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
+    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    PHRASES.contains(&t.as_str())
+}
+
 /// Nothing but filler ("um", "uh, you know", "Hmm."): what the Echotype model rightly answers with
 /// nothing. "No", "yes", "nope" and "ok" are answers, not filler.
 pub fn only_filler(text: &str) -> bool {
@@ -407,6 +416,16 @@ mod tests {
         for word in ["No.", "Yes.", "Nope.", "OK", "Bye."] {
             let o = after_stt(&s, word.into(), 1, None, false, true, || {}, |_, _| Ok(String::new()));
             assert_eq!(o.text, word);
+        }
+    }
+
+    #[test]
+    fn whisper_noise_phrases_are_recognised() {
+        for t in ["Thank you.", "thank you", " Thanks for watching! ", "You", "[Music]".trim_matches(['[', ']'])] {
+            assert!(whisper_filler(t), "{t}");
+        }
+        for t in ["Thank you, Priya.", "Thank you for the notes.", "Yes", "No thanks, I'm good."] {
+            assert!(!whisper_filler(t), "{t}");
         }
     }
 
