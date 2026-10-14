@@ -113,7 +113,7 @@ const box = { x: W / 2 - 5, y: H - 21, w: 10, h: 10, r: 5 };
 const hash = i => { const h = Math.sin(i * 12.9898) * 43758.5453; return h - Math.floor(h); };
 // Per particle: position, velocity, look, and its own stiffness (a little uneven, so the swarm flows).
 const P = Array.from({ length: N }, (_, i) => ({ x: W / 2, y: H - 16, vx: 0, vy: 0, r: 0.4, a: 0, w: 0.1, k: 380 + 260 * hash(i + 1) }));
-let alpha = 0.35, level = 0, clockL = 0, clockT = 0, last = 0, raf = 0, prevOrb = null;
+let alpha = 0.35, level = 0, clockL = 0, clockT = 0, last = 0, raf = 0, prevOrb = null, helloAt = -1e9;
 
 const follow = (v, to, dt, ms) => (still ? to : v + (to - v) * (1 - Math.exp(-dt / ms)));
 
@@ -183,7 +183,8 @@ function frame(now) {
   const ball = idle || pill.classList.contains('collapse');
   for (const [k, to] of [['x', b.x], ['y', b.y], ['w', b.width], ['h', b.height], ['r', card ? 10 : Math.min(b.height / 2, b.width / 2, 18)]]) box[k] = follow(box[k], to, dt, 70);
   // Idle, the ball fades back unless the cursor is near it (or holding it).
-  const want = idle && view && view.fade !== false && !view.near ? 0.35 : 1;
+  const hello = now - helloAt < 1400; // onboarding just finished: the ball says hello at full strength
+  const want = idle && view && view.fade !== false && !view.near && !hello ? 0.35 : 1;
   alpha = follow(alpha, want, dt, 140);
   level = follow(level, cur.state === 'recording' ? meter : 0, dt, 70);
   if (!still) {
@@ -247,11 +248,18 @@ function frame(now) {
     g.fill();
   }
 
-  const settled = !orb && !moving && Math.abs(box.w - b.width) < 0.1 && Math.abs(box.h - b.height) < 0.1 && Math.abs(box.x - b.x) < 0.1 && Math.abs(box.y - b.y) < 0.1 && Math.abs(alpha - want) < 0.005;
+  const settled = !orb && !hello && !moving && Math.abs(box.w - b.width) < 0.1 && Math.abs(box.h - b.height) < 0.1 && Math.abs(box.x - b.x) < 0.1 && Math.abs(box.y - b.y) < 0.1 && Math.abs(alpha - want) < 0.005;
   raf = settled ? 0 : requestAnimationFrame(frame);
 }
 
 render();
+
+// The end of onboarding (main.js): the ball pulses once, so the eye finds it.
+listen('pill-hello', () => {
+  helloAt = performance.now();
+  if (!still) for (const q of P) { const dx = q.x - (box.x + box.w / 2), dy = q.y - (box.y + box.h / 2), d = Math.hypot(dx, dy) || 1; q.vx += (dx / d) * 45; q.vy += (dy / d) * 45; }
+  kick();
+});
 
 // A click counts only when the button goes down and up on the capsule (D1). pill.rs lets the
 // mouse through to this window only over the capsule's hit area (24x22 around the idle ball),
