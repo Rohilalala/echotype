@@ -713,8 +713,13 @@ pub fn recording() -> bool {
     lock(&LIVE).as_ref().is_some_and(|l| l.capture.is_some())
 }
 
-pub fn menu_label() -> &'static str {
-    if recording() { "Stop meeting notes" } else { "Start meeting notes" }
+/// "Start notes · Zoom call" while a detected call is on offer (calls.rs).
+pub fn menu_label() -> String {
+    match crate::calls::offered_title() {
+        _ if recording() => "Stop meeting notes".into(),
+        Some(title) => format!("Start notes · {title}"),
+        None => "Start meeting notes".into(),
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -735,7 +740,7 @@ fn emit(app: &AppHandle, id: &str, state: &str) {
 pub fn toggle(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
-        let res = if recording() { stop(&app) } else { start(&app, None).map(|_| ()) };
+        let res = if recording() { stop(&app) } else { start(&app, crate::calls::offered_title()).map(|_| ()) };
         if let Err(e) = res {
             crate::emit_state(&app, crate::DictationState { state: "error", error: Some(e), ..Default::default() });
         }
@@ -811,7 +816,7 @@ pub fn status() -> serde_json::Value {
     serde_json::json!({ "live": live, "screen_recording": capture::screen_recording_allowed(), "download_mb": download_mb })
 }
 
-fn refresh_tray(app: &AppHandle, elapsed: Option<Duration>) {
+pub(crate) fn refresh_tray(app: &AppHandle, elapsed: Option<Duration>) {
     let title = elapsed.map(|e| format!("Meeting · {}", clock(e.as_secs_f32())));
     if let Some(tray) = app.tray_by_id("main") {
         let _ = tray.set_title(title.as_deref());

@@ -62,6 +62,8 @@ const DEBOUNCE: Duration = Duration::from_millis(400);
 pub const HIDE_FOR: Duration = Duration::from_secs(3600);
 /// The card's countdown ring (overlay.html runs the same 6 s).
 const CARD_FOR: u64 = 6000;
+/// A detected call's offer stays longer (overlay.js sets its ring to the same 15 s).
+const OFFER_FOR: u64 = 15000;
 /// A press that moves further than this (points) is a drag: it moves the pill and is never a click.
 const DRAG_SLOP: f64 = 4.0;
 const CHIPS: [(&str, &str); 3] = [("too_quiet", "Too quiet, move the mic closer"), ("quiet", "Quiet voice"), ("no_cleanup", "No cleanup")];
@@ -236,7 +238,7 @@ impl Pill {
                 }
                 // A chip is a second thing to read, so the result stays up longer; the card has
                 // a whole transcript and a button.
-                let linger = Duration::from_millis(if s.card { CARD_FOR } else if s.chip.is_some() { 2500 } else { 1200 });
+                let linger = Duration::from_millis(if s.offer.is_some() { OFFER_FOR } else if s.card { CARD_FOR } else if s.chip.is_some() { 2500 } else { 1200 });
                 // Wide characters (CJK, emoji) count double: about two Latin letters each.
                 let chars = if s.card { s.text.as_deref().unwrap_or_default().chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum() } else { chars };
                 Some(Active { recording: false, chars, notice: Some((r, now + linger)), card: s.card })
@@ -249,7 +251,8 @@ impl Pill {
             "idle" => self.said.take().filter(|t| t.sticks()),
             "recording" => None,
             "transcribing" | "cleaning" => Some(Said { text: said(s), rank: 0, card: false }),
-            _ => Some(Said { text: said(s), rank: rank(s), card: s.card }),
+            // An offer's card has no transcript, so the menu offers no copy for it.
+            _ => Some(Said { text: said(s), rank: rank(s), card: s.card && s.offer.is_none() }),
         };
         true
     }

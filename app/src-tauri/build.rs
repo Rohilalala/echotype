@@ -41,6 +41,7 @@ const COMMANDS: &[&str] = &[
     "preview_sounds",
     "show_pill_demo",
     "pill_dismiss",
+    "pill_offer",
     "meeting_start",
     "meeting_stop",
     "meeting_status",

@@ -104,6 +104,10 @@ pub struct Settings {
     pub cloud_moved: bool,
     /// A short hello at the top of Home, by time of day (Settings → Advanced). On for upgraders too.
     pub greetings: bool,
+    /// Offer meeting notes when a call app starts using the microphone (calls.rs). It only offers.
+    pub detect_meetings: bool,
+    /// When a call whose notes are running ends: "ask" | "auto" (stop them).
+    pub meeting_end: String,
 }
 
 /// The bundled sound packs (sounds/<pack>/{start,stop,lock,nopaste}.wav).
@@ -191,6 +195,8 @@ impl Default for Settings {
             cleaner_context: 1024,
             cloud_moved: false,
             greetings: true,
+            detect_meetings: true,
+            meeting_end: "ask".into(),
         }
     }
 }
@@ -509,6 +515,7 @@ mod tests {
         assert_eq!(s.cleanup.style, "default");
         assert_eq!(s.local_api, LocalApi { enabled: false, port: 7811 });
         assert!(!s.onboarded);
+        assert!(s.detect_meetings && s.meeting_end == "ask", "calls are offered, never recorded unasked");
     }
 
     #[test]

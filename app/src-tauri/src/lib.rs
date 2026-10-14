@@ -1,5 +1,6 @@
 mod api;
 mod audio;
+mod calls;
 mod capture;
 mod cleanup;
 mod cloud;
@@ -122,6 +123,9 @@ struct DictationState {
     /// The paste-last shortcut as the card names it ("⌘ ⌃ V"); None when it is unbound.
     #[serde(skip_serializing_if = "Option::is_none")]
     paste_key: Option<String>,
+    /// A card offering meeting notes for a detected call: its button ("Start notes" | "Stop notes").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    offer: Option<&'static str>,
 }
 
 fn state(app: &AppHandle) -> tauri::State<'_, AppState> {
@@ -1391,6 +1395,7 @@ pub fn run() {
                     pill_demo(&h);
                 });
             }
+            calls::run(app.handle().clone());
             std::thread::spawn(move || {
                 stt::warm_up(&s);
                 llm::apply(&s);
@@ -1450,6 +1455,7 @@ pub fn run() {
             preview_sounds,
             show_pill_demo,
             pill_dismiss,
+            calls::pill_offer,
             meeting::meeting_start,
             meeting::meeting_stop,
             meeting::meeting_status,
