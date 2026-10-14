@@ -460,7 +460,7 @@ function renderRecent(fresh) {
   box.replaceChildren(...recent.slice(0, 3).map((r, i) => {
     const copy = h('button', { className: 'btn quiet', type: 'button' }, 'Copy');
     copy.onclick = () => copyText(r.text, copy);
-    const text = h('span', { className: 'text spoken' }), line = r.text.replace(/\s*\n\s*[-*•]?\s*/g, ' · ');
+    const text = h('span', { className: 'text spoken' }), line = r.text.replace(/:\s*\n\s*[-*•]?\s*/g, ': ').replace(/\s*\n\s*[-*•]?\s*/g, ' · ');
     if (fresh && i === 0) cast(text, line, 30); else text.textContent = line;
     return h('div', { className: 'row entry' }, h('time', { className: 'when num', title: fmtWhen(r.ts, true) }, fmtWhen(r.ts)), text, copy);
   }));
