@@ -39,6 +39,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev libxdo-dev libssl-dev cmake clang
+      - name: llama-server sidecar for the built-in cleanup model
+        if: runner.os == 'macOS'
+        run: app/scripts/build-llama-server.sh "${ARGS#--target }"
+        env:
+          ARGS: ${{ matrix.args }}
       - run: npm ci
         working-directory: app
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0

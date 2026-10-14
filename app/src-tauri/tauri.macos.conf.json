@@ -26,5 +26,10 @@
         }
       }
     ]
+  },
+  "bundle": {
+    "externalBin": [
+      "binaries/llama-server"
+    ]
   }
 }
