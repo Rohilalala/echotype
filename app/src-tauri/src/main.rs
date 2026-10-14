@@ -3,7 +3,7 @@
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--transcribe") {
+    if args.iter().any(|a| a == "--transcribe" || a == "--meeting") {
         // ponytail: on Windows release builds the GUI subsystem hides this output; AttachConsole if Windows CLI use matters.
         std::process::exit(echotype_lib::cli(&args));
     }

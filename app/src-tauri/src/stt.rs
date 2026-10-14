@@ -182,15 +182,18 @@ fn ready_with(s: &Settings, has_key: impl Fn(&str, &str) -> bool) -> Result<(), 
 
 // ---------- download / delete ----------
 
-pub fn download(id: &str, mut progress: impl FnMut(u64, Option<u64>)) -> Result<(), String> {
-    let dir = models_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let dest = dir.join(format!("ggml-{id}.bin"));
-    let part = dir.join(format!("ggml-{id}.bin.part"));
+pub fn download(id: &str, progress: impl FnMut(u64, Option<u64>)) -> Result<(), String> {
     let want = catalog(id)?.sha256;
     let url = format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/{HF_COMMIT}/ggml-{id}.bin");
+    fetch(&url, &models_dir().join(format!("ggml-{id}.bin")), want, progress)
+}
+
+/// Downloads `url` to `dest` through a .part file, kept only if its SHA-256 is `want`.
+pub fn fetch(url: &str, dest: &Path, want: &str, mut progress: impl FnMut(u64, Option<u64>)) -> Result<(), String> {
+    std::fs::create_dir_all(dest.parent().ok_or("bad model path")?).map_err(|e| e.to_string())?;
+    let part = dest.with_extension("part");
     let client = reqwest::blocking::Client::builder().timeout(None::<Duration>).connect_timeout(Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
-    let mut resp = client.get(&url).send().and_then(|r| r.error_for_status()).map_err(|e| format!("Download failed: {e}"))?;
+    let mut resp = client.get(url).send().and_then(|r| r.error_for_status()).map_err(|e| format!("Download failed: {e}"))?;
     let total = resp.content_length();
     let result = (|| {
         let mut f = std::fs::File::create(&part).map_err(|e| e.to_string())?;
@@ -222,7 +225,7 @@ pub fn download(id: &str, mut progress: impl FnMut(u64, Option<u64>)) -> Result<
         Ok(())
     })();
     match result {
-        Ok(()) => std::fs::rename(&part, &dest).map_err(|e| e.to_string()),
+        Ok(()) => std::fs::rename(&part, dest).map_err(|e| e.to_string()),
         Err(e) => {
             let _ = std::fs::remove_file(&part);
             Err(e)
@@ -291,6 +294,63 @@ pub fn transcribe_local(model: &Path, pcm: &[f32], language: Option<&str>, trans
     if pcm.is_empty() {
         return Ok(String::new());
     }
+    run_local(model, pcm, language, translate, prompt, false, |state| {
+        let mut text = String::new();
+        for i in 0..state.full_n_segments() {
+            if let Some(seg) = state.get_segment(i) {
+                text.push_str(&seg.to_str_lossy().map_err(|e| e.to_string())?);
+            }
+        }
+        Ok(clean_text(&text))
+    })
+}
+
+/// A recognised word with its time in seconds from the start of the clip it came from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Word {
+    pub start: f32,
+    pub end: f32,
+    pub text: String,
+}
+
+/// Local whisper with token timestamps, grouped into words (a token that starts with a space
+/// starts a word). Meeting notes use the times to cut overlapping chunks and to line words up
+/// with speaker turns.
+pub fn transcribe_words(model: &Path, pcm: &[f32], language: Option<&str>, prompt: &str) -> Result<Vec<Word>, String> {
+    if pcm.is_empty() {
+        return Ok(vec![]);
+    }
+    run_local(model, pcm, language, false, prompt, true, |state| {
+        let mut words: Vec<Word> = vec![];
+        for i in 0..state.full_n_segments() {
+            let Some(seg) = state.get_segment(i) else { continue };
+            for j in 0..seg.n_tokens() {
+                let Some(tok) = seg.get_token(j) else { continue };
+                let text = tok.to_str_lossy().map_err(|e| e.to_string())?;
+                if text.starts_with("[_") || text.starts_with("<|") {
+                    continue; // [_BEG_], [_TT_123], <|endoftext|>
+                }
+                let d = tok.token_data();
+                let (t0, t1) = (d.t0 as f32 / 100.0, d.t1 as f32 / 100.0);
+                match words.last_mut() {
+                    Some(w) if !text.starts_with(' ') => {
+                        w.text.push_str(&text);
+                        w.end = w.end.max(t1);
+                    }
+                    _ => words.push(Word { start: t0, end: t1.max(t0), text: text.trim_start().to_string() }),
+                }
+            }
+        }
+        // "[BLANK_AUDIO]" and "[Music]" arrive as ordinary tokens.
+        words.retain_mut(|w| {
+            w.text = clean_text(&w.text);
+            !w.text.is_empty()
+        });
+        Ok(words)
+    })
+}
+
+fn run_local<T>(model: &Path, pcm: &[f32], language: Option<&str>, translate: bool, prompt: &str, timestamps: bool, read: impl FnOnce(&WhisperState) -> Result<T, String>) -> Result<T, String> {
     let mut g = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
     if g.as_ref().is_none_or(|(p, _)| p != model) {
         *g = None; // free the old model before loading the next one
@@ -315,17 +375,12 @@ pub fn transcribe_local(model: &Path, pcm: &[f32], language: Option<&str>, trans
     p.set_print_realtime(false);
     p.set_print_special(false);
     p.set_print_timestamps(false);
+    p.set_token_timestamps(timestamps);
     if !prompt.is_empty() {
         p.set_initial_prompt(prompt);
     }
     state.full(p, pcm).map_err(|e| format!("Transcription failed: {e}"))?;
-    let mut text = String::new();
-    for i in 0..state.full_n_segments() {
-        if let Some(seg) = state.get_segment(i) {
-            text.push_str(&seg.to_str_lossy().map_err(|e| e.to_string())?);
-        }
-    }
-    Ok(clean_text(&text))
+    read(state)
 }
 
 /// Loads the model and runs one second of silence through it so the first real

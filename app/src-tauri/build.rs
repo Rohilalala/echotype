@@ -39,6 +39,15 @@ const COMMANDS: &[&str] = &[
     "pill_reset",
     "pill_copy",
     "pill_dismiss",
+    "meeting_start",
+    "meeting_stop",
+    "meeting_status",
+    "meeting_list",
+    "meeting_get",
+    "meeting_rename_speaker",
+    "meeting_delete",
+    "meeting_export",
+    "meeting_save",
 ];
 
 fn main() {
@@ -53,6 +62,9 @@ fn main() {
         let dir = String::from_utf8(out.stdout).unwrap();
         println!("cargo:rustc-link-search=native={}/lib/darwin", dir.trim());
         println!("cargo:rustc-link-lib=static=clang_rt.osx");
+        // screencapturekit's Swift bridge needs the OS Swift runtime; its own rpath line only
+        // reaches its own targets, so every Echotype binary (and test) gets it here.
+        println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
     }
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(COMMANDS))).expect("tauri-build failed");
 }

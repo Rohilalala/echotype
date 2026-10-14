@@ -28,25 +28,74 @@ pub fn resample(x: &[f32], from: u32, to: u32) -> Vec<f32> {
     if from == to || x.is_empty() || from == 0 {
         return x.to_vec();
     }
-    let ratio = to as f64 / from as f64;
-    let cutoff = ratio.min(1.0) * 0.94; // fraction of the input Nyquist, small guard band
-    let half = (16.0 / cutoff).ceil() as i64; // taps on each side
-    let n_out = (x.len() as f64 * ratio).floor() as usize;
-    (0..n_out)
-        .map(|i| {
-            let t = i as f64 / ratio;
+    let mut r = StreamResampler::new(from, to);
+    let mut out = r.push(x);
+    out.extend(r.finish());
+    out
+}
+
+/// `resample` fed in pieces (meeting capture): an output sample is produced once the input on
+/// both sides of it has arrived, so pieces join without seams. `push`s then `finish` give exactly
+/// what `resample` gives for the whole input.
+pub struct StreamResampler {
+    ratio: f64,
+    cutoff: f64,
+    half: i64,
+    /// Input not needed any more is dropped; `buf[0]` is input sample `base`.
+    buf: Vec<f32>,
+    base: usize,
+    total: usize,
+    next: usize,
+}
+
+impl StreamResampler {
+    pub fn new(from: u32, to: u32) -> Self {
+        let ratio = to as f64 / from.max(1) as f64;
+        let cutoff = ratio.min(1.0) * 0.94; // fraction of the input Nyquist, small guard band
+        Self { ratio, cutoff, half: (16.0 / cutoff).ceil() as i64, buf: vec![], base: 0, total: 0, next: 0 }
+    }
+
+    pub fn push(&mut self, x: &[f32]) -> Vec<f32> {
+        if self.ratio == 1.0 {
+            return x.to_vec();
+        }
+        self.buf.extend_from_slice(x);
+        self.total += x.len();
+        self.drain(false)
+    }
+
+    pub fn finish(&mut self) -> Vec<f32> {
+        if self.ratio == 1.0 { vec![] } else { self.drain(true) }
+    }
+
+    fn drain(&mut self, last: bool) -> Vec<f32> {
+        let (half, n) = (self.half, self.total as i64);
+        let n_out = (self.total as f64 * self.ratio).floor() as usize;
+        let mut out = vec![];
+        while self.next < n_out {
+            let t = self.next as f64 / self.ratio;
             let center = t.floor() as i64;
+            if !last && center + half > n - 1 {
+                break; // wait for the input to its right
+            }
             let lo = (center - half + 1).max(0);
-            let hi = (center + half).min(x.len() as i64 - 1);
+            let hi = (center + half).min(n - 1);
             let mut acc = 0.0;
             for k in lo..=hi {
                 let d = t - k as f64;
                 let w = 0.5 * (1.0 + (std::f64::consts::PI * d / half as f64).cos());
-                acc += x[k as usize] as f64 * cutoff * sinc(cutoff * d) * w;
+                acc += self.buf[k as usize - self.base] as f64 * self.cutoff * sinc(self.cutoff * d) * w;
             }
-            acc as f32
-        })
-        .collect()
+            out.push(acc as f32);
+            self.next += 1;
+        }
+        let keep = ((self.next as f64 / self.ratio).floor() as i64 - half + 1).max(0) as usize;
+        if keep > self.base {
+            self.buf.drain(..keep - self.base);
+            self.base = keep;
+        }
+        out
+    }
 }
 
 /// 16-bit PCM mono WAV at 16 kHz, for remote STT uploads.
@@ -419,7 +468,7 @@ impl Recorder {
     }
 }
 
-fn open_stream(device: Option<String>, buf: Arc<Mutex<Vec<f32>>>, lost: Arc<std::sync::atomic::AtomicBool>) -> Result<(cpal::Stream, u32), String> {
+pub(crate) fn open_stream(device: Option<String>, buf: Arc<Mutex<Vec<f32>>>, lost: Arc<std::sync::atomic::AtomicBool>) -> Result<(cpal::Stream, u32), String> {
     let host = cpal::default_host();
     let dev = device
         .and_then(|name| host.input_devices().ok()?.find(|d| d.name().ok().as_deref() == Some(name.as_str())))
@@ -493,6 +542,18 @@ mod tests {
         assert_eq!(resample(&sine(440.0, 44_100, 1.0), 44_100, 16_000).len(), 16_000);
         let up = resample(&sine(440.0, 8_000, 1.0), 8_000, 16_000);
         assert!((rms(&up) - 0.7071).abs() < 0.02);
+    }
+
+    #[test]
+    fn resampling_in_pieces_matches_resampling_the_whole() {
+        let x = sine(440.0, 44_100, 1.3);
+        let whole = resample(&x, 44_100, 16_000);
+        let mut r = StreamResampler::new(44_100, 16_000);
+        let mut pieces: Vec<f32> = x.chunks(1_237).flat_map(|c| r.push(c)).collect();
+        pieces.extend(r.finish());
+        assert_eq!(pieces.len(), whole.len());
+        assert!(pieces.iter().zip(&whole).all(|(a, b)| (a - b).abs() < 1e-6));
+        assert_eq!(StreamResampler::new(16_000, 16_000).push(&[0.5, 0.25]), vec![0.5, 0.25]);
     }
 
     #[test]

@@ -189,6 +189,7 @@ pub fn settings_url(kind: &str) -> Option<&'static str> {
         ("macos", "accessibility") => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
         ("macos", "input_monitoring") => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"),
         ("macos", "keyboard") => Some("x-apple.systempreferences:com.apple.Keyboard-Settings.extension"),
+        ("macos", "screen_recording") => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"),
         ("windows", "microphone") => Some("ms-settings:privacy-microphone"),
         _ => None,
     }
@@ -207,6 +208,7 @@ pub fn request(kind: &str) {
         "accessibility" if !accessibility_granted() => {
             let _ = enigo::Enigo::new(&enigo::Settings::default());
         }
+        "screen_recording" if !crate::capture::screen_recording_allowed() => crate::capture::request_screen_recording(),
         #[cfg(target_os = "macos")]
         "input_monitoring" if !crate::hotkey::tap::allowed() => {
             crate::hotkey::tap::request();

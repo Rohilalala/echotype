@@ -937,6 +937,7 @@ pub fn menu(app: &AppHandle, mics: &[String], bar: Option<Bar>) -> tauri::Result
         &PredefinedMenuItem::separator(app)?,
         &MenuItem::with_id(app, "pill-paste", "Paste last transcript", has_last, None::<&str>)?,
         &MenuItem::with_id(app, "pill-history", "History…", true, None::<&str>)?,
+        &MenuItem::with_id(app, "pill-meeting", crate::meeting::menu_label(), true, None::<&str>)?,
         &PredefinedMenuItem::separator(app)?,
     ])?;
     if bar.is_none() {
@@ -965,6 +966,7 @@ pub fn on_menu(app: &AppHandle, id: &str) {
                 }
             }
             "pill-history" => crate::open_page(app, "history"),
+            "pill-meeting" => crate::meeting::toggle(app),
             "pill-settings" => crate::open_page(app, "settings"),
             "pill-hide" => hide_for_hour(app),
             _ => {}

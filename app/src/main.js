@@ -1,6 +1,7 @@
 // Echotype settings window. Talks to the Rust core through Tauri commands and events.
 const preview = !window.__TAURI__;
 if (preview) await import('./mock.js'); // browser preview for design QA
+const meetingsPage = await import('./meetings.js');
 
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -138,6 +139,7 @@ function go(page) {
   for (const b of $$('nav button')) b.toggleAttribute('aria-current', false), b.dataset.page === page && b.setAttribute('aria-current', 'page');
   $('#main').scrollTop = 0;
   if (page === 'history') renderHistory();
+  if (page === 'meetings') meetingsPage.show();
   if (page === 'settings') { refreshPerms(); refreshApi(); refreshStatus(); }
   if (page === 'speech' || page === 'cleanup') refreshCloud();
   history.replaceState(null, '', '#' + page);
@@ -1052,6 +1054,7 @@ async function copyText(text, btn) {
 }
 
 // ---------- events ----------
+meetingsPage.init({ $, h, invoke, listen, copyText });
 listen('dictation-state', ({ payload }) => {
   dictation = payload;
   renderHero();

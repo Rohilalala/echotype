@@ -42,6 +42,15 @@
     "allow-cloud-account",
     "allow-cloud-checkout",
     "allow-cloud-portal",
-    "allow-cloud-logout"
+    "allow-cloud-logout",
+    "allow-meeting-start",
+    "allow-meeting-stop",
+    "allow-meeting-status",
+    "allow-meeting-list",
+    "allow-meeting-get",
+    "allow-meeting-rename-speaker",
+    "allow-meeting-delete",
+    "allow-meeting-export",
+    "allow-meeting-save"
   ]
 }
