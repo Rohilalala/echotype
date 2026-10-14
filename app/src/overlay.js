@@ -107,10 +107,10 @@ addEventListener('mouseup', e => {
   downOn = null;
   if (e.button !== 0 || !target || (e.target.closest('[data-act]') || pill) !== target) return;
   const act = target.dataset?.act;
-  if (target === pill && e.detail === 2) return invoke('pill_reset');
   if (act === 'copy') return invoke('pill_copy').then(() => (copyBtn.textContent = 'Copied'), () => {});
   if (act === 'close') return invoke('pill_dismiss');
-  if (pill.classList.contains('card')) return; // the card's text is to read, not a button
+  if (pill.classList.contains('card')) return; // the card's text is to read; even a double-click there leaves the pill where it is
+  if (target === pill && e.detail === 2) return invoke('pill_reset');
   const active = pill.classList.contains('active');
   if (act === 'cancel') invoke('pill_cancel');
   else if (active && cur.action && cur.state !== 'recording') invoke('pill_open');

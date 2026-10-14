@@ -214,7 +214,8 @@ impl Pill {
                 // A chip is a second thing to read, so the result stays up longer; the card has
                 // a whole transcript and a button.
                 let linger = Duration::from_millis(if s.card { CARD_FOR } else if s.chip.is_some() { 2500 } else { 1200 });
-                let chars = if s.card { s.text.as_deref().unwrap_or_default().chars().count() } else { chars };
+                // Wide characters (CJK, emoji) count double: about two Latin letters each.
+                let chars = if s.card { s.text.as_deref().unwrap_or_default().chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum() } else { chars };
                 Some(Active { recording: false, locked: false, chars, notice: Some((r, now + linger)), card: s.card })
             }
         };
@@ -357,8 +358,10 @@ impl Drag {
     /// by the loop, or by the cursor now if the loop has not looked yet). Only for a second
     /// after it ends, so a stale drag never eats a later click on ✓.
     pub fn is_drop(&self, now: Instant, cursor: Option<(f64, f64)>) -> bool {
-        (self.moved || cursor.is_some_and(|c| is_drag(self.from, c)))
-            && self.ended.is_none_or(|t| now.saturating_duration_since(t) < Duration::from_secs(1))
+        match self.ended {
+            None => self.moved || cursor.is_some_and(|c| is_drag(self.from, c)),
+            Some(t) => self.moved && now.saturating_duration_since(t) < Duration::from_secs(1),
+        }
     }
 }
 
@@ -664,11 +667,13 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
                 let line = p.menu_line().map(String::from);
                 (active, expanded, p.capsule(expanded, hint.chars().count()), p.deadline(), p.glyph(), p.meter, line, p.menu_copy(), p.card_up())
             };
-            // Esc closes the card, so it is Echotype's only while a card is up (or a recording runs).
-            if card != esc {
+            // Esc cancels a recording and closes the card, so it is Echotype's only while one is
+            // running or the other is on screen. This loop is its only owner.
+            let want_esc = state(&app).recording.load(std::sync::atomic::Ordering::SeqCst) || (card && visible(&c, true));
+            if want_esc != esc {
                 let gs = app.global_shortcut();
-                let _ = if card { gs.register(crate::escape()) } else if state(&app).recording.load(std::sync::atomic::Ordering::SeqCst) { Ok(()) } else { gs.unregister(crate::escape()) };
-                esc = card;
+                let _ = if want_esc { gs.register(crate::escape()) } else { gs.unregister(crate::escape()) };
+                esc = want_esc;
             }
             let mut want = visible(&c, active);
             let mut near = false;
@@ -788,7 +793,7 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
             }
             let animating = c.menubar && matches!(glyph, Glyph::Wave | Glyph::Working);
             if c.mac {
-                tray.sync(&app, &s, c.menubar, glyph, now_ms() / 125, meter, line.as_deref(), copy);
+                tray.sync(&app, &s, c.menubar, glyph, meter, line.as_deref(), copy);
             }
             let wait = if held {
                 Duration::from_millis(16)
@@ -1061,6 +1066,9 @@ mod tests {
         let mut d = Drag::new(from);
         assert!(!d.is_drop(t0, Some((101.0, 99.0))), "a click");
         assert!(d.is_drop(t0, Some((140.0, 100.0))), "moved, even before the loop saw it");
+        let mut click = Drag::new(from);
+        click.ended = Some(t0);
+        assert!(!click.is_drop(t0 + Duration::from_millis(500), Some((140.0, 100.0))), "a click that ended is no drop, wherever the cursor went (✓ after a click)");
         d.moved = true;
         d.ended = Some(t0);
         assert!(d.is_drop(t0 + Duration::from_millis(300), Some(from)), "the drop's own mouse-up");
@@ -1083,6 +1091,9 @@ mod tests {
         let mut p = Pill::default();
         p.on_state(&card(&"word ".repeat(30)), t0);
         assert_eq!(p.capsule(false, 0), (CARD_W, 72.0), "two lines, then an ellipsis");
+        let mut wide = Pill::default();
+        wide.on_state(&card(&"漢字".repeat(8)), t0);
+        assert_eq!(wide.capsule(false, 0).1, 72.0, "16 wide characters fill two lines");
         p.tick(ms(2000), false);
         for t in (2066..=5000).step_by(66) {
             assert!(p.tick(ms(t), true).0, "paused while hovered (at {t} ms)");

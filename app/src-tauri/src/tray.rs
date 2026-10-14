@@ -103,8 +103,7 @@ pub struct Tray {
 
 impl Tray {
     /// Applies menu-bar mode (or undoes it) and, in it, the glyph and the menu.
-    #[allow(clippy::too_many_arguments)]
-    pub fn sync(&mut self, app: &AppHandle, s: &Settings, bar: bool, glyph: Glyph, frame: u64, meter: f32, line: Option<&str>, copy: bool) {
+    pub fn sync(&mut self, app: &AppHandle, s: &Settings, bar: bool, glyph: Glyph, meter: f32, line: Option<&str>, copy: bool) {
         let Some(tray) = app.tray_by_id("main") else { return };
         if self.mode != Some(bar) {
             // Left click dictates in the menu bar; the menu moves to right click.
@@ -118,7 +117,7 @@ impl Tray {
         if !bar {
             return;
         }
-        let px = draw(glyph, frame, meter);
+        let px = draw(glyph, crate::pill::now_ms() / 125, meter);
         if self.icon.as_ref() != Some(&px) {
             let _ = tray.set_icon_with_as_template(Some(Image::new_owned(px.clone(), PX as u32, PX as u32)), true);
             self.icon = Some(px);

@@ -132,6 +132,13 @@ pub struct Focused {
 }
 
 const TEXT_ROLES: [&str; 4] = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"];
+/// Focus that plainly takes no text. Anything else without a text signal (a web area Chrome has
+/// not filled in yet, an Electron app before it turns its tree on, a terminal's custom view)
+/// counts as "can't tell" and is pasted into as before.
+const NOT_TEXT: [&str; 12] = [
+    "AXList", "AXOutline", "AXRow", "AXButton", "AXCheckBox", "AXRadioButton", "AXImage", "AXScrollArea", "AXSlider", "AXPopUpButton",
+    "AXMenuButton", "AXDisclosureTriangle",
+];
 /// kAXErrorAPIDisabled: Accessibility is off for Echotype.
 pub const AX_DISABLED: i32 = -25211;
 
@@ -144,7 +151,8 @@ pub fn target(trusted: bool, focus: Result<Option<Focused>, i32>) -> Target {
         Err(AX_DISABLED) | Ok(None) => Target::Card,
         Err(_) => Target::Paste,
         Ok(Some(f)) if TEXT_ROLES.contains(&f.role.as_str()) || f.editable || f.text_value || f.text_range => Target::Paste,
-        Ok(Some(_)) => Target::Card,
+        Ok(Some(f)) if NOT_TEXT.contains(&f.role.as_str()) => Target::Card,
+        Ok(Some(_)) => Target::Paste,
     }
 }
 
@@ -262,14 +270,23 @@ mod mac {
                 let mut v: CFTypeRef = std::ptr::null();
                 (AXUIElementCopyAttributeValue(el.as_CFTypeRef(), attr(name).as_CFTypeRef(), &mut v) == 0 && !v.is_null()).then(|| CFType::wrap_under_create_rule(v))
             };
-            let mut settable = 0u8;
-            let value_settable = AXUIElementIsAttributeSettable(el.as_CFTypeRef(), attr("AXValue").as_CFTypeRef(), &mut settable) == 0 && settable != 0;
-            Ok(Some(super::Focused {
+            let mut f = super::Focused {
                 role: copy("AXRole").and_then(|r| r.downcast::<CFString>()).map(|r| r.to_string()).unwrap_or_default(),
                 editable: copy("AXEditable").and_then(|b| b.downcast::<CFBoolean>()).is_some_and(bool::from),
-                text_value: value_settable && copy("AXValue").is_some_and(|v| v.instance_of::<CFString>()),
-                text_range: copy("AXSelectedTextRange").is_some(),
-            }))
+                ..Default::default()
+            };
+            // Cheapest first: a text role or AXEditable settles it before a long document's AXValue is copied.
+            if super::TEXT_ROLES.contains(&f.role.as_str()) || f.editable {
+                return Ok(Some(f));
+            }
+            f.text_range = copy("AXSelectedTextRange").is_some();
+            if !f.text_range {
+                let mut settable = 0u8;
+                f.text_value = AXUIElementIsAttributeSettable(el.as_CFTypeRef(), attr("AXValue").as_CFTypeRef(), &mut settable) == 0
+                    && settable != 0
+                    && copy("AXValue").is_some_and(|v| v.instance_of::<CFString>());
+            }
+            Ok(Some(f))
         }
     }
 
@@ -411,8 +428,12 @@ mod tests {
         assert_eq!(paste(Ok(Some(Focused { text_range: true, ..el("AXWebArea") }))), Target::Paste);
         assert_eq!(paste(Ok(Some(Focused { text_value: true, ..el("AXUnknown") }))), Target::Paste, "a settable text value");
         // Nowhere to paste: the card.
-        for role in ["AXList", "AXButton", "AXScrollArea", "AXWebArea", "AXCheckBox", ""] {
+        for role in ["AXList", "AXOutline", "AXButton", "AXScrollArea", "AXCheckBox"] {
             assert_eq!(paste(Ok(Some(el(role)))), Target::Card, "{role}");
+        }
+        // Focus that may still take text once the app fills in its tree: paste as before.
+        for role in ["AXWebArea", "AXGroup", "AXCell", "AXUnknown", ""] {
+            assert_eq!(paste(Ok(Some(el(role)))), Target::Paste, "{role}");
         }
         assert_eq!(paste(Ok(None)), Target::Card, "nothing focused (the desktop)");
         assert_eq!(paste(Err(AX_DISABLED)), Target::Card, "Accessibility switched off");

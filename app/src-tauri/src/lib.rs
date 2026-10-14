@@ -267,7 +267,9 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                 Act::None => {}
                 Act::Start { id, locked } => match start_recording(&app, &s, id) {
                     Ok(mut l) => {
-                        let _ = app.global_shortcut().register(escape());
+                        // Recording before anything shows, so the pill loop takes Esc for it (pill.rs owns Esc).
+                        state(&app).recording.store(true, Ordering::SeqCst);
+                        let _ = state(&app).pill_wake.send(());
                         l.locked = locked && !toggle_mode;
                         if click {
                             show_later(&app, id, false, CLICK_SHOW_AFTER);
@@ -282,7 +284,6 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                             show_later(&app, id, false, SHOW_AFTER);
                         }
                         live = Some(l);
-                        state(&app).recording.store(true, Ordering::SeqCst);
                     }
                     Err(e) => {
                         fsm.start_failed();
@@ -307,7 +308,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                         l.rec.stop();
                     }
                     state(&app).recording.store(false, Ordering::SeqCst);
-                    let _ = app.global_shortcut().unregister(escape());
+                    let _ = state(&app).pill_wake.send(());
                     let verb = if toggle_mode { "Press" } else { "Hold" };
                     emit_state(&app, if show { hint(format!("{verb} {} to dictate", key_label(&s, cfg!(target_os = "macos"))), None) } else { simple("idle") });
                 }
@@ -315,7 +316,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                     let Some(l) = live.take() else { continue };
                     state(&app).recording.store(false, Ordering::SeqCst);
                     let pcm = l.rec.stop();
-                    let _ = app.global_shortcut().unregister(escape());
+                    let _ = state(&app).pill_wake.send(());
                     if s.sounds {
                         platform::play_sound(&app, "stop");
                     }
@@ -438,7 +439,10 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
                 let chip = chip(clip.quality, out.no_cleanup && out.warning.is_none());
                 // Nothing focused takes text (the desktop, a list, Accessibility off): no ⌘V into nowhere.
                 let nowhere = paste && platform::paste_target() == platform::Target::Card;
-                let res = if nowhere {
+                let res = if nowhere && !platform::accessibility_granted() {
+                    // As before: on the clipboard, since there is no way to paste it.
+                    platform::copy(&out.text).map_err(|e| (e, false)).and(Err(("Accessibility is off, so Echotype copied instead of pasting".into(), true)))
+                } else if nowhere {
                     Err(("Nowhere to paste".to_string(), true))
                 } else if paste {
                     platform::paste(&app, &out.text, s.restore_clipboard)
@@ -466,7 +470,8 @@ fn card(s: &Settings, text: String, warning: Option<String>, chip: Option<&'stat
         warning,
         chip,
         card: true,
-        paste_key: (!s.paste_last_hotkey.is_empty()).then(|| accel_label(&s.paste_last_hotkey, cfg!(target_os = "macos"))),
+        // Paste-last needs Accessibility too, so the card only names it when it would work.
+        paste_key: (!s.paste_last_hotkey.is_empty() && platform::accessibility_granted()).then(|| accel_label(&s.paste_last_hotkey, cfg!(target_os = "macos"))),
         action: (!platform::accessibility_granted()).then_some("accessibility"),
         ..Default::default()
     }
@@ -928,6 +933,9 @@ async fn pill_drag(app: AppHandle) -> R<()> {
 /// first click started is taken back.
 #[tauri::command]
 async fn pill_reset(app: AppHandle) -> R<()> {
+    if pill::is_drop(&app, Instant::now()) {
+        return Ok(()); // the second press of a "double-click" was a drag
+    }
     if lock(&state(&app).clicks).undo_start(Instant::now()) {
         send(&app, Cmd::Key(Ev::Cancel));
     }
@@ -947,7 +955,7 @@ async fn pill_cancel(app: AppHandle) -> R<()> {
 /// notice back never opens the settings window.
 #[tauri::command]
 async fn pill_open(app: AppHandle) -> R<()> {
-    if lock(&state(&app).clicks).accept(Instant::now()) {
+    if !pill::is_drop(&app, Instant::now()) && lock(&state(&app).clicks).accept(Instant::now()) {
         open_page(&app, "home");
     }
     Ok(())
@@ -1126,9 +1134,8 @@ pub fn run() {
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());
-    // A second profile (ECHOTYPE_CONFIG_DIR: tests) runs beside the usual one instead of
-    // opening the usual one's window.
-    let builder = if std::env::var_os("ECHOTYPE_CONFIG_DIR").is_some() { builder } else { builder.plugin(tauri_plugin_single_instance::init(|app, _, _| show_main(app))) };
+    // On-screen tests (ECHOTYPE_NO_MAIN) run beside the installed app instead of opening its window.
+    let builder = if std::env::var_os("ECHOTYPE_NO_MAIN").is_some() { builder } else { builder.plugin(tauri_plugin_single_instance::init(|app, _, _| show_main(app))) };
     let app = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
