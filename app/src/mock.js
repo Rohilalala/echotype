@@ -20,7 +20,7 @@ const settings = {
   paste_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+V',
   copy_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+C',
   autostart: !q.has('upgrade'), sounds: true, sound_pack: 'classic', pill_fade: true, pill_size: 1.5, ball_size: 1,
-  advanced: q.has('advanced'), cleaner_memory: 'ready', cleaner_idle_unload: false, cleaner_idle_minutes: 10, cleaner_context: 1024, greetings: true, cloud_moved: q.has('moved'),
+  advanced: q.has('advanced'), cleaner_memory: 'ready', cleaner_idle_unload: false, cleaner_idle_minutes: 10, cleaner_context: 1024, greetings: true, detect_meetings: true, meeting_end: 'ask', cloud_moved: q.has('moved'),
   look: q.get('look') === 'v2' ? 'v2' : 'classic',
   pill_idle: !q.has('pilloff'), pill_hidden_until: q.has('pillhidden') ? now + 42 * 60000 : 0, pill_in_recordings: false,
   pill_positions: {}, pill_screen: null, pill_follow_cursor: true, show_in: q.has('menubar') ? 'menubar' : 'pill',
@@ -245,12 +245,13 @@ if (q.has('view') || q.has('hover')) {
 // overlay.html?state=<state>&chip=<chip> (and index.html?state=... for the Home hero) renders any
 // dictation state through the real overlay/Home code: state = recording|transcribing|cleaning|done|error|hint,
 // chip = quiet|too_quiet|no_cleanup, plus message=, error=, action=, copied=1, locked=1, muted=1,
-// card=1 (nowhere to paste; text= sets the transcript, nokey=1 drops the paste-last hint).
+// card=1 (nowhere to paste; text= sets the transcript, nokey=1 drops the paste-last hint),
+// offer=Start notes with state=hint&card=1&warning=...&text=... (a detected call's offer, calls.rs).
 if (q.has('state')) {
   setTimeout(() => {
     const state = q.get('state');
     emit('dictation-state', {
-      state, text: state === 'done' ? q.get('text') || 'Let’s move the standup to 10:30 tomorrow.' : undefined,
+      state, text: q.get('text') || (state === 'done' ? 'Let’s move the standup to 10:30 tomorrow.' : undefined), offer: q.get('offer') || undefined,
       card: q.has('card'), paste_key: q.has('card') && !q.has('nokey') ? '⌘ ⌃ V' : undefined,
       error: state === 'error' ? q.get('error') || 'Microphone access is off' : undefined,
       message: q.get('message') || undefined, chip: q.get('chip') || undefined, action: q.get('action') || undefined,

@@ -311,6 +311,17 @@
           </select><button class="btn" id="soundPlay" type="button" aria-label="Play the sound pack">Play</button></span></div>
       </div>
 
+      <h2 class="group-title" id="meetingsTitle">Meetings</h2>
+      <div class="group" id="meetingsGroup">
+        <label class="row"><span class="row-text"><span class="row-title">Detect calls</span><span class="row-desc">When Zoom, Teams, Google Meet or another call app starts using the microphone, Echotype offers to take notes. It only checks which app is using the microphone and the browser's window title. It never listens, and nothing is recorded until you click Start.</span></span>
+          <input type="checkbox" class="switch" data-bind="detect_meetings" /></label>
+        <div class="row"><span class="row-text"><span class="row-title" id="meetingEndLabel">When the call ends</span><span class="row-desc">For notes started during a detected call. A call has ended 20 seconds after its app stops using the microphone and speakers.</span></span>
+          <span class="seg" role="radiogroup" aria-labelledby="meetingEndLabel">
+            <label><input type="radio" name="meeting_end" value="ask" data-bind="meeting_end" /><span>Ask</span></label>
+            <label><input type="radio" name="meeting_end" value="auto" data-bind="meeting_end" /><span>Stop notes</span></label>
+          </span></div>
+      </div>
+
       <h2 class="group-title">Appearance</h2>
       <div class="group">
         <div class="row"><span class="row-text"><span class="row-title" id="lookLabel">Look</span><span class="row-desc">Ink swaps the grays for deep blue ink on warm paper. Both follow the system's light or dark setting.</span></span>

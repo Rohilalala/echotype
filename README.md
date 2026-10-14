@@ -169,6 +169,8 @@ $L/bin/llama-quantize out/echotype-clean-f16.gguf \
 
 Start meeting notes from the menu bar, the pill's right-click menu or the **Meetings** page. Your microphone is labelled **You**; everyone else is heard through the computer's audio and told apart as Speaker 1, Speaker 2 and so on, which you can rename. The transcript appears as people talk, and when you stop, the configured cleanup model writes a summary with decisions and action items. Without cleanup set up you still get the full transcript. Copy or save any meeting as Markdown or text.
 
+When Zoom, Teams, Google Meet, a Slack huddle, FaceTime or another call app starts using the microphone, Echotype offers to take notes; it only checks which app has the microphone (and a browser's window title), never listens, and records nothing until you click Start. When that call ends it asks to stop them, or stops them by itself if you choose so under Settings → Meetings (macOS 14.2 or later).
+
 Let everyone know before you start. Everything runs on this Mac: the audio of each meeting is kept in Echotype's app data folder under `meetings/`, and delete removes it.
 
 - Computer audio needs **Screen Recording** permission (macOS 13 or later). Echotype records sound only. Without it, only your microphone is transcribed.

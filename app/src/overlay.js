@@ -6,6 +6,7 @@ const pill = document.getElementById('pill'), label = document.getElementById('l
 const chipEl = document.getElementById('chip');
 const creason = document.getElementById('creason'), fixBtn = document.getElementById('fix');
 const ctext = document.getElementById('ctext'), ckey = document.getElementById('ckey'), copyBtn = document.getElementById('copy'), ring = document.getElementById('ringLeft');
+const laterBtn = document.getElementById('later');
 const CHIP = { too_quiet: 'Too quiet, move the mic closer', quiet: 'Quiet voice', no_cleanup: 'No cleanup' };
 const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
 // `cur`: the last dictation state. `view`: what pill.rs says to show (idle ball or that state,
@@ -66,11 +67,15 @@ listen('dictation-state', ({ payload: p }) => {
   if (view && p.state !== 'idle') view = { ...view, active: true };
   if (p.state !== 'recording') muted = false;
   if (p.card) {
-    // A new card: the ring starts over and Copy says Copy again.
-    copyBtn.textContent = 'Copy';
+    // A new card: the ring starts over and Copy says Copy again. A detected call's offer
+    // (calls.rs) puts Not now and Start notes (or Stop notes) there instead, for 15 s (pill.rs OFFER_FOR).
+    copyBtn.textContent = p.offer || 'Copy';
+    copyBtn.dataset.act = p.offer ? 'offer' : 'copy';
+    laterBtn.hidden = !p.offer;
     ring.style.animation = 'none';
     void ring.getBoundingClientRect();
     ring.style.animation = '';
+    ring.style.animationDuration = p.offer ? '15s' : '';
   }
   render();
 });
@@ -265,6 +270,7 @@ addEventListener('mouseup', e => {
   if (e.button !== 0 || !target || (e.target.closest('[data-act]') || pill) !== target) return;
   const act = target.dataset?.act;
   if (act === 'copy') return invoke('pill_copy').then(() => (copyBtn.textContent = 'Copied'), () => {});
+  if (act === 'offer') return invoke('pill_offer');
   if (act === 'close') return invoke('pill_dismiss');
   if (act === 'fix') return invoke('pill_open'); // Home, with the Accessibility fix
   if (pill.classList.contains('card')) return; // the card's text is to read; even a double-click there leaves the pill where it is

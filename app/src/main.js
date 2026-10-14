@@ -971,6 +971,7 @@ function renderStartup() {
   $('#obAutostartRow').hidden = !ok;
   $('#talkRow').hidden = $('#obTalkRow').hidden = $('#soundsRow').hidden = !isMac; // talk keys and sounds are macOS-only
   $('#pillTitle').hidden = $('#pillGroup').hidden = !isMac; // so is the idle pill
+  $('#meetingsTitle').hidden = $('#meetingsGroup').hidden = !isMac; // and call detection (calls.rs)
 }
 
 // "Hide for 1 hour" shows until when (D12); the hour ends by itself, so re-render then.
