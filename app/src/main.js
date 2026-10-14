@@ -33,6 +33,12 @@ const CHECK = '<path d="M3.5 8.5l3 3 6-7"/>';
 const CROSS = '<path d="M4 4l8 8M12 4l-8 8"/>';
 
 let S, presets, models = [], sys, isMac = true;
+// Windows and Linux: the same words without macOS names (the paste keys, the menu bar, "this Mac").
+const PC_COPY = [
+  ['With Accessibility on, Echotype presses ⌘V in the app you are using. Without it, your text waits on the clipboard.', 'Echotype presses Ctrl+V in the app you are using.'],
+  ['⌘V', 'Ctrl+V'], ['this Mac', 'this computer'], ['the menu bar', 'the system tray'],
+];
+const pc = t => isMac ? t : PC_COPY.reduce((s, [a, b]) => s.replaceAll(a, b), t);
 let status = {}; // shortcut_status: talk key, Input Monitoring, Globe key, shortcuts another app holds
 let devices = [];
 const progress = {}, modelErr = {};
@@ -342,7 +348,7 @@ function renderHero() {
     if (b) fill(sub, h('span', {}, b.text), h('button', { className: 'btn', type: 'button', onclick: b.act }, b.label));
     else if (st === 'error') fill(sub, h('span', {}, `${dictation.error || 'Dictation stopped.'}`), ...keptText(), dictation.retry && retryBtn(), actionBtn(dictation.action));
     else if (st === 'hint') fill(sub, h('span', { className: 'notice-inline' }, dictation.message), actionBtn(dictation.action));
-    else if (st === 'done' && dictation.copied) fill(sub, h('span', {}, dictation.warning || 'Press ⌘V to paste it.'), chip, ...keptText(), actionBtn(dictation.action));
+    else if (st === 'done' && dictation.copied) fill(sub, h('span', {}, dictation.warning || pc('Press ⌘V to paste it.')), chip, ...keptText(), actionBtn(dictation.action));
     else if (st === 'done' && dictation.warning) fill(sub, h('span', {}, dictation.warning), chip, cleanupFix);
     else fill(sub, h('span', {}, 'Text appears wherever your cursor is.'), chip);
   }
@@ -899,9 +905,9 @@ $('#upgradeNo').addEventListener('click', () => dismiss('upgrade_offer'));
 function renderStartup() {
   const ok = sys.can_autostart;
   $('#autostart').disabled = !ok && !S.autostart;
-  $('#autostartDesc').textContent = ok ? 'Echotype starts quietly in the menu bar.' : 'Move Echotype to your Applications folder first.';
+  $('#autostartDesc').textContent = ok ? pc('Echotype starts quietly in the menu bar.') : 'Move Echotype to your Applications folder first.';
   $('#obAutostartRow').hidden = !ok;
-  $('#talkRow').hidden = $('#obTalkRow').hidden = $('#soundsRow').hidden = !isMac; // talk keys and sounds are macOS-only
+  $('#talkRow').hidden = $('#obTalkRow').hidden = !isMac; // talk keys are macOS-only
   $('#pillTitle').hidden = $('#pillGroup').hidden = !isMac; // so is the idle pill
 }
 
@@ -958,16 +964,26 @@ async function refreshPerms() {
     h('span', { className: 'row-text' }, h('span', { className: 'row-title' }, title), h('span', { className: 'row-desc' }, desc)),
     h('span', { className: 'actions' }, h('span', { className: `badge ${cls}` }, label),
       fix && h('button', { className: 'btn', type: 'button', onclick: () => invoke('open_permission_settings', { kind }) }, 'Open Settings')));
+  const isWin = /windows/i.test(sys.os);
   const rows = () => failed
-    ? [h('p', { className: 'empty', role: 'alert' }, "Couldn't check permissions. Open System Settings, Privacy & Security, to review Microphone and Accessibility.")]
-    : [
+    ? [h('p', { className: 'empty', role: 'alert' }, isMac ? "Couldn't check permissions. Open System Settings, Privacy & Security, to review Microphone and Accessibility." : "Couldn't check permissions.")]
+    : !isMac ? [
+      row('Microphone', isWin ? 'If Echotype hears nothing, turn on microphone access for desktop apps in Windows Settings.' : 'If Echotype hears nothing, pick another microphone in Settings.',
+        isWin ? ['Set in Windows', 'muted', true] : ['No permission needed', 'muted', false], 'microphone'),
+      // Wayland: no app may press keys in another, and the shortcut reaches Echotype only from X11 apps.
+      ...(p.wayland ? [
+        row('Pasting on Wayland', p.paste_tool ? `Echotype presses Ctrl+V with ${p.paste_tool}.` : 'Install wtype (or ydotool with its daemon) so Echotype can paste. Until then your text waits on the clipboard.',
+          p.paste_tool ? ['Ready', '', false] : ['Needs wtype', 'warn', false]),
+        row('Shortcut on Wayland', 'The shortcut works while an X11 app is focused. To dictate anywhere, bind the command echotype --toggle to a key in your desktop’s keyboard settings.', ['Limited', 'muted', false]),
+      ] : []),
+    ] : [
       row('Microphone', p.microphone === 'unknown' ? 'macOS asks the first time you dictate.' : 'To hear you while the shortcut is down.', MIC[p.microphone] ?? MIC.unknown, 'microphone'),
       row('Accessibility', 'Echotype uses it only to press ⌘V in the app you are using.', p.accessibility ? ['Allowed', '', false] : ['Needed to paste', 'warn', true], 'accessibility'),
     ];
   const im = isMac && S.talk_key !== 'accelerator' && [row('Input Monitoring', 'Only for the talk key: Echotype watches that one key, and never records what you type.',
     status.input_monitoring ? ['Allowed', '', false] : ['Needed for the talk key', 'warn', true], 'input_monitoring')];
   $('#perms').replaceChildren(...rows(), ...(im || []));
-  $('#obPerms').replaceChildren(rows()[1] ?? rows()[0]);
+  $('#obPerms').replaceChildren(...isMac ? [rows()[1] ?? rows()[0]] : rows().slice(1));
   $('#obMic').replaceChildren(rows()[0]);
   $('#obPasteNext').textContent = p.accessibility ? 'Continue' : 'Continue without pasting';
   $('#axLine').hidden = failed || p.accessibility;
@@ -1139,6 +1155,7 @@ try {
 isMac = /mac|darwin/i.test(sys.os);
 // macOS gets the translucent sidebar (windowEffects in tauri.conf.json); elsewhere it stays opaque (D19).
 document.documentElement.dataset.os = isMac ? 'mac' : 'other';
+if (!isMac) for (const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); w.nextNode();) w.currentNode.nodeValue = pc(w.currentNode.nodeValue);
 if (isMac && !preview) document.documentElement.dataset.vibrant = '';
 S.dictionary ??= [];
 S.replacements ??= [];

@@ -514,7 +514,7 @@ fn paste_last(app: &AppHandle, paste: bool) {
         }
         emit_state(&app, match res {
             Ok(()) if paste => hint("Pasted", None),
-            Ok(()) | Err((_, true)) => hint("Copied, ⌘V to paste", None),
+            Ok(()) | Err((_, true)) => hint(format!("Copied, {} to paste", platform::PASTE_KEYS), None),
             Err((e, false)) => DictationState { state: "error", error: Some(e), ..Default::default() },
         });
     });

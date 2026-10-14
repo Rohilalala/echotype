@@ -8,6 +8,9 @@ use tauri::AppHandle;
 /// serves what was copied, so a per-call instance would take the text with it when dropped.
 static CLIPBOARD: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
 
+/// The keys that paste, as the user presses them.
+pub const PASTE_KEYS: &str = if cfg!(target_os = "macos") { "⌘V" } else { "Ctrl+V" };
+
 /// Clipboard + Cmd/Ctrl+V, then restore the previous clipboard text.
 /// Never loses text: without Accessibility, or if the keystroke fails (a secure input field),
 /// the text stays on the clipboard. The error says whether it did: `(message, on_clipboard)`.
