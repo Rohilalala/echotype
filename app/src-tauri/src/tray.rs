@@ -4,6 +4,7 @@
 
 use crate::settings::Settings;
 use crate::{lock, state};
+use std::f64::consts::{FRAC_PI_2, PI};
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
 use tauri::image::Image;
@@ -24,29 +25,50 @@ pub enum Glyph {
 
 /// Status items are 18 pt tall; drawn at 2x.
 const PX: usize = 36;
-/// Per-bar weights, so a level reads as a waveform rather than a block.
-const WEIGHT: [f32; 5] = [0.55, 0.85, 1.0, 0.8, 0.5];
-const BAR_X: [f64; 5] = [8.0, 13.0, 18.0, 23.0, 28.0];
+/// Frames per sweep of the working glyph's lit meridians (8 frames a second).
+const SWEEP: u64 = 12;
 
-fn dist(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
-    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-    let t = (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / (dx * dx + dy * dy).max(1e-9)).clamp(0.0, 1.0);
-    (p.0 - a.0 - t * dx).hypot(p.1 - a.1 - t * dy)
+/// A dot: centre, radius and opacity, in 2x pixels.
+type Dot = (f64, f64, f64, f64);
+
+/// The app icon's dotted sphere for 18 pt: a hexagonal grid of dots 5 px apart inside a circle,
+/// sized by depth as thinking-orbs' globe (Jakub Antalik, MIT) sizes them, so it reads as a ball.
+/// Each dot is (x, y, depth 0..1, longitude with 0 facing you).
+fn globe() -> Vec<(f64, f64, f64, f64)> {
+    const R: f64 = 14.5;
+    let mut dots = Vec::new();
+    for j in -3..=3_i32 {
+        for i in -3..=3_i32 {
+            let (dx, dy) = (5.0 * f64::from(i) + if j % 2 == 0 { 0.0 } else { 2.5 }, 4.5 * f64::from(j));
+            let q = (dx * dx + dy * dy) / (R * R);
+            if q <= 1.0 {
+                let z = (1.0 - q).sqrt();
+                dots.push((18.0 + dx, 18.0 + dy, z, (dx / R).atan2(z)));
+            }
+        }
+    }
+    dots
 }
 
-/// A rounded vertical bar `h` px tall, centred on the glyph's middle line.
-fn bar(p: (f64, f64), x: f64, h: f64) -> bool {
-    let half = (h / 2.0 - 1.5).max(0.0);
-    dist(p, (x, 18.0 - half), (x, 18.0 + half)) <= 1.5
+/// Dots evenly along a polyline, `n` of them including both ends.
+fn along(path: &[(f64, f64)], n: usize, r: f64) -> Vec<Dot> {
+    let seg: Vec<f64> = path.windows(2).map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1)).collect();
+    let total: f64 = seg.iter().sum();
+    (0..n)
+        .map(|i| {
+            let (mut d, mut j) = (total * i as f64 / (n - 1) as f64, 0);
+            while j + 1 < seg.len() && d > seg[j] {
+                d -= seg[j];
+                j += 1;
+            }
+            let f = (d / seg[j]).min(1.0);
+            let (a, b) = (path[j], path[j + 1]);
+            ((a.0 + (b.0 - a.0) * f).round(), (a.1 + (b.1 - a.1) * f).round(), r, 1.0)
+        })
+        .collect()
 }
 
-fn inside_triangle(p: (f64, f64), [a, b, c]: [(f64, f64); 3]) -> bool {
-    let side = |u: (f64, f64), v: (f64, f64)| (v.0 - u.0) * (p.1 - u.1) - (v.1 - u.1) * (p.0 - u.0);
-    let (d1, d2, d3) = (side(a, b), side(b, c), side(c, a));
-    !((d1 < 0.0 || d2 < 0.0 || d3 < 0.0) && (d1 > 0.0 || d2 > 0.0 || d3 > 0.0))
-}
-
-/// Tiny deterministic jitter in 0..1 per frame and bar, so a steady voice still looks alive.
+/// Tiny deterministic jitter in 0..1 per frame and column, so a steady voice still looks alive.
 fn jitter(frame: u64, i: usize) -> f32 {
     let mut x = frame.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (i as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     x ^= x >> 31;
@@ -55,26 +77,39 @@ fn jitter(frame: u64, i: usize) -> f32 {
 
 /// RGBA pixels (black, coverage in alpha) for `glyph` at animation `frame`.
 pub fn draw(glyph: Glyph, frame: u64, meter: f32) -> Vec<u8> {
-    let shape: Box<dyn Fn((f64, f64)) -> f64> = match glyph {
-        // A still waveform: Echotype at rest.
-        Glyph::Idle => Box::new(|p| {
-            let h = [10.0, 18.0, 26.0, 16.0, 8.0];
-            f64::from((0..5).any(|i| bar(p, BAR_X[i], h[i])))
-        }),
-        Glyph::Wave => {
-            let h: Vec<f64> = (0..5).map(|i| f64::from(6.0 + 22.0 * (meter * WEIGHT[i] * (0.75 + 0.5 * jitter(frame, i))).clamp(0.0, 1.0))).collect();
-            Box::new(move |p| f64::from((0..5).any(|i| bar(p, BAR_X[i], h[i]))))
+    let dots: Vec<Dot> = match glyph {
+        // The sphere at rest, nearer dots bigger.
+        Glyph::Idle => globe().into_iter().map(|(x, y, z, _)| (x, y, 0.8 + 1.3 * z, 1.0)).collect(),
+        // The sphere opens from its equator with the level, each column on its own, like a waveform.
+        Glyph::Wave => globe()
+            .into_iter()
+            .map(|(x, y, z, _)| {
+                let col = ((x - 3.0) / 2.5).round() as usize;
+                let w = 1.0 - ((x - 18.0) / 18.0).powi(2) as f32;
+                let level = 15.0 * f64::from((meter * w * (0.75 + 0.5 * jitter(frame, col))).clamp(0.0, 1.0));
+                (x, y, 0.8 + 1.3 * z, ((level - (y - 18.0).abs()) / 4.5 + 1.0).clamp(0.0, 1.0))
+            })
+            .collect(),
+        // Two opposite meridians sweep the sphere, as the thinking-orbs globe scans while it searches.
+        Glyph::Working => {
+            let scan = PI * (frame % SWEEP) as f64 / SWEEP as f64;
+            globe()
+                .into_iter()
+                .map(|(x, y, z, lon)| {
+                    let off = (lon - scan + FRAC_PI_2).rem_euclid(PI) - FRAC_PI_2;
+                    let lit = (-off * off / 0.18).exp();
+                    (x, y, 0.8 + 1.3 * z * (0.6 + 0.4 * lit), 0.35 + 0.65 * lit)
+                })
+                .collect()
         }
-        // Three dots, one lit in turn.
-        Glyph::Working => Box::new(move |p| {
-            (0..3).map(|i| if (p.0 - (10.0 + 8.0 * i as f64)).hypot(p.1 - 18.0) <= 3.0 { if frame % 3 == i { 1.0 } else { 0.35 } } else { 0.0 }).fold(0.0, f64::max)
-        }),
-        Glyph::Done => Box::new(|p| f64::from(dist(p, (8.0, 19.0), (15.0, 26.0)).min(dist(p, (15.0, 26.0), (28.0, 10.0))) <= 2.2)),
-        // A triangle with the exclamation mark cut out.
-        Glyph::Warning => Box::new(|p| {
-            let mark = dist(p, (18.0, 13.0), (18.0, 21.0)) <= 1.8 || (p.0 - 18.0).hypot(p.1 - 26.5) <= 2.0;
-            f64::from(inside_triangle(p, [(18.0, 4.0), (33.0, 31.0), (3.0, 31.0)]) && !mark)
-        }),
+        Glyph::Done => along(&[(8.0, 19.0), (15.0, 26.0), (28.0, 10.0)], 7, 2.2),
+        // A triangle of dots around an exclamation mark.
+        Glyph::Warning => {
+            let mut d = along(&[(18.0, 4.0), (33.0, 31.0), (3.0, 31.0), (18.0, 4.0)], 16, 1.8);
+            d.pop();
+            d.extend([(18.0, 13.0, 1.9, 1.0), (18.0, 15.5, 1.9, 1.0), (18.0, 18.0, 1.9, 1.0), (18.0, 20.5, 1.7, 1.0), (18.0, 26.0, 2.1, 1.0)]);
+            d
+        }
     };
     let mut px = vec![0u8; PX * PX * 4];
     for y in 0..PX {
@@ -83,13 +118,19 @@ pub fn draw(glyph: Glyph, frame: u64, meter: f32) -> Vec<u8> {
             let mut a = 0.0;
             for sy in 0..4 {
                 for sx in 0..4 {
-                    a += shape((x as f64 + (sx as f64 + 0.5) / 4.0, y as f64 + (sy as f64 + 0.5) / 4.0));
+                    let p = (x as f64 + (sx as f64 + 0.5) / 4.0, y as f64 + (sy as f64 + 0.5) / 4.0);
+                    a += dots.iter().filter(|d| (p.0 - d.0).hypot(p.1 - d.1) <= d.2).map(|d| d.3).fold(0.0, f64::max);
                 }
             }
             px[(y * PX + x) * 4 + 3] = (a / 16.0 * 255.0).round() as u8;
         }
     }
     px
+}
+
+/// The idle globe as a template image: the status item's icon whenever it is not a live indicator.
+pub fn idle() -> Image<'static> {
+    Image::new_owned(draw(Glyph::Idle, 0, 0.0), PX as u32, PX as u32)
 }
 
 /// What the status item was last given, so the loop only touches it on a change.
@@ -109,7 +150,7 @@ impl Tray {
             // Left click dictates in the menu bar; the menu moves to right click.
             let _ = tray.set_show_menu_on_left_click(!bar);
             if !bar && self.mode.is_some() {
-                let _ = tray.set_icon_with_as_template(app.default_window_icon().cloned(), false);
+                let _ = tray.set_icon_with_as_template(Some(idle()), true);
                 let _ = tray.set_menu(lock(&state(app).tray_menu).clone());
             }
             *self = Tray { mode: Some(bar), ..Tray::default() };
@@ -167,12 +208,12 @@ mod tests {
     }
 
     #[test]
-    fn the_waveform_follows_the_level_and_the_dots_take_turns() {
+    fn the_waveform_follows_the_level_and_the_meridians_sweep() {
         let ink = |px: Vec<u8>| alpha(&px).iter().map(|&a| a as u32).sum::<u32>();
         assert!(ink(draw(Glyph::Wave, 3, 1.0)) > ink(draw(Glyph::Wave, 3, 0.1)), "louder is taller");
         assert_eq!(draw(Glyph::Wave, 3, 0.0), draw(Glyph::Wave, 4, 0.0), "silence holds still");
         assert_ne!(draw(Glyph::Working, 0, 0.0), draw(Glyph::Working, 1, 0.0));
-        assert_eq!(draw(Glyph::Working, 0, 0.0), draw(Glyph::Working, 3, 0.0));
+        assert_eq!(draw(Glyph::Working, 0, 0.0), draw(Glyph::Working, SWEEP, 0.0), "one sweep, then it repeats");
         assert_eq!(draw(Glyph::Idle, 0, 0.9), draw(Glyph::Idle, 7, 0.0), "idle never animates");
     }
 }

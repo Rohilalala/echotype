@@ -1182,7 +1182,10 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
             send(tray.app_handle(), Cmd::Key(Ev::Toggle));
         }
     });
-    if let Some(icon) = app.default_window_icon() {
+    if cfg!(target_os = "macos") {
+        // The dotted globe as a template image, so macOS tints it for light and dark menu bars.
+        tray = tray.icon(crate::tray::idle()).icon_as_template(true);
+    } else if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
     }
     tray.build(app)?;
