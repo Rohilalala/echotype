@@ -1,13 +1,16 @@
 //! The always-on pill. One owner decides what the overlay shows and whether it is on screen:
 //! a pure model (visibility, message precedence, notice timers, hover dwell, hit testing in
-//! points, Dock offset, click debounce) and a ~15 Hz loop that applies it to the window.
+//! points, Dock offset, click debounce, dragging) and a ~15 Hz loop that applies it to the window
+//! (and, in menu-bar mode, to the status item instead).
 
 use crate::settings::Settings;
+use crate::tray::Glyph;
 use crate::{DictationState, lock, state};
 use serde::Serialize;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, LogicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::menu::Menu;
+use tauri::{AppHandle, Emitter, LogicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Wry};
 
 /// The overlay window: the widest notice plus room for its soft shadow (points).
 pub const WIN: (f64, f64) = (260.0, 32.0);
@@ -26,6 +29,8 @@ const DWELL: Duration = Duration::from_millis(200);
 /// A click this soon after the last one is the same click: a double-click must not start and finish.
 const DEBOUNCE: Duration = Duration::from_millis(400);
 pub const HIDE_FOR: Duration = Duration::from_secs(3600);
+/// A press that moves further than this (points) is a drag: it moves the pill and is never a click.
+const DRAG_SLOP: f64 = 4.0;
 const CHIPS: [(&str, &str); 3] = [("too_quiet", "Too quiet, move the mic closer"), ("quiet", "Quiet voice"), ("no_cleanup", "No cleanup")];
 
 // ---------- the pure model ----------
@@ -43,6 +48,8 @@ pub struct Ctx {
     pub main_key: bool,
     /// ...showing Home or onboarding, which show the live state themselves.
     pub main_home: bool,
+    /// Show Echotype in the menu bar: the status item is the indicator and the pill never shows.
+    pub menubar: bool,
 }
 
 impl Ctx {
@@ -55,6 +62,9 @@ impl Ctx {
 /// onboarding is done and it isn't hidden for the hour. Over Echotype's own focused window only
 /// the live states show, and not on Home or onboarding, which show them already (D14).
 pub fn visible(c: &Ctx, active: bool) -> bool {
+    if c.mac && c.menubar {
+        return false;
+    }
     if c.main_key {
         return active && !c.main_home;
     }
@@ -82,21 +92,31 @@ pub fn tray_act(c: &Ctx) -> TrayAct {
     }
 }
 
-/// The words overlay.js `primary()` puts on the pill for a state (plus the chip); only their
-/// length matters here, for the hit area.
-fn line(s: &DictationState) -> String {
+/// The words overlay.js `primary()` puts on the pill for a state, plus the chip: what the
+/// menu-bar menu says on its first line.
+fn said(s: &DictationState) -> String {
     let main = match s.state {
         "error" => s.error.as_deref().unwrap_or("Something went wrong").lines().next().unwrap_or_default().to_string(),
         "hint" => s.message.clone().unwrap_or_default(),
         "done" if s.copied => "Copied, ⌘V to paste".into(),
         "done" => "Pasted".into(),
-        "transcribing" => "Transcribing… 10s".into(),
-        "cleaning" => "Cleaning up… 10s".into(),
+        "transcribing" => "Transcribing…".into(),
+        "cleaning" => "Cleaning up…".into(),
         _ => String::new(),
     };
     match s.chip.and_then(|c| CHIPS.iter().find(|(k, _)| *k == c)) {
         Some((_, chip)) => format!("{main} · {chip}"),
         None => main,
+    }
+}
+
+/// The same words as wide as the pill can get (seconds after "Transcribing…"); only their
+/// length matters here, for the hit area.
+fn line(s: &DictationState) -> String {
+    let words = said(s);
+    match s.state {
+        "transcribing" | "cleaning" => words.replacen('…', "… 10s", 1),
+        _ => words,
     }
 }
 
@@ -135,6 +155,11 @@ pub struct Pill {
     muted: bool,
     hover_since: Option<Instant>,
     last_tick: Option<Instant>,
+    /// The live input level, 0..1 (the menu-bar waveform).
+    pub meter: f32,
+    /// What the pill says and its rank, for the menu-bar menu. A problem (rank 3+) stays there
+    /// after the pill lets go of it, until the next dictation.
+    said: Option<(String, u8)>,
 }
 
 impl Pill {
@@ -165,11 +190,36 @@ impl Pill {
         if s.state != "recording" {
             self.muted = false;
         }
+        self.said = match s.state {
+            "idle" => self.said.take().filter(|(_, r)| *r >= 3),
+            "recording" => None,
+            "transcribing" | "cleaning" => Some((said(s), 0)),
+            _ => Some((said(s), rank(s))),
+        };
         true
     }
 
-    pub fn set_muted(&mut self, muted: bool) {
+    pub fn set_level(&mut self, muted: bool, meter: f32) {
         self.muted = muted && self.active.is_some_and(|a| a.recording);
+        self.meter = meter;
+    }
+
+    /// The status item's glyph in menu-bar mode: the same state the pill would show, so the check
+    /// and the warning stay exactly as long as the pill's notice would.
+    pub fn glyph(&self) -> Glyph {
+        match self.active {
+            None => Glyph::Idle,
+            Some(a) if a.recording => Glyph::Wave,
+            Some(Active { notice: None, .. }) => Glyph::Working,
+            Some(Active { notice: Some((2, _)), .. }) => Glyph::Done,
+            Some(Active { notice: Some((r, _)), .. }) if r >= 3 => Glyph::Warning,
+            Some(_) => Glyph::Idle,
+        }
+    }
+
+    /// The menu-bar menu's first line: what the pill says now, or the last problem.
+    pub fn menu_line(&self) -> Option<&str> {
+        self.said.as_ref().map(|(t, _)| t.as_str()).filter(|t| !t.is_empty())
     }
 
     /// Advances the timers with the cursor `inside` the capsule or not. A notice ends after its
@@ -184,6 +234,7 @@ impl Pill {
             }
             if now >= *until {
                 self.active = None;
+                self.said = self.said.take().filter(|(_, r)| *r >= 3);
             }
         }
         self.hover_since = if inside { Some(self.hover_since.unwrap_or(now)) } else { None };
@@ -211,16 +262,58 @@ impl Pill {
 
 /// Pill clicks closer together than DEBOUNCE count once.
 #[derive(Debug, Default)]
-pub struct Debounce(Option<Instant>);
+pub struct Debounce {
+    last: Option<Instant>,
+    /// When the last accepted click started a dictation, so a double-click can take it back.
+    started: Option<Instant>,
+}
 
 impl Debounce {
     pub fn accept(&mut self, now: Instant) -> bool {
-        if self.0.is_some_and(|t| now.saturating_duration_since(t) < DEBOUNCE) {
+        if self.last.is_some_and(|t| now.saturating_duration_since(t) < DEBOUNCE) {
             return false;
         }
-        self.0 = Some(now);
+        self.last = Some(now);
+        self.started = None;
         true
     }
+
+    pub fn started(&mut self, now: Instant) {
+        self.started = Some(now);
+    }
+
+    /// A double-click (reset the pill's place) takes back the dictation its first click started.
+    pub fn undo_start(&mut self, now: Instant) -> bool {
+        self.started.take().is_some_and(|t| now.saturating_duration_since(t) < DEBOUNCE)
+    }
+}
+
+/// One press on the pill: where the cursor went down (points), the window's top-left then
+/// (filled in by the loop), whether it has moved past DRAG_SLOP and when the button came up.
+#[derive(Debug, Clone, Copy)]
+pub struct Drag {
+    from: (f64, f64),
+    at: Option<(f64, f64)>,
+    moved: bool,
+    ended: Option<Instant>,
+}
+
+impl Drag {
+    pub fn new(from: (f64, f64)) -> Drag {
+        Drag { from, at: None, moved: false, ended: None }
+    }
+
+    /// The mouse-up that ends this press is a drop, not a click: it moved past DRAG_SLOP (seen
+    /// by the loop, or by the cursor now if the loop has not looked yet). Only for a second
+    /// after it ends, so a stale drag never eats a later click on ✓.
+    pub fn is_drop(&self, now: Instant, cursor: Option<(f64, f64)>) -> bool {
+        (self.moved || cursor.is_some_and(|c| is_drag(self.from, c)))
+            && self.ended.is_none_or(|t| now.saturating_duration_since(t) < Duration::from_secs(1))
+    }
+}
+
+pub fn is_drag(from: (f64, f64), to: (f64, f64)) -> bool {
+    (to.0 - from.0).hypot(to.1 - from.1) > DRAG_SLOP
 }
 
 // ---------- geometry, all in global points (top-left origin) ----------
@@ -259,6 +352,28 @@ pub fn capsule_rect(win: (f64, f64), (w, h): (f64, f64)) -> Rect {
 /// Window top-left: bottom-centre of the visible frame `work`, MARGIN above it plus `dock`.
 pub fn place(work: Rect, dock: f64) -> (f64, f64) {
     (work.x + (work.w - WIN.0) / 2.0, work.y + work.h - MARGIN - dock - (WIN.1 + LINE_H) / 2.0)
+}
+
+/// The window's top-left kept inside `work` (a display's visible frame), so no part of the pill,
+/// even its widest notice, can go off-screen, under the menu bar or behind a visible Dock.
+pub fn clamp(work: Rect, (x, y): (f64, f64)) -> (f64, f64) {
+    (x.clamp(work.x, work.x + (work.w - WIN.0).max(0.0)), y.clamp(work.y, work.y + (work.h - WIN.1).max(0.0)))
+}
+
+/// Where in `work` the window is, as fractions of the room it has there, so a display that
+/// changes resolution or Dock size keeps the pill in the same place relative to its edges.
+pub fn normalize(work: Rect, at: (f64, f64)) -> [f64; 2] {
+    let (x, y) = clamp(work, at);
+    let frac = |d: f64, room: f64| if room > 0.0 { d / room } else { 0.5 };
+    [frac(x - work.x, work.w - WIN.0), frac(y - work.y, work.h - WIN.1)]
+}
+
+/// Window top-left on a display: where it was dropped there, else bottom-centre above the Dock.
+pub fn spot(work: Rect, saved: Option<[f64; 2]>, dock: f64) -> (f64, f64) {
+    match saved {
+        Some([nx, ny]) => clamp(work, (work.x + nx * (work.w - WIN.0), work.y + ny * (work.h - WIN.1))),
+        None => place(work, dock),
+    }
 }
 
 /// An auto-hidden Dock is not part of the visible frame, so the pill adds its height to stay out
@@ -345,9 +460,14 @@ struct View {
     /// The idle bar has opened into its hint.
     expand: bool,
     hint: String,
+    /// Picked up and moving: the capsule lifts.
+    drag: bool,
 }
 
 struct Screen {
+    /// The display's name, which survives rearranging displays (its key in `pill_positions`).
+    // ponytail: two displays with the same name share one saved place; add the serial if that bites.
+    key: String,
     rect: Rect,
     work: Rect,
 }
@@ -357,11 +477,74 @@ fn screens(app: &AppHandle) -> (Vec<Screen>, f64) {
     let list = app.available_monitors().unwrap_or_default().into_iter().map(|m| {
         let (p, z, s, wa) = (m.position(), m.size(), m.scale_factor(), m.work_area());
         Screen {
+            key: m.name().cloned().unwrap_or_else(|| format!("{}x{}", z.width, z.height)),
             rect: Rect::from_phys(p.x as f64, p.y as f64, z.width as f64, z.height as f64, s),
             work: Rect::from_phys(wa.position.x as f64, wa.position.y as f64, wa.size.width as f64, wa.size.height as f64, s),
         }
     });
     (list.collect(), primary)
+}
+
+/// The display the pill goes on. Following the cursor: the one under it (none while it is
+/// between displays, so the pill stays where it is, unless it was never placed). Not following:
+/// the one it was last dropped on, the primary while that one is unplugged or before any drop.
+fn choose<'a>(list: &'a [Screen], cursor: Option<(f64, f64)>, follow: bool, home: Option<&str>, placed: bool) -> Option<&'a Screen> {
+    // The primary monitor's point origin is (0, 0) on every platform.
+    let primary = || list.iter().find(|m| m.rect.x == 0.0 && m.rect.y == 0.0);
+    if !follow {
+        return home.and_then(|k| list.iter().find(|m| m.key == k)).or_else(primary);
+    }
+    cursor.and_then(|c| list.iter().find(|m| m.rect.contains(c))).or_else(|| if placed { None } else { primary() })
+}
+
+/// The cursor in global points, or None if the OS won't say.
+fn cursor_now(app: &AppHandle) -> Option<(f64, f64)> {
+    let primary = app.primary_monitor().ok().flatten().map_or(1.0, |m| m.scale_factor());
+    app.cursor_position().ok().map(|p| cursor_pt((p.x, p.y), primary))
+}
+
+/// Left button state from the window server, so a drag ends even when the button comes up
+/// outside the overlay (the loop moves the window after the cursor, so it can fall behind).
+#[cfg(target_os = "macos")]
+fn button_down() -> bool {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
+    }
+    // SAFETY: a pure query; 0 = kCGEventSourceStateCombinedSessionState, 0 = kCGMouseButtonLeft.
+    unsafe { CGEventSourceButtonState(0, 0) }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn button_down() -> bool {
+    false
+}
+
+/// The button went down on the pill (not on ✕ or ✓): the loop moves the pill with the cursor
+/// until it comes up. The dictating-only pill elsewhere stays put.
+pub fn grab(app: &AppHandle) {
+    if cfg!(target_os = "macos")
+        && let Some(c) = cursor_now(app)
+    {
+        *lock(&state(app).drag) = Some(Drag::new(c));
+        let _ = state(app).pill_wake.send(());
+    }
+}
+
+/// A mouse-up on the pill that ends a drag: not a click.
+pub fn is_drop(app: &AppHandle, now: Instant) -> bool {
+    let drag = *lock(&state(app).drag);
+    drag.is_some_and(|d| d.is_drop(now, cursor_now(app)))
+}
+
+/// Double-click: back to bottom-centre on this display.
+pub fn reset(app: &AppHandle) {
+    let Some(c) = cursor_now(app) else { return };
+    if let Some(m) = screens(app).0.into_iter().find(|m| m.rect.contains(c)) {
+        set(app, move |s| {
+            s.pill_positions.remove(&m.key);
+        });
+    }
 }
 
 pub fn now_ms() -> u64 {
@@ -377,7 +560,12 @@ fn ctx(app: &AppHandle, s: &Settings) -> Ctx {
         now_ms: now_ms(),
         main_key: state(app).main_key.load(std::sync::atomic::Ordering::SeqCst),
         main_home: state(app).main_home.load(std::sync::atomic::Ordering::SeqCst) || !s.onboarded,
+        menubar: in_menu_bar(s),
     }
+}
+
+pub fn in_menu_bar(s: &Settings) -> bool {
+    cfg!(target_os = "macos") && s.show_in == "menubar"
 }
 
 /// "Hold ⌥ Space or click to dictate" (D10: the verb follows the mode).
@@ -387,31 +575,37 @@ fn hint(s: &Settings) -> String {
 }
 
 /// The loop: woken by every dictation state, settings change and main-window focus change, and
-/// polling the cursor at ~15 Hz while the pill is on screen (4 Hz when the cursor is far away).
+/// polling the cursor at ~15 Hz while the pill is on screen (4 Hz when the cursor is far away,
+/// ~60 Hz while it is being dragged). In menu-bar mode it drives the status item instead, ~8 Hz
+/// while listening or working.
 /// `ECHOTYPE_PILL_SCREEN_X` (tests) pins the pill to the monitor whose left edge is at that x
 /// (global points); while that monitor is absent the pill never shows.
 pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
     std::thread::spawn(move || {
         let pinned: Option<f64> = std::env::var("ECHOTYPE_PILL_SCREEN_X").ok().and_then(|x| x.parse().ok());
         let (mut shown, mut inside, mut taking_clicks) = (false, false, false);
-        let (mut at, mut placed_on): ((f64, f64), Option<Rect>) = ((0.0, 0.0), None);
+        // Where the window is, the visible frame it was placed in and the saved place it used.
+        let (mut at, mut placed_on, mut placed_saved): ((f64, f64), Option<Rect>, Option<[f64; 2]>) = ((0.0, 0.0), None, None);
         let (mut emitted, mut protected, mut tray_text): (Option<View>, Option<bool>, String) = (None, None, String::new());
         let mut monitors: Option<(Instant, Vec<Screen>, f64)> = None;
         // The Dock's settings cost three `defaults` processes, so they are re-read once a minute at most.
         let mut dock: Option<(Instant, f64)> = None;
+        let mut tray = crate::tray::Tray::default();
         loop {
             let now = Instant::now();
             let s = crate::current_settings(&app);
             let c = ctx(&app, &s);
             let hint = hint(&s);
-            let (active, expanded, size, deadline) = {
+            let (active, expanded, size, deadline, glyph, meter, line) = {
                 let st = state(&app);
                 let mut p = lock(&st.pill);
                 let (active, expanded) = p.tick(now, inside);
-                (active, expanded, p.capsule(expanded, hint.chars().count()), p.deadline())
+                (active, expanded, p.capsule(expanded, hint.chars().count()), p.deadline(), p.glyph(), p.meter, p.menu_line().map(String::from))
             };
             let mut want = visible(&c, active);
             let mut near = false;
+            let mut held = false;
+            let mut dropped: Option<(String, [f64; 2])> = None;
             inside = false;
             if want {
                 if monitors.as_ref().is_none_or(|(t, ..)| !shown || now.duration_since(*t) > Duration::from_secs(2)) {
@@ -420,36 +614,82 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
                 }
                 let (_, list, primary) = monitors.as_ref().expect("just filled");
                 let cursor = app.cursor_position().ok().map(|p| cursor_pt((p.x, p.y), *primary));
-                // The primary monitor's point origin is (0, 0) on every platform.
-                let primary_screen = || list.iter().find(|m| m.rect.x == 0.0 && m.rect.y == 0.0);
                 let target = match pinned {
                     Some(x) => list.iter().find(|m| (m.rect.x - x).abs() < 1.0),
                     // ponytail: Windows/Linux (dictating-only pill) stay on the primary monitor; their
                     // cursor and monitor coordinates don't follow the macOS points maths above.
-                    None if !cfg!(target_os = "macos") => primary_screen(),
-                    None => cursor.and_then(|c| list.iter().find(|m| m.rect.contains(c))).or_else(|| placed_on.is_none().then(primary_screen).flatten()),
+                    None if !cfg!(target_os = "macos") => choose(list, None, false, None, false),
+                    None => choose(list, cursor, s.pill_follow_cursor, s.pill_screen.as_deref(), placed_on.is_some()),
                 };
                 if pinned.is_some() && target.is_none() {
                     placed_on = None; // the pinned monitor went away
                 }
-                // F4: follow the cursor's display while idle; a recording or notice stays put.
-                if let Some(t) = target
-                    && (!shown || (!active && !expanded))
-                    && placed_on != Some(t.work)
-                {
-                    if dock.is_none_or(|(t, _)| now.duration_since(t) > Duration::from_secs(60)) {
-                        dock = Some((now, read_dock()));
+                let st = state(&app);
+                let mut drag = lock(&st.drag);
+                if let Some(d) = drag.as_mut().filter(|d| d.ended.is_none()) {
+                    // Dragging: the window follows the cursor on whichever display it is over (the
+                    // pinned one in tests), clamped to that display's visible frame.
+                    held = true;
+                    let start = *d.at.get_or_insert(at);
+                    if let Some(c) = cursor {
+                        d.moved |= is_drag(d.from, c);
+                        let on = if pinned.is_some() { target } else { list.iter().find(|m| m.rect.contains(c)) };
+                        if let Some(m) = on.filter(|_| d.moved) {
+                            at = clamp(m.work, (start.0 + c.0 - d.from.0, start.1 + c.1 - d.from.1));
+                            let _ = win.set_position(LogicalPosition::new(at.0, at.1));
+                            placed_on = Some(m.work);
+                        }
                     }
-                    at = place(t.work, dock.map_or(0.0, |(_, d)| d));
-                    let _ = win.set_position(LogicalPosition::new(at.0, at.1));
-                    placed_on = Some(t.work);
+                    if !button_down() {
+                        d.ended = Some(now);
+                        held = false;
+                        if d.moved
+                            && let Some(m) = list.iter().find(|m| Some(m.work) == placed_on)
+                        {
+                            dropped = Some((m.key.clone(), normalize(m.work, at)));
+                        }
+                    }
+                } else if let Some(t) = target {
+                    // F4: follow the cursor's display while idle; a recording or notice stays put.
+                    // A new saved place for this display (a drop, a double-click) applies at once.
+                    let saved = if cfg!(target_os = "macos") { s.pill_positions.get(&t.key).copied() } else { None };
+                    let other = placed_on != Some(t.work);
+                    if (other && (!shown || (!active && !expanded))) || (!other && saved != placed_saved) {
+                        if dock.is_none_or(|(t, _)| now.duration_since(t) > Duration::from_secs(60)) {
+                            dock = Some((now, read_dock()));
+                        }
+                        at = spot(t.work, saved, dock.map_or(0.0, |(_, d)| d));
+                        let _ = win.set_position(LogicalPosition::new(at.0, at.1));
+                        eprintln!("echotype: pill on {} at {:.0},{:.0}", t.key, at.0, at.1);
+                        placed_on = Some(t.work);
+                        placed_saved = saved;
+                    }
                 }
+                drop(drag);
                 // Never shown where it was not placed (a pinned monitor that is gone).
                 want = placed_on.is_some();
                 let r = capsule_rect(at, size);
                 if let Some(c) = cursor {
-                    inside = r.contains(c);
+                    // While held the overlay keeps the mouse, so the mouse-up (and a double-click) reach it.
+                    inside = held || r.contains(c);
                     near = (c.0 - (r.x + r.w / 2.0)).abs() < 200.0 && (c.1 - (r.y + r.h / 2.0)).abs() < 200.0;
+                }
+            }
+            if !want
+                && let Some(d) = lock(&state(&app).drag).as_mut()
+            {
+                d.ended.get_or_insert(now); // the pill went away mid-press
+            }
+            if let Some((key, n)) = dropped {
+                // Saved here, before the next pass reads settings, so the pill never jumps back.
+                placed_saved = Some(n);
+                if let Err(e) = crate::commit_settings(&app, |old| {
+                    let mut s = old.clone();
+                    s.pill_positions.insert(key.clone(), n);
+                    s.pill_screen = Some(key);
+                    s
+                }) {
+                    eprintln!("echotype: {e}");
                 }
             }
             if inside != taking_clicks {
@@ -461,7 +701,8 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
                 let _ = if want { win.show() } else { win.hide() };
                 shown = want;
             }
-            let view = View { active, hover: inside, expand: expanded, hint };
+            // Picked up, the idle bar is a bar again: the hint is for hovering, not carrying.
+            let view = View { active, hover: inside, expand: expanded && !held, hint, drag: held && lock(&state(&app).drag).is_some_and(|d| d.moved) };
             if emitted.as_ref() != Some(&view) {
                 let _ = app.emit_to("overlay", "pill", &view);
                 emitted = Some(view);
@@ -477,13 +718,22 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
                 }
                 tray_text = text;
             }
-            let wait = if want && (active || near) {
+            let animating = c.menubar && matches!(glyph, Glyph::Wave | Glyph::Working);
+            if c.mac {
+                tray.sync(&app, &s, c.menubar, glyph, now_ms() / 125, meter, line.as_deref());
+            }
+            let wait = if held {
+                Duration::from_millis(16)
+            } else if want && (active || near) {
                 Duration::from_millis(66)
             } else if want {
                 Duration::from_millis(250)
+            } else if animating {
+                Duration::from_millis(125)
             } else {
-                // Hidden: sleep until something changes, the notice ends or the hour is up.
-                let mut w = Duration::from_secs(60);
+                // Hidden: sleep until something changes, the notice ends or the hour is up (and
+                // in the menu bar look for new microphones now and then).
+                let mut w = Duration::from_secs(if c.menubar { 5 } else { 60 });
                 if let Some(d) = deadline {
                     w = w.min(d.saturating_duration_since(now));
                 }
@@ -567,30 +817,58 @@ const LANGS: [(&str, &str); 28] = [
 
 /// The idle pill's right-click menu, native and handled here, so the overlay needs no settings commands (F3).
 pub fn show_menu(app: &AppHandle, win: &WebviewWindow) -> tauri::Result<()> {
-    use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+    let mics: Vec<String> = crate::audio::input_devices().into_iter().map(|d| d.name).collect();
+    win.popup_menu(&menu(app, &mics, None)?)
+}
+
+/// What the menu-bar menu adds: its first line (what the pill would say) and whether a dictation is running.
+pub struct Bar<'a> {
+    pub line: Option<&'a str>,
+    pub recording: bool,
+}
+
+/// The pill's menu. In menu-bar mode it is the status item's menu too: what the pill would say
+/// on top, dictation first and Quit last, and no "Hide for 1 hour" (there is no pill to hide).
+pub fn menu(app: &AppHandle, mics: &[String], bar: Option<Bar>) -> tauri::Result<Menu<Wry>> {
+    use tauri::menu::{CheckMenuItem, MenuItem, PredefinedMenuItem, Submenu};
     let s = crate::current_settings(app);
-    let mics = Submenu::with_id(app, "pill-mics", "Microphone", true)?;
-    mics.append(&CheckMenuItem::with_id(app, "pill-mic:", "System default", true, s.input_device.is_none(), None::<&str>)?)?;
-    for d in crate::audio::input_devices() {
-        let on = s.input_device.as_deref() == Some(d.name.as_str());
-        mics.append(&CheckMenuItem::with_id(app, format!("pill-mic:{}", d.name), &d.name, true, on, None::<&str>)?)?;
+    let menu = Menu::new(app)?;
+    if let Some(b) = &bar {
+        if let Some(line) = b.line {
+            menu.append(&MenuItem::with_id(app, "bar-line", line, false, None::<&str>)?)?;
+            menu.append(&PredefinedMenuItem::separator(app)?)?;
+        }
+        // Ids the tray's own handler already answers (lib.rs create_tray).
+        menu.append(&MenuItem::with_id(app, "toggle", if b.recording { "Finish dictation" } else { "Start dictation" }, true, None::<&str>)?)?;
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
+    }
+    let list = Submenu::with_id(app, "pill-mics", "Microphone", true)?;
+    list.append(&CheckMenuItem::with_id(app, "pill-mic:", "System default", true, s.input_device.is_none(), None::<&str>)?)?;
+    for name in mics {
+        let on = s.input_device.as_deref() == Some(name.as_str());
+        list.append(&CheckMenuItem::with_id(app, format!("pill-mic:{name}"), name, true, on, None::<&str>)?)?;
     }
     let langs = Submenu::with_id(app, "pill-langs", "Language", true)?;
     for (code, name) in LANGS {
         langs.append(&CheckMenuItem::with_id(app, format!("pill-lang:{code}"), name, true, s.language == code, None::<&str>)?)?;
     }
     let has_last = lock(&state(app).last_output).is_some();
-    let menu = Menu::with_items(app, &[
-        &mics,
+    menu.append_items(&[
+        &list,
         &langs,
         &PredefinedMenuItem::separator(app)?,
         &MenuItem::with_id(app, "pill-paste", "Paste last transcript", has_last, None::<&str>)?,
         &MenuItem::with_id(app, "pill-history", "History…", true, None::<&str>)?,
         &PredefinedMenuItem::separator(app)?,
-        &MenuItem::with_id(app, "pill-hide", "Hide for 1 hour", true, None::<&str>)?,
-        &MenuItem::with_id(app, "pill-settings", "Settings…", true, None::<&str>)?,
     ])?;
-    win.popup_menu(&menu)
+    if bar.is_none() {
+        menu.append(&MenuItem::with_id(app, "pill-hide", "Hide for 1 hour", true, None::<&str>)?)?;
+    }
+    menu.append(&MenuItem::with_id(app, "pill-settings", "Settings…", true, None::<&str>)?)?;
+    if bar.is_some() {
+        menu.append(&MenuItem::with_id(app, "quit", "Quit Echotype", true, None::<&str>)?)?;
+    }
+    Ok(menu)
 }
 
 pub fn on_menu(app: &AppHandle, id: &str) {
@@ -620,7 +898,7 @@ mod tests {
     }
 
     fn ctx() -> Ctx {
-        Ctx { mac: true, onboarded: true, idle_on: true, hidden_until: 0, now_ms: 1_000_000, main_key: false, main_home: false }
+        Ctx { mac: true, onboarded: true, idle_on: true, hidden_until: 0, now_ms: 1_000_000, main_key: false, main_home: false, menubar: false }
     }
 
     #[test]
@@ -639,6 +917,160 @@ mod tests {
         assert!(visible(&page, true), "but a recording or notice still shows over its other pages");
         assert!(!visible(&Ctx { onboarded: false, ..c }, false), "no idle pill before onboarding finishes");
         assert!(!visible(&Ctx { mac: false, ..c }, false) && visible(&Ctx { mac: false, ..c }, true), "elsewhere only while dictating");
+    }
+
+    #[test]
+    fn in_menu_bar_mode_the_pill_never_shows() {
+        let bar = Ctx { menubar: true, ..ctx() };
+        assert!(!visible(&bar, false) && !visible(&bar, true), "not idle, not while dictating or showing a notice");
+        assert!(!visible(&Ctx { main_key: true, ..bar }, true));
+        assert!(visible(&Ctx { mac: false, ..bar }, true), "elsewhere there is no menu-bar mode: the pill still shows while dictating");
+        let mut s = Settings::default();
+        assert!(!in_menu_bar(&s));
+        s.show_in = "menubar".into();
+        assert_eq!(in_menu_bar(&s), cfg!(target_os = "macos"));
+    }
+
+    #[test]
+    fn the_status_item_shows_the_state_the_pill_would() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut p = Pill::default();
+        assert_eq!(p.glyph(), Glyph::Idle);
+        p.on_state(&st("recording"), t0);
+        assert_eq!(p.glyph(), Glyph::Wave);
+        p.set_level(false, 0.7);
+        assert_eq!(p.meter, 0.7);
+        p.on_state(&st("transcribing"), ms(10));
+        assert_eq!((p.glyph(), p.menu_line()), (Glyph::Working, Some("Transcribing…")));
+        p.on_state(&st("cleaning"), ms(20));
+        assert_eq!((p.glyph(), p.menu_line()), (Glyph::Working, Some("Cleaning up…")));
+        p.on_state(&st("done"), ms(30));
+        assert_eq!((p.glyph(), p.menu_line()), (Glyph::Done, Some("Pasted")));
+        p.tick(ms(1300), false);
+        assert_eq!((p.glyph(), p.menu_line()), (Glyph::Idle, None), "the check is brief, like the pill's notice");
+
+        let err = DictationState { state: "error", error: Some("Microphone access is off\nmore".into()), ..Default::default() };
+        p.on_state(&err, ms(2000));
+        assert_eq!((p.glyph(), p.menu_line()), (Glyph::Warning, Some("Microphone access is off")));
+        p.tick(ms(3300), false);
+        assert_eq!(p.glyph(), Glyph::Idle);
+        assert_eq!(p.menu_line(), Some("Microphone access is off"), "a problem stays in the menu after the glyph settles");
+        p.on_state(&st("idle"), ms(3400));
+        assert_eq!(p.menu_line(), Some("Microphone access is off"));
+        p.on_state(&st("recording"), ms(3500));
+        assert_eq!(p.menu_line(), None, "until the next dictation");
+
+        let muted = DictationState { state: "hint", message: Some("No audio. Check your mic".into()), action: Some("microphone"), ..Default::default() };
+        let mut p = Pill::default();
+        p.on_state(&muted, t0);
+        assert_eq!(p.glyph(), Glyph::Warning, "a mic problem warns too");
+        let mut p = Pill::default();
+        p.on_state(&DictationState { state: "hint", message: Some("Didn't catch that".into()), ..Default::default() }, t0);
+        assert_eq!((p.glyph(), p.menu_line()), (Glyph::Idle, Some("Didn't catch that")), "a plain hint is only the menu line");
+    }
+
+    #[test]
+    fn a_press_that_moves_more_than_4_points_is_a_drag_not_a_click() {
+        let t0 = Instant::now();
+        let from = (100.0, 100.0);
+        assert!(!is_drag(from, (104.0, 100.0)) && !is_drag(from, (102.8, 102.8)), "4 pt of wobble is still a click");
+        assert!(is_drag(from, (104.1, 100.0)) && is_drag(from, (97.0, 97.0)));
+        // On a Retina primary the cursor arrives in pixels: 6 px is 3 pt, not a drag.
+        assert!(!is_drag(from, cursor_pt((206.0, 200.0), 2.0)));
+        assert!(is_drag(from, cursor_pt((210.0, 200.0), 2.0)));
+
+        let mut d = Drag::new(from);
+        assert!(!d.is_drop(t0, Some((101.0, 99.0))), "a click");
+        assert!(d.is_drop(t0, Some((140.0, 100.0))), "moved, even before the loop saw it");
+        d.moved = true;
+        d.ended = Some(t0);
+        assert!(d.is_drop(t0 + Duration::from_millis(300), Some(from)), "the drop's own mouse-up");
+        assert!(!d.is_drop(t0 + Duration::from_secs(2), Some(from)), "never a later click");
+    }
+
+    #[test]
+    fn a_dragged_pill_stays_on_screen_and_out_from_under_the_menu_bar() {
+        // Retina primary (scale 2) at the origin; a 1x 2560x1440 display to its right whose
+        // visible frame starts under a 25 pt menu bar and stops above a 70 pt Dock.
+        let ext = Rect::from_phys(1512.0, -300.0, 2560.0, 1440.0, 1.0);
+        let work = Rect { x: ext.x, y: ext.y + 25.0, w: ext.w, h: ext.h - 25.0 - 70.0 };
+        // A drag that started on the capsule and ran past the top-left corner: the cursor comes in
+        // pixels at the PRIMARY scale (2), so (3000, -2000) px is (1500, -1000) pt.
+        let (from, start) = ((2800.0, 800.0), (2662.0, 1020.0));
+        let c = cursor_pt((3000.0, -2000.0), 2.0);
+        assert_eq!(c, (1500.0, -1000.0));
+        let at = clamp(work, (start.0 + c.0 - from.0, start.1 + c.1 - from.1));
+        assert_eq!(at, (1512.0, -275.0), "pinned to the visible frame's corner, below the menu bar");
+        // Past the bottom-right: the whole window, so even the widest notice, stays above the Dock.
+        let at = clamp(work, (5000.0, 5000.0));
+        assert_eq!(at, (1512.0 + 2560.0 - WIN.0, -300.0 + 1440.0 - 70.0 - WIN.1));
+        let r = capsule_rect(at, (MAX_W, LINE_H));
+        assert!(r.x + r.w <= ext.x + ext.w && r.y + r.h <= work.y + work.h);
+        // Inside the frame nothing changes.
+        assert_eq!(clamp(work, (2000.0, 300.0)), (2000.0, 300.0));
+    }
+
+    #[test]
+    fn each_display_remembers_where_the_pill_was_dropped() {
+        let laptop = Rect { x: 0.0, y: 25.0, w: 1512.0, h: 957.0 };
+        let portrait = Rect { x: -800.0, y: 80.0, w: 800.0, h: 1255.0 };
+        assert_eq!(spot(laptop, None, 0.0), place(laptop, 0.0), "no saved place: bottom-centre");
+        assert_eq!(spot(laptop, None, 65.0), place(laptop, 65.0), "...above an auto-hidden Dock");
+        let dropped = (-500.0, 300.0);
+        let n = normalize(portrait, dropped);
+        assert_eq!(spot(portrait, Some(n), 0.0), dropped, "restored exactly where it was dropped");
+        assert_eq!(normalize(portrait, (-9999.0, 9999.0)), [0.0, 1.0], "a drop is saved on screen");
+        // The same fractions on a display that got bigger keep the pill as far across it.
+        let bigger = Rect { h: 1555.0, ..portrait };
+        let again = spot(bigger, Some(n), 0.0);
+        assert_eq!(again.0, dropped.0);
+        assert!(((again.1 - bigger.y) / (bigger.h - WIN.1) - n[1]).abs() < 1e-9);
+        // A saved place never puts the window off-screen, even from a hand-edited file.
+        assert_eq!(spot(laptop, Some([3.0, -1.0]), 0.0), (1512.0 - WIN.0, 25.0));
+        // Double-click forgets this display's place; the others keep theirs.
+        let mut s = Settings::default();
+        s.pill_positions.insert("Bimawen-16".into(), n);
+        s.pill_positions.insert("Built-in Retina Display".into(), [0.1, 0.1]);
+        s.pill_positions.remove("Bimawen-16");
+        assert_eq!(spot(portrait, s.pill_positions.get("Bimawen-16").copied(), 0.0), place(portrait, 0.0));
+        assert_eq!(spot(laptop, s.pill_positions.get("Built-in Retina Display").copied(), 0.0), clamp(laptop, (0.1 * (1512.0 - WIN.0), 25.0 + 0.1 * (957.0 - WIN.1))));
+    }
+
+    #[test]
+    fn the_pill_follows_the_cursor_or_stays_on_its_own_screen() {
+        let screen = |key: &str, x: f64, y: f64, w: f64, h: f64| Screen { key: key.into(), rect: Rect { x, y, w, h }, work: Rect { x, y, w, h } };
+        let list = vec![screen("main", 0.0, 0.0, 2560.0, 1440.0), screen("laptop", 2560.0, 779.0, 1512.0, 982.0), screen("portrait", -800.0, 105.0, 800.0, 1280.0)];
+        let key = |m: Option<&Screen>| m.map(|m| m.key.clone());
+        let on_laptop = Some((3000.0, 1000.0));
+        // Following (the default): the display under the cursor, with that display's saved place.
+        assert_eq!(key(choose(&list, on_laptop, true, Some("portrait"), true)), Some("laptop".into()));
+        assert_eq!(key(choose(&list, Some((-10.0, 200.0)), true, None, true)), Some("portrait".into()));
+        assert_eq!(key(choose(&list, Some((5000.0, 0.0)), true, None, true)), None, "between displays: stays put");
+        assert_eq!(key(choose(&list, None, true, None, false)), Some("main".into()), "never placed: the primary");
+        // Not following: the display it was last dropped on, wherever the cursor goes.
+        assert_eq!(key(choose(&list, on_laptop, false, Some("portrait"), true)), Some("portrait".into()));
+        assert_eq!(key(choose(&list, Some((100.0, 100.0)), false, Some("portrait"), true)), Some("portrait".into()));
+        assert_eq!(key(choose(&list, on_laptop, false, None, true)), Some("main".into()), "never dragged: the primary");
+        // That display unplugged: the primary, and back once it returns.
+        let unplugged = vec![screen("main", 0.0, 0.0, 2560.0, 1440.0), screen("laptop", 2560.0, 779.0, 1512.0, 982.0)];
+        assert_eq!(key(choose(&unplugged, on_laptop, false, Some("portrait"), true)), Some("main".into()));
+        assert_eq!(key(choose(&list, on_laptop, false, Some("portrait"), true)), Some("portrait".into()));
+    }
+
+    #[test]
+    fn a_double_click_takes_back_the_dictation_its_first_click_started() {
+        let t0 = Instant::now();
+        let mut d = Debounce::default();
+        assert!(d.accept(t0));
+        d.started(t0);
+        assert!(d.undo_start(t0 + Duration::from_millis(300)));
+        assert!(!d.undo_start(t0 + Duration::from_millis(310)), "only once");
+        assert!(d.accept(t0 + Duration::from_millis(500)));
+        d.started(t0 + Duration::from_millis(500));
+        assert!(!d.undo_start(t0 + Duration::from_millis(1000)), "a slow second click is a new click, not a double-click");
+        assert!(d.accept(t0 + Duration::from_millis(2000)));
+        assert!(!d.undo_start(t0 + Duration::from_millis(2100)), "a click that finished a dictation is not taken back");
     }
 
     #[test]
@@ -715,14 +1147,14 @@ mod tests {
         p.on_state(&st("recording"), ms(300));
         assert_eq!(p.tick(ms(600), true), (true, false), "only the idle bar expands (D11)");
         assert_eq!(p.capsule(false, 32), (REC_W, 20.0));
-        p.set_muted(true);
+        p.set_level(true, 0.0);
         assert!(p.capsule(false, 32).0 > REC_LOCKED_W);
         p.on_state(&DictationState { state: "recording", locked: true, ..Default::default() }, ms(700));
         assert!(p.capsule(false, 32).0 > REC_LOCKED_W, "locking keeps the muted line");
-        p.set_muted(false);
+        p.set_level(false, 0.0);
         assert_eq!(p.capsule(false, 32), (REC_LOCKED_W, 20.0));
         p.on_state(&st("transcribing"), ms(800));
-        p.set_muted(true);
+        p.set_level(true, 0.0);
         assert_eq!(p.capsule(false, 32).1, LINE_H, "muted only applies to a live recording");
     }
 

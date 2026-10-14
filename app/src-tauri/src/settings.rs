@@ -1,6 +1,7 @@
 //! Settings, presets, keychain secrets and history: everything Echotype persists.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -61,6 +62,17 @@ pub struct Settings {
     pub pill_hidden_until: u64,
     /// Let screenshots and screen sharing see the pill. Off = content protection (best effort).
     pub pill_in_recordings: bool,
+    /// Where the pill was dropped on each display (macOS): its window's top-left as a fraction
+    /// of the room it has in that display's visible frame, keyed by the display's name. A display
+    /// with no entry gets bottom-centre; double-clicking the pill removes its entry.
+    pub pill_positions: BTreeMap<String, [f64; 2]>,
+    /// The display the pill was last dropped on (its `pill_positions` key).
+    pub pill_screen: Option<String>,
+    /// "Move to the screen I'm using": the pill follows the display under the cursor. Off keeps
+    /// it on `pill_screen` (the primary display until it is dragged somewhere, or while that one is unplugged).
+    pub pill_follow_cursor: bool,
+    /// "pill" | "menubar" (macOS): in the menu bar the pill never shows and the status item is the live indicator.
+    pub show_in: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -127,6 +139,10 @@ impl Default for Settings {
             pill_idle: true,
             pill_hidden_until: 0,
             pill_in_recordings: false,
+            pill_positions: BTreeMap::new(),
+            pill_screen: None,
+            pill_follow_cursor: true,
+            show_in: "pill".into(),
         }
     }
 }
@@ -434,6 +450,8 @@ mod tests {
         assert_eq!(s.talk_key, "accelerator");
         assert!(s.sounds && s.dismissed.is_empty());
         assert!(s.pill_idle && s.pill_hidden_until == 0 && !s.pill_in_recordings, "the idle pill is on for upgraders, hidden from capture");
+        assert!(s.pill_positions.is_empty() && s.show_in == "pill", "upgraders keep the pill, bottom-centre");
+        assert!(s.pill_follow_cursor && s.pill_screen.is_none(), "...on the screen they are using");
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
     }

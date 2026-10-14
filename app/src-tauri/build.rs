@@ -33,6 +33,8 @@ const COMMANDS: &[&str] = &[
     "pill_cancel",
     "pill_open",
     "pill_menu",
+    "pill_drag",
+    "pill_reset",
 ];
 
 fn main() {

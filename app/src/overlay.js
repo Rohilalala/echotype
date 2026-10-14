@@ -35,6 +35,7 @@ function render() {
   pill.classList.toggle('active', active);
   pill.classList.toggle('expand', !active && !!view?.expand);
   pill.classList.toggle('hover', !!view?.hover);
+  pill.classList.toggle('drag', !!view?.drag);
   pill.classList.toggle('locked', active && !!cur.locked);
   pill.classList.toggle('muted', active && muted);
   pill.dataset.state = active ? cur.state : 'idle';
@@ -81,14 +82,20 @@ listen('audio-level', ({ payload }) => {
 // A click counts only when the button goes down and up on the capsule (D1). pill.rs lets the
 // mouse through to this window only over the capsule's hit area (48x14 around the 4 px idle
 // bar), so anywhere in the window counts as the capsule; never focus, so the app being
-// dictated into keeps it.
+// dictated into keeps it. Pressing anywhere but ✕/✓ may start a drag, which pill.rs runs (and
+// whose mouse-up it does not count as a click); a double-click puts the pill back.
 let downOn = null;
-addEventListener('mousedown', e => { if (e.button === 0) downOn = e.target.closest('[data-act]') || pill; });
+addEventListener('mousedown', e => {
+  if (e.button !== 0) return;
+  downOn = e.target.closest('[data-act]') || pill;
+  if (downOn === pill) invoke('pill_drag');
+});
 addEventListener('mouseup', e => {
   const target = downOn;
   downOn = null;
   if (e.button !== 0 || !target || (e.target.closest('[data-act]') || pill) !== target) return;
   const act = target.dataset?.act;
+  if (target === pill && e.detail === 2) return invoke('pill_reset');
   const active = pill.classList.contains('active');
   if (act === 'cancel') invoke('pill_cancel');
   else if (active && cur.action && cur.state !== 'recording') invoke('pill_open');

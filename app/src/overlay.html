@@ -34,8 +34,13 @@
     color: rgba(255, 255, 255, 0.94);
     box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18), 0 1px 4px rgba(0, 0, 0, 0.12);
     overflow: hidden;
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
   }
   .pill > * { display: none; }
+  /* Picked up: a little larger with a lift shadow, so it reads as held while it moves. */
+  .pill.drag { transform: scale(1.15); box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18), 0 3px 9px rgba(0, 0, 0, 0.3); }
+  /* A line of text can be 240 wide in a 260 window: it lifts less, so it is never cut off. */
+  .pill.drag.active:not([data-state="recording"]) { transform: scale(1.06); }
   /* Idle, hovered for 200 ms: the hint. */
   .pill.expand { width: auto; height: 22px; padding: 0 10px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.16); }
   .pill.expand .label { display: block; }
@@ -82,7 +87,8 @@
   .pill[data-state="transcribing"] .label, .pill[data-state="cleaning"] .label { color: rgba(255, 255, 255, 0.8); }
 
   @media (prefers-reduced-motion: reduce) {
-    .btn, .wave i { transition: none; }
+    .btn, .wave i, .pill { transition: none; }
+    .pill.drag { transform: none; }
   }
 </style>
 </head>
