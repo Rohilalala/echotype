@@ -109,6 +109,12 @@ struct DictationState {
     /// What the settings window offers to fix it: "microphone" | "accessibility" | "model" | "cleanup" | "settings".
     #[serde(skip_serializing_if = "Option::is_none")]
     action: Option<&'static str>,
+    /// "done" with nowhere to paste: the pill opens into a card with the text and Copy.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    card: bool,
+    /// The paste-last shortcut as the card names it ("⌘ ⌃ V"); None when it is unbound.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    paste_key: Option<String>,
 }
 
 fn state(app: &AppHandle) -> tauri::State<'_, AppState> {
@@ -430,19 +436,19 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
                 let paste = paste && s.onboarded && !main_window_focused(&app);
                 let warning = out.warning.clone().or(clip.warning);
                 let chip = chip(clip.quality, out.no_cleanup && out.warning.is_none());
-                let res = if paste { platform::paste(&app, &out.text, s.restore_clipboard) } else { platform::copy(&out.text).map_err(|e| (e, false)) };
+                // Nothing focused takes text (the desktop, a list, Accessibility off): no ⌘V into nowhere.
+                let nowhere = paste && platform::paste_target() == platform::Target::Card;
+                let res = if nowhere {
+                    Err(("Nowhere to paste".to_string(), true))
+                } else if paste {
+                    platform::paste(&app, &out.text, s.restore_clipboard)
+                } else {
+                    platform::copy(&out.text).map_err(|e| (e, false))
+                };
                 match res {
                     Ok(()) => DictationState { state: "done", text: Some(out.text), warning, copied: !paste, chip, ..Default::default() },
-                    // Accessibility off or the keystroke blocked (secure input): the text is on the clipboard.
-                    Err((e, true)) => DictationState {
-                        state: "done",
-                        text: Some(out.text),
-                        warning: Some(e),
-                        copied: true,
-                        chip,
-                        action: (!platform::accessibility_granted()).then_some("accessibility"),
-                        ..Default::default()
-                    },
+                    // Nowhere to paste, or the keystroke blocked (secure input): the card, with Copy.
+                    Err((e, true)) => card(&s, out.text, Some(e), chip),
                     Err((e, false)) => DictationState { state: "error", text: Some(out.text), error: Some(e), warning, ..Default::default() },
                 }
             }
@@ -450,6 +456,20 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
         drop(guard);
         emit_state(&app, ev);
     });
+}
+
+/// The "nowhere to paste" card. Home offers the Accessibility fix when that is why.
+fn card(s: &Settings, text: String, warning: Option<String>, chip: Option<&'static str>) -> DictationState {
+    DictationState {
+        state: "done",
+        text: Some(text),
+        warning,
+        chip,
+        card: true,
+        paste_key: (!s.paste_last_hotkey.is_empty()).then(|| accel_label(&s.paste_last_hotkey, cfg!(target_os = "macos"))),
+        action: (!platform::accessibility_granted()).then_some("accessibility"),
+        ..Default::default()
+    }
 }
 
 /// Paste-last / copy-last: the last dictated text again, after the shortcut's own keys are up so
@@ -933,6 +953,24 @@ async fn pill_open(app: AppHandle) -> R<()> {
     Ok(())
 }
 
+/// Copy on the card (and the menu-bar menu's copy item): the last transcript to the clipboard.
+#[tauri::command]
+async fn pill_copy(app: AppHandle) -> R<()> {
+    copy_last(&app)
+}
+
+fn copy_last(app: &AppHandle) -> R<()> {
+    let text = lock(&state(app).last_output).clone().ok_or("Nothing to copy yet")?;
+    platform::copy(&text)
+}
+
+/// ✕ on the card.
+#[tauri::command]
+async fn pill_dismiss(app: AppHandle) -> R<()> {
+    pill::dismiss_card(&app);
+    Ok(())
+}
+
 /// Right-click on the idle pill: the native menu, built and handled in Rust.
 #[tauri::command]
 async fn pill_menu(app: AppHandle, window: tauri::WebviewWindow) -> R<()> {
@@ -1103,6 +1141,7 @@ pub fn run() {
                     if sc.id() == escape().id() {
                         if pressed {
                             send(app, Cmd::Key(Ev::Cancel));
+                            pill::dismiss_card(app);
                         }
                     } else if is(&s.hotkey) {
                         send(app, Cmd::Key(if pressed { Ev::Press } else { Ev::Release }));
@@ -1173,6 +1212,16 @@ pub fn run() {
             if !s.onboarded {
                 show_main(app.handle());
             }
+            // On-screen checks: the card for this text after 2 s, without dictating or typing.
+            if let Some(text) = std::env::var("ECHOTYPE_TEST_CARD").ok().filter(|t| !t.is_empty()) {
+                let (h, s) = (app.handle().clone(), s.clone());
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(2));
+                    eprintln!("echotype: paste target {:?}", platform::paste_target());
+                    *lock(&state(&h).last_output) = Some(text.clone());
+                    emit_state(&h, card(&s, text, None, None));
+                });
+            }
             std::thread::spawn(move || stt::warm_up(&s));
             Ok(())
         })
@@ -1223,6 +1272,8 @@ pub fn run() {
             pill_menu,
             pill_drag,
             pill_reset,
+            pill_copy,
+            pill_dismiss,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Echotype");

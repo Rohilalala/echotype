@@ -11,9 +11,16 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::menu::Menu;
 use tauri::{AppHandle, Emitter, LogicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Wry};
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
-/// The overlay window: the widest notice plus room for its soft shadow (points).
-pub const WIN: (f64, f64) = (260.0, 32.0);
+/// The overlay window: the "nowhere to paste" card plus room for its soft shadow (points). Every
+/// capsule sits on one line ANCHOR above the window's bottom edge; the card grows up from it.
+pub const WIN: (f64, f64) = (260.0, 84.0);
+const ANCHOR: f64 = 16.0;
+/// The card: as wide as the widest notice, the text on one or two 15 pt lines above a 22 pt row (overlay.html).
+const CARD_W: f64 = MAX_W;
+// ponytail: ~7 pt a character at 11 px; a long word wraps sooner, so this errs towards two lines.
+const CARD_LINE: usize = 26;
 /// Gap between the tallest capsule and the bottom of the visible frame (or the auto-hidden Dock).
 const MARGIN: f64 = 10.0;
 const LINE_H: f64 = 22.0;
@@ -29,6 +36,8 @@ const DWELL: Duration = Duration::from_millis(200);
 /// A click this soon after the last one is the same click: a double-click must not start and finish.
 const DEBOUNCE: Duration = Duration::from_millis(400);
 pub const HIDE_FOR: Duration = Duration::from_secs(3600);
+/// The card's countdown ring (overlay.html runs the same 6 s).
+const CARD_FOR: u64 = 6000;
 /// A press that moves further than this (points) is a drag: it moves the pill and is never a click.
 const DRAG_SLOP: f64 = 4.0;
 const CHIPS: [(&str, &str); 3] = [("too_quiet", "Too quiet, move the mic closer"), ("quiet", "Quiet voice"), ("no_cleanup", "No cleanup")];
@@ -98,6 +107,10 @@ fn said(s: &DictationState) -> String {
     let main = match s.state {
         "error" => s.error.as_deref().unwrap_or("Something went wrong").lines().next().unwrap_or_default().to_string(),
         "hint" => s.message.clone().unwrap_or_default(),
+        "done" if s.card => {
+            let t = s.text.as_deref().unwrap_or_default().lines().next().unwrap_or_default();
+            if t.chars().count() > 60 { format!("{}…", t.chars().take(59).collect::<String>()) } else { t.to_string() }
+        }
         "done" if s.copied => "Copied, ⌘V to paste".into(),
         "done" => "Pasted".into(),
         "transcribing" => "Transcribing…".into(),
@@ -144,6 +157,8 @@ struct Active {
     chars: usize,
     /// A notice: its rank and when it ends. None while recording/transcribing/cleaning.
     notice: Option<(u8, Instant)>,
+    /// The notice is the "nowhere to paste" card; `chars` counts its transcript.
+    card: bool,
 }
 
 /// What the pill is showing, its timers and hover. Lives in AppState: `emit_state` feeds it and
@@ -157,9 +172,23 @@ pub struct Pill {
     last_tick: Option<Instant>,
     /// The live input level, 0..1 (the menu-bar waveform).
     pub meter: f32,
-    /// What the pill says and its rank, for the menu-bar menu. A problem (rank 3+) stays there
-    /// after the pill lets go of it, until the next dictation.
-    said: Option<(String, u8)>,
+    /// What the pill says, for the menu-bar menu.
+    said: Option<Said>,
+}
+
+#[derive(Debug)]
+struct Said {
+    text: String,
+    rank: u8,
+    card: bool,
+}
+
+impl Said {
+    /// A problem (rank 3+) or a transcript with nowhere to go stays in the menu after the pill
+    /// lets go of it, until the next dictation.
+    fn sticks(&self) -> bool {
+        self.rank >= 3 || self.card
+    }
 }
 
 impl Pill {
@@ -175,26 +204,28 @@ impl Pill {
         self.active = match s.state {
             "idle" if lingering.is_some() => return false,
             "idle" => None,
-            "recording" => Some(Active { recording: true, locked: s.locked, chars, notice: None }),
-            "transcribing" | "cleaning" => Some(Active { recording: false, locked: false, chars, notice: None }),
+            "recording" => Some(Active { recording: true, locked: s.locked, chars, notice: None, card: false }),
+            "transcribing" | "cleaning" => Some(Active { recording: false, locked: false, chars, notice: None, card: false }),
             _ => {
                 let r = rank(s);
                 if lingering.is_some_and(|cur| cur > r) {
                     return false;
                 }
-                // A chip is a second thing to read, so the result stays up longer.
-                let linger = Duration::from_millis(if s.chip.is_some() { 2500 } else { 1200 });
-                Some(Active { recording: false, locked: false, chars, notice: Some((r, now + linger)) })
+                // A chip is a second thing to read, so the result stays up longer; the card has
+                // a whole transcript and a button.
+                let linger = Duration::from_millis(if s.card { CARD_FOR } else if s.chip.is_some() { 2500 } else { 1200 });
+                let chars = if s.card { s.text.as_deref().unwrap_or_default().chars().count() } else { chars };
+                Some(Active { recording: false, locked: false, chars, notice: Some((r, now + linger)), card: s.card })
             }
         };
         if s.state != "recording" {
             self.muted = false;
         }
         self.said = match s.state {
-            "idle" => self.said.take().filter(|(_, r)| *r >= 3),
+            "idle" => self.said.take().filter(|t| t.sticks()),
             "recording" => None,
-            "transcribing" | "cleaning" => Some((said(s), 0)),
-            _ => Some((said(s), rank(s))),
+            "transcribing" | "cleaning" => Some(Said { text: said(s), rank: 0, card: false }),
+            _ => Some(Said { text: said(s), rank: rank(s), card: s.card }),
         };
         true
     }
@@ -211,6 +242,8 @@ impl Pill {
             None => Glyph::Idle,
             Some(a) if a.recording => Glyph::Wave,
             Some(Active { notice: None, .. }) => Glyph::Working,
+            // Nothing was pasted: the menu has the text and a copy item.
+            Some(Active { card: true, .. }) => Glyph::Warning,
             Some(Active { notice: Some((2, _)), .. }) => Glyph::Done,
             Some(Active { notice: Some((r, _)), .. }) if r >= 3 => Glyph::Warning,
             Some(_) => Glyph::Idle,
@@ -219,7 +252,23 @@ impl Pill {
 
     /// The menu-bar menu's first line: what the pill says now, or the last problem.
     pub fn menu_line(&self) -> Option<&str> {
-        self.said.as_ref().map(|(t, _)| t.as_str()).filter(|t| !t.is_empty())
+        self.said.as_ref().map(|t| t.text.as_str()).filter(|t| !t.is_empty())
+    }
+
+    /// The last transcript had nowhere to go: the menu-bar menu offers to copy it.
+    pub fn menu_copy(&self) -> bool {
+        self.said.as_ref().is_some_and(|t| t.card)
+    }
+
+    pub fn card_up(&self) -> bool {
+        self.active.is_some_and(|a| a.card)
+    }
+
+    /// ✕ or Esc on the card: back to the idle pill at once.
+    pub fn close_card(&mut self) {
+        if self.card_up() {
+            self.active = None;
+        }
     }
 
     /// Advances the timers with the cursor `inside` the capsule or not. A notice ends after its
@@ -234,7 +283,7 @@ impl Pill {
             }
             if now >= *until {
                 self.active = None;
-                self.said = self.said.take().filter(|(_, r)| *r >= 3);
+                self.said = self.said.take().filter(|t| t.sticks());
             }
         }
         self.hover_since = if inside { Some(self.hover_since.unwrap_or(now)) } else { None };
@@ -255,6 +304,7 @@ impl Pill {
             // ✕ and ✓ (16 pt each) stay either side of the words.
             Some(a) if a.recording && self.muted => (text_w("Is your mic muted?".len()) + 36.0, LINE_H),
             Some(a) if a.recording => (if a.locked { REC_LOCKED_W } else { REC_W }, 20.0),
+            Some(a) if a.card => (CARD_W, 42.0 + 15.0 * if a.chars > CARD_LINE { 2.0 } else { 1.0 }),
             Some(a) => (text_w(a.chars), LINE_H),
         }
     }
@@ -344,18 +394,22 @@ pub fn cursor_pt((x, y): (f64, f64), primary_scale: f64) -> (f64, f64) {
     (x / primary_scale, y / primary_scale)
 }
 
-/// The capsule, centred in the window whose top-left is `win`.
+/// The capsule in the window whose top-left is `win`: centred across, centred on the line
+/// ANCHOR above the bottom edge, and a card (taller than a line) growing up from that line's bottom.
 pub fn capsule_rect(win: (f64, f64), (w, h): (f64, f64)) -> Rect {
-    Rect { x: win.0 + (WIN.0 - w) / 2.0, y: win.1 + (WIN.1 - h) / 2.0, w, h }
+    let bottom = win.1 + WIN.1 - ANCHOR + h.min(LINE_H) / 2.0;
+    Rect { x: win.0 + (WIN.0 - w) / 2.0, y: bottom - h, w, h }
 }
 
-/// Window top-left: bottom-centre of the visible frame `work`, MARGIN above it plus `dock`.
+/// Window top-left: bottom-centre of the visible frame `work`, the tallest line MARGIN above it plus `dock`.
 pub fn place(work: Rect, dock: f64) -> (f64, f64) {
-    (work.x + (work.w - WIN.0) / 2.0, work.y + work.h - MARGIN - dock - (WIN.1 + LINE_H) / 2.0)
+    (work.x + (work.w - WIN.0) / 2.0, work.y + work.h - MARGIN - dock - (WIN.1 - ANCHOR + LINE_H / 2.0))
 }
 
 /// The window's top-left kept inside `work` (a display's visible frame), so no part of the pill,
-/// even its widest notice, can go off-screen, under the menu bar or behind a visible Dock.
+/// even the card, can go off-screen, under the menu bar or behind a visible Dock.
+// ponytail: so the idle bar stops ~68 pt below the top edge (room for the card above it); move the
+// window down while a card is up near the top if that ever bothers anyone.
 pub fn clamp(work: Rect, (x, y): (f64, f64)) -> (f64, f64) {
     (x.clamp(work.x, work.x + (work.w - WIN.0).max(0.0)), y.clamp(work.y, work.y + (work.h - WIN.1).max(0.0)))
 }
@@ -537,6 +591,12 @@ pub fn is_drop(app: &AppHandle, now: Instant) -> bool {
     drag.is_some_and(|d| d.is_drop(now, cursor_now(app)))
 }
 
+/// ✕ or Esc on the "nowhere to paste" card.
+pub fn dismiss_card(app: &AppHandle) {
+    lock(&state(app).pill).close_card();
+    let _ = state(app).pill_wake.send(());
+}
+
 /// Double-click: back to bottom-centre on this display.
 pub fn reset(app: &AppHandle) {
     let Some(c) = cursor_now(app) else { return };
@@ -591,17 +651,25 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
         // The Dock's settings cost three `defaults` processes, so they are re-read once a minute at most.
         let mut dock: Option<(Instant, f64)> = None;
         let mut tray = crate::tray::Tray::default();
+        let mut esc = false;
         loop {
             let now = Instant::now();
             let s = crate::current_settings(&app);
             let c = ctx(&app, &s);
             let hint = hint(&s);
-            let (active, expanded, size, deadline, glyph, meter, line) = {
+            let (active, expanded, size, deadline, glyph, meter, line, copy, card) = {
                 let st = state(&app);
                 let mut p = lock(&st.pill);
                 let (active, expanded) = p.tick(now, inside);
-                (active, expanded, p.capsule(expanded, hint.chars().count()), p.deadline(), p.glyph(), p.meter, p.menu_line().map(String::from))
+                let line = p.menu_line().map(String::from);
+                (active, expanded, p.capsule(expanded, hint.chars().count()), p.deadline(), p.glyph(), p.meter, line, p.menu_copy(), p.card_up())
             };
+            // Esc closes the card, so it is Echotype's only while a card is up (or a recording runs).
+            if card != esc {
+                let gs = app.global_shortcut();
+                let _ = if card { gs.register(crate::escape()) } else if state(&app).recording.load(std::sync::atomic::Ordering::SeqCst) { Ok(()) } else { gs.unregister(crate::escape()) };
+                esc = card;
+            }
             let mut want = visible(&c, active);
             let mut near = false;
             let mut held = false;
@@ -720,7 +788,7 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
             }
             let animating = c.menubar && matches!(glyph, Glyph::Wave | Glyph::Working);
             if c.mac {
-                tray.sync(&app, &s, c.menubar, glyph, now_ms() / 125, meter, line.as_deref());
+                tray.sync(&app, &s, c.menubar, glyph, now_ms() / 125, meter, line.as_deref(), copy);
             }
             let wait = if held {
                 Duration::from_millis(16)
@@ -821,10 +889,12 @@ pub fn show_menu(app: &AppHandle, win: &WebviewWindow) -> tauri::Result<()> {
     win.popup_menu(&menu(app, &mics, None)?)
 }
 
-/// What the menu-bar menu adds: its first line (what the pill would say) and whether a dictation is running.
+/// What the menu-bar menu adds: its first line (what the pill would say), whether a dictation
+/// is running, and a copy item when the last transcript had nowhere to go.
 pub struct Bar<'a> {
     pub line: Option<&'a str>,
     pub recording: bool,
+    pub copy: bool,
 }
 
 /// The pill's menu. In menu-bar mode it is the status item's menu too: what the pill would say
@@ -836,6 +906,9 @@ pub fn menu(app: &AppHandle, mics: &[String], bar: Option<Bar>) -> tauri::Result
     if let Some(b) = &bar {
         if let Some(line) = b.line {
             menu.append(&MenuItem::with_id(app, "bar-line", line, false, None::<&str>)?)?;
+            if b.copy {
+                menu.append(&MenuItem::with_id(app, "pill-copy", "Copied to clipboard? Click to copy", true, None::<&str>)?)?;
+            }
             menu.append(&PredefinedMenuItem::separator(app)?)?;
         }
         // Ids the tray's own handler already answers (lib.rs create_tray).
@@ -881,6 +954,11 @@ pub fn on_menu(app: &AppHandle, id: &str) {
     } else {
         match id {
             "pill-paste" => crate::paste_last(app, true),
+            "pill-copy" => {
+                if let Err(e) = crate::copy_last(app) {
+                    eprintln!("echotype: {e}");
+                }
+            }
             "pill-history" => crate::open_page(app, "history"),
             "pill-settings" => crate::open_page(app, "settings"),
             "pill-hide" => hide_for_hour(app),
@@ -987,6 +1065,41 @@ mod tests {
         d.ended = Some(t0);
         assert!(d.is_drop(t0 + Duration::from_millis(300), Some(from)), "the drop's own mouse-up");
         assert!(!d.is_drop(t0 + Duration::from_secs(2), Some(from)), "never a later click");
+    }
+
+    #[test]
+    fn the_card_counts_down_6_s_and_holds_while_hovered() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let card = |text: &str| DictationState { state: "done", text: Some(text.into()), card: true, ..Default::default() };
+        let mut p = Pill::default();
+        assert!(p.on_state(&card("Hello there."), t0));
+        assert!(p.card_up());
+        assert_eq!(p.capsule(false, 0), (CARD_W, 57.0), "one line of text");
+        assert!(p.tick(ms(5999), false).0, "still up just before 6 s");
+        assert!(!p.tick(ms(6000), false).0, "and gone at 6 s");
+        assert!(p.menu_copy() && p.menu_line() == Some("Hello there."), "the menu-bar menu keeps it to copy");
+
+        let mut p = Pill::default();
+        p.on_state(&card(&"word ".repeat(30)), t0);
+        assert_eq!(p.capsule(false, 0), (CARD_W, 72.0), "two lines, then an ellipsis");
+        p.tick(ms(2000), false);
+        for t in (2066..=5000).step_by(66) {
+            assert!(p.tick(ms(t), true).0, "paused while hovered (at {t} ms)");
+        }
+        // The cursor rested on it from 2 s to ~5 s, so ~4 s are left once it moves away.
+        assert!(p.tick(ms(8900), false).0);
+        assert!(!p.tick(ms(9100), false).0);
+
+        let mut p = Pill::default();
+        p.on_state(&card("Hi"), t0);
+        p.close_card();
+        assert!(!p.tick(ms(10), false).0, "✕ or Esc closes it at once");
+        assert!(!p.on_state(&DictationState { state: "hint", message: Some("Nothing to paste yet".into()), ..Default::default() }, ms(20)) || !p.card_up());
+        let mut p = Pill::default();
+        p.on_state(&card("Hi"), t0);
+        assert!(!p.on_state(&st("idle"), ms(10)), "the card outlasts the idle that follows it");
+        assert!(p.on_state(&st("recording"), ms(20)) && !p.card_up(), "a new dictation takes over");
     }
 
     #[test]
@@ -1166,9 +1279,15 @@ mod tests {
         assert_eq!(retina, Rect { x: 0.0, y: 0.0, w: 1512.0, h: 982.0 });
         // The pill bottom-centre of the external visible frame (menu bar 25 pt, no Dock).
         let at = place(Rect { x: 1512.0, y: -675.0, w: 2560.0, h: 1575.0 }, 0.0);
-        assert_eq!(at, (2662.0, 1575.0 - 675.0 - 10.0 - 27.0));
+        assert_eq!(at, (2662.0, 1575.0 - 675.0 - 10.0 - 79.0));
         let r = capsule_rect(at, IDLE_HIT);
         assert_eq!((r.x, r.w), (2768.0, 48.0));
+        // Every line capsule's bottom sits MARGIN above the visible frame; the card grows up from it.
+        let line_bottom = |size: (f64, f64)| { let r = capsule_rect(at, size); r.y + r.h };
+        assert_eq!(line_bottom((MAX_W, LINE_H)), 1575.0 - 675.0 - 10.0);
+        assert_eq!(line_bottom((CARD_W, 72.0)), 1575.0 - 675.0 - 10.0);
+        assert_eq!(capsule_rect(at, IDLE_HIT).y + 7.0, capsule_rect(at, (REC_W, 20.0)).y + 10.0, "every capsule centred on one line");
+        assert!(capsule_rect(at, (CARD_W, 72.0)).y >= at.1, "the card fits in the window");
         // The cursor on the capsule centre, as Tauri reports it: points x PRIMARY scale (2), not 1.
         let centre = (r.x + 24.0, r.y + 7.0);
         let phys = (centre.0 * 2.0, centre.1 * 2.0);

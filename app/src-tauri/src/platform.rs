@@ -111,6 +111,51 @@ fn send_paste_keys() -> Result<(), String> {
     clicked
 }
 
+/// Where a finished transcript goes: pasted with ⌘V, or shown on the pill's card for the user
+/// to copy, because there is nothing to paste into.
+#[derive(Debug, PartialEq)]
+pub enum Target {
+    Paste,
+    Card,
+}
+
+/// What Accessibility says about the focused element of the frontmost app.
+#[derive(Debug, Default)]
+pub struct Focused {
+    pub role: String,
+    /// AXEditable is true (editable web content).
+    pub editable: bool,
+    /// AXValue is text and settable.
+    pub text_value: bool,
+    /// It has an AXSelectedTextRange: a caret or a selection somewhere text can go.
+    pub text_range: bool,
+}
+
+const TEXT_ROLES: [&str; 4] = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"];
+/// kAXErrorAPIDisabled: Accessibility is off for Echotype.
+pub const AX_DISABLED: i32 = -25211;
+
+/// The paste decision. `focus`: Ok(None) when nothing has focus, Err(AXError) when the API
+/// could not tell, in which case Echotype pastes as it always has. Without Accessibility there
+/// is no ⌘V at all, so that is the card too.
+pub fn target(trusted: bool, focus: Result<Option<Focused>, i32>) -> Target {
+    match focus {
+        _ if !trusted => Target::Card,
+        Err(AX_DISABLED) | Ok(None) => Target::Card,
+        Err(_) => Target::Paste,
+        Ok(Some(f)) if TEXT_ROLES.contains(&f.role.as_str()) || f.editable || f.text_value || f.text_range => Target::Paste,
+        Ok(Some(_)) => Target::Card,
+    }
+}
+
+/// Whether the frontmost app's focused element takes text, asked right before pasting.
+pub fn paste_target() -> Target {
+    #[cfg(target_os = "macos")]
+    return target(accessibility_granted(), mac::focused());
+    #[cfg(not(target_os = "macos"))]
+    Target::Paste
+}
+
 pub fn accessibility_granted() -> bool {
     #[cfg(target_os = "macos")]
     return mac::accessibility();
@@ -164,6 +209,9 @@ pub fn request(kind: &str) {
 
 #[cfg(target_os = "macos")]
 mod mac {
+    use core_foundation::base::{CFType, CFTypeRef, TCFType};
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::string::CFString;
     use std::ffi::{c_char, c_void};
 
     #[link(name = "ApplicationServices", kind = "framework")]
@@ -181,6 +229,48 @@ mod mac {
         fn objc_getClass(name: *const c_char) -> *const c_void;
         fn sel_registerName(name: *const c_char) -> *const c_void;
         fn objc_msgSend();
+    }
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    unsafe extern "C" {
+        fn AXUIElementCreateSystemWide() -> CFTypeRef;
+        fn AXUIElementSetMessagingTimeout(el: CFTypeRef, seconds: f32) -> i32;
+        fn AXUIElementCopyAttributeValue(el: CFTypeRef, attr: CFTypeRef, out: *mut CFTypeRef) -> i32;
+        fn AXUIElementIsAttributeSettable(el: CFTypeRef, attr: CFTypeRef, out: *mut u8) -> i32;
+    }
+
+    /// kAXErrorNoValue: nothing is focused.
+    const AX_NO_VALUE: i32 = -25212;
+
+    /// The focused element system-wide, or the AXError that stopped the question. A hung app
+    /// answers within 250 ms or counts as "can't tell".
+    pub fn focused() -> Result<Option<super::Focused>, i32> {
+        let attr = |name: &'static str| CFString::from_static_string(name);
+        // SAFETY: every Copy/Create result is owned and wrapped under the create rule (released
+        // on drop); out-pointers are valid locals; attribute names are CFStrings kept alive meanwhile.
+        unsafe {
+            let sys = CFType::wrap_under_create_rule(AXUIElementCreateSystemWide());
+            AXUIElementSetMessagingTimeout(sys.as_CFTypeRef(), 0.25);
+            let mut out: CFTypeRef = std::ptr::null();
+            match AXUIElementCopyAttributeValue(sys.as_CFTypeRef(), attr("AXFocusedUIElement").as_CFTypeRef(), &mut out) {
+                0 if !out.is_null() => {}
+                0 | AX_NO_VALUE => return Ok(None),
+                e => return Err(e),
+            }
+            let el = CFType::wrap_under_create_rule(out);
+            let copy = |name: &'static str| {
+                let mut v: CFTypeRef = std::ptr::null();
+                (AXUIElementCopyAttributeValue(el.as_CFTypeRef(), attr(name).as_CFTypeRef(), &mut v) == 0 && !v.is_null()).then(|| CFType::wrap_under_create_rule(v))
+            };
+            let mut settable = 0u8;
+            let value_settable = AXUIElementIsAttributeSettable(el.as_CFTypeRef(), attr("AXValue").as_CFTypeRef(), &mut settable) == 0 && settable != 0;
+            Ok(Some(super::Focused {
+                role: copy("AXRole").and_then(|r| r.downcast::<CFString>()).map(|r| r.to_string()).unwrap_or_default(),
+                editable: copy("AXEditable").and_then(|b| b.downcast::<CFBoolean>()).is_some_and(bool::from),
+                text_value: value_settable && copy("AXValue").is_some_and(|v| v.instance_of::<CFString>()),
+                text_range: copy("AXSelectedTextRange").is_some(),
+            }))
+        }
     }
 
     pub fn accessibility() -> bool {
@@ -298,6 +388,38 @@ mod mac {
             }
             CFRelease(src);
             found
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn el(role: &str) -> Focused {
+        Focused { role: role.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn a_transcript_is_pasted_only_where_text_can_go() {
+        let paste = |f| target(true, f);
+        for role in ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"] {
+            assert_eq!(paste(Ok(Some(el(role)))), Target::Paste, "{role}");
+        }
+        // Web content: an editable element, or the caret of a web area (Chrome, Electron, VS Code).
+        assert_eq!(paste(Ok(Some(Focused { editable: true, ..el("AXGroup") }))), Target::Paste);
+        assert_eq!(paste(Ok(Some(Focused { text_range: true, ..el("AXWebArea") }))), Target::Paste);
+        assert_eq!(paste(Ok(Some(Focused { text_value: true, ..el("AXUnknown") }))), Target::Paste, "a settable text value");
+        // Nowhere to paste: the card.
+        for role in ["AXList", "AXButton", "AXScrollArea", "AXWebArea", "AXCheckBox", ""] {
+            assert_eq!(paste(Ok(Some(el(role)))), Target::Card, "{role}");
+        }
+        assert_eq!(paste(Ok(None)), Target::Card, "nothing focused (the desktop)");
+        assert_eq!(paste(Err(AX_DISABLED)), Target::Card, "Accessibility switched off");
+        assert_eq!(target(false, Ok(Some(el("AXTextArea")))), Target::Card, "no Accessibility, no ⌘V");
+        // The API can't tell (a hung app, an attribute it doesn't implement): paste as before.
+        for e in [-25204, -25205, -25208, -25200] {
+            assert_eq!(paste(Err(e)), Target::Paste, "{e}");
         }
     }
 }

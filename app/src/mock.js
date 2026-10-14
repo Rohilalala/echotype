@@ -130,6 +130,8 @@ const commands = {
   pill_menu: () => null,
   pill_drag: () => null,
   pill_reset: () => null,
+  pill_copy: () => null,
+  pill_dismiss: () => null,
   check_permissions: () => ({ microphone: 'granted', accessibility: !q.has('noaccess') }),
   open_permission_settings: () => null,
   cloud_start_login: async ({ email }) => {
@@ -190,12 +192,14 @@ if (q.has('view') || q.has('hover')) {
 
 // overlay.html?state=<state>&chip=<chip> (and index.html?state=... for the Home hero) renders any
 // dictation state through the real overlay/Home code: state = recording|transcribing|cleaning|done|error|hint,
-// chip = quiet|too_quiet|no_cleanup, plus message=, error=, action=, copied=1, locked=1, muted=1.
+// chip = quiet|too_quiet|no_cleanup, plus message=, error=, action=, copied=1, locked=1, muted=1,
+// card=1 (nowhere to paste; text= sets the transcript, nokey=1 drops the paste-last hint).
 if (q.has('state')) {
   setTimeout(() => {
     const state = q.get('state');
     emit('dictation-state', {
-      state, text: state === 'done' ? 'Let’s move the standup to 10:30 tomorrow.' : undefined,
+      state, text: state === 'done' ? q.get('text') || 'Let’s move the standup to 10:30 tomorrow.' : undefined,
+      card: q.has('card'), paste_key: q.has('card') && !q.has('nokey') ? '⌘ ⌃ V' : undefined,
       error: state === 'error' ? q.get('error') || 'Microphone access is off' : undefined,
       message: q.get('message') || undefined, chip: q.get('chip') || undefined, action: q.get('action') || undefined,
       warning: q.get('warning') || undefined, copied: q.has('copied'), locked: q.has('locked'), retry: q.has('retry'),

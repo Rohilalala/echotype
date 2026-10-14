@@ -35,6 +35,8 @@ const COMMANDS: &[&str] = &[
     "pill_menu",
     "pill_drag",
     "pill_reset",
+    "pill_copy",
+    "pill_dismiss",
 ];
 
 fn main() {

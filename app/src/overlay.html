@@ -7,9 +7,13 @@
 <link rel="icon" href="data:," />
 <style>
   html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+  /* Every capsule is centred on one line 16 px above the window's bottom edge (pill.rs ANCHOR),
+     so the margins below differ by height; the card grows up from that line. */
   body {
-    display: grid;
-    place-items: center;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    align-items: center;
     font: 500 11px/1 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
     -webkit-user-select: none;
@@ -29,6 +33,8 @@
     max-width: 240px;
     padding: 0;
     box-sizing: border-box;
+    margin-bottom: 14px;
+    position: relative;
     border-radius: 11px;
     background: rgba(0, 0, 0, 0.75);
     color: rgba(255, 255, 255, 0.94);
@@ -42,19 +48,19 @@
   /* A line of text can be 240 wide in a 260 window: it lifts less, so it is never cut off. */
   .pill.drag.active:not([data-state="recording"]) { transform: scale(1.06); }
   /* Idle, hovered for 200 ms: the hint. */
-  .pill.expand { width: auto; height: 22px; padding: 0 10px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.16); }
+  .pill.expand { width: auto; height: 22px; margin-bottom: 5px; padding: 0 10px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.16); }
   .pill.expand .label { display: block; }
   /* Any dictation state: a line of text plus at most one chip. */
-  .pill.active { width: auto; height: 22px; padding: 0 10px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.16); }
+  .pill.active { width: auto; height: 22px; margin-bottom: 5px; padding: 0 10px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.16); }
   .pill.active .label, .pill.active .secs { display: block; }
   .secs { white-space: nowrap; flex: none; color: rgba(255, 255, 255, 0.62); font-variant-numeric: tabular-nums; }
   .pill.active .chip:not([hidden]) { display: block; }
   /* Listening: ✕, waveform, timer (a lock glyph in front once hands-free), ✓. */
-  .pill.active[data-state="recording"] { width: 100px; height: 20px; padding: 0 2px; gap: 0; justify-content: space-between; border-radius: 10px; }
+  .pill.active[data-state="recording"] { width: 100px; height: 20px; margin-bottom: 6px; padding: 0 2px; gap: 0; justify-content: space-between; border-radius: 10px; }
   .pill.active[data-state="recording"].locked { width: 112px; }
   .pill.active[data-state="recording"] .label, .pill.active[data-state="recording"] .chip { display: none; }
   .pill.active[data-state="recording"] :is(.btn, .wave, .meta) { display: flex; }
-  .pill.active[data-state="recording"].muted { width: auto; height: 22px; gap: 4px; padding: 0 10px; }
+  .pill.active[data-state="recording"].muted { width: auto; height: 22px; margin-bottom: 5px; gap: 4px; padding: 0 10px; }
   .pill.active[data-state="recording"].muted .wave, .pill.active[data-state="recording"].muted .meta { display: none; }
   .pill.active[data-state="recording"].muted .label { display: block; }
 
@@ -86,7 +92,30 @@
   .pill[data-state="error"] .label { color: #ffd59a; }
   .pill[data-state="transcribing"] .label, .pill[data-state="cleaning"] .label { color: rgba(255, 255, 255, 0.8); }
 
+  /* Nowhere to paste: the transcript (two lines at most), a 6 s countdown ring, the paste-last
+     shortcut and Copy, which is the one thing to do here, so it is the only filled control.
+     Sizes match pill.rs (CARD_W, 42 + 15 per line). */
+  .pill.active.card { flex-direction: column; align-items: stretch; width: 240px; height: auto; padding: 8px 10px 6px; gap: 6px; border-radius: 10px; transform-origin: 50% 100%; animation: card-in 0.16s ease-out; }
+  .pill.active.card :is(.label, .secs, .chip) { display: none; }
+  .pill.active.card .ctext { display: -webkit-box; }
+  .pill.active.card .crow, .pill.active.card .close { display: flex; }
+  .ctext { -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; white-space: normal; line-height: 15px; padding-right: 18px; color: rgba(255, 255, 255, 0.94); }
+  .crow { align-items: center; gap: 6px; height: 22px; }
+  .ring { width: 12px; height: 12px; flex: none; }
+  .ring circle { fill: none; stroke-width: 1.5; }
+  .ring .track { stroke: rgba(255, 255, 255, 0.18); }
+  .ring .left { stroke: rgba(255, 255, 255, 0.7); stroke-dasharray: 28.27; transform: rotate(-90deg); transform-origin: 6px 6px; animation: ring 6s linear forwards; }
+  .pill.hover .ring .left { animation-play-state: paused; }
+  .ckey { white-space: nowrap; color: rgba(255, 255, 255, 0.62); }
+  .copy { margin-left: auto; height: 20px; padding: 0 9px; border: 0; border-radius: 6px; background: rgba(255, 255, 255, 0.16); color: rgba(255, 255, 255, 0.94); font: inherit; }
+  .copy:hover { background: rgba(255, 255, 255, 0.24); }
+  .pill.active.card .close { position: absolute; top: 6px; right: 6px; opacity: 0.7; }
+  .pill.active.card .close:hover { opacity: 1; background: rgba(255, 255, 255, 0.16); }
+  @keyframes card-in { from { transform: scale(0.94); opacity: 0; } }
+  @keyframes ring { to { stroke-dashoffset: 28.27; } }
+
   @media (prefers-reduced-motion: reduce) {
+    .pill.active.card { animation: none; }
     .btn, .wave i, .pill { transition: none; }
     .pill.drag { transform: none; }
   }
@@ -101,6 +130,9 @@
     <span class="secs" id="secs" aria-hidden="true"></span>
     <span class="chip" id="chip" hidden></span>
     <button class="btn ok" type="button" data-act="finish" aria-label="Finish dictation" title="Finish"><svg viewBox="0 0 8 8"><path d="M1 4.2l2 2L7 1.8"/></svg></button>
+    <span class="ctext" id="ctext"></span>
+    <span class="crow"><svg class="ring" viewBox="0 0 12 12" aria-hidden="true"><circle class="track" cx="6" cy="6" r="4.5"/><circle class="left" id="ringLeft" cx="6" cy="6" r="4.5"/></svg><span class="ckey" id="ckey"></span><button class="copy" id="copy" type="button" data-act="copy">Copy</button></span>
+    <button class="btn close" type="button" data-act="close" aria-label="Close" title="Close"><svg viewBox="0 0 8 8"><path d="M1 1l6 6M7 1L1 7"/></svg></button>
   </div>
 <script type="module" src="overlay.js"></script>
 </body>

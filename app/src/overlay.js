@@ -3,6 +3,7 @@ const { listen } = window.__TAURI__.event;
 const { invoke } = window.__TAURI__.core;
 const pill = document.getElementById('pill'), label = document.getElementById('label');
 const chipEl = document.getElementById('chip'), time = document.getElementById('time'), secs = document.getElementById('secs');
+const ctext = document.getElementById('ctext'), ckey = document.getElementById('ckey'), copyBtn = document.getElementById('copy'), ring = document.getElementById('ringLeft');
 const bars = [...pill.querySelectorAll('.wave i')];
 const WEIGHT = [0.35, 0.55, 0.75, 0.9, 1, 0.95, 1, 0.9, 0.75, 0.55, 0.35];
 const CHIP = { too_quiet: 'Too quiet, move the mic closer', quiet: 'Quiet voice', no_cleanup: 'No cleanup' };
@@ -39,12 +40,16 @@ function render() {
   pill.classList.toggle('locked', active && !!cur.locked);
   pill.classList.toggle('muted', active && muted);
   pill.dataset.state = active ? cur.state : 'idle';
+  const card = active && !!cur.card;
+  pill.classList.toggle('card', card);
+  ctext.textContent = card ? cur.text || '' : '';
+  ckey.textContent = card && cur.paste_key ? `Paste last: ${cur.paste_key}` : '';
   const text = !active ? (view?.expand ? view.hint : '') : muted ? 'Is your mic muted?' : primary(cur);
   label.textContent = text;
   chipEl.hidden = !active || !cur.chip;
   chipEl.dataset.chip = cur.chip || '';
   chipEl.textContent = CHIP[cur.chip] || '';
-  const full = [text, active && CHIP[cur.chip]].filter(Boolean).join(' · ');
+  const full = card ? `Nowhere to paste: ${cur.text || ''}` : [text, active && CHIP[cur.chip]].filter(Boolean).join(' · ');
   pill.title = full;
   pill.setAttribute('aria-label', active ? full || 'Dictating' : 'Start dictation');
 }
@@ -55,6 +60,13 @@ listen('dictation-state', ({ payload: p }) => {
   // A new state shows at once; pill.rs confirms (or ends it) with its next `pill` event.
   if (view && p.state !== 'idle') view = { ...view, active: true };
   if (p.state !== 'recording') muted = false;
+  if (p.card) {
+    // A new card: the ring starts over and Copy says Copy again.
+    copyBtn.textContent = 'Copy';
+    ring.style.animation = 'none';
+    void ring.getBoundingClientRect();
+    ring.style.animation = '';
+  }
   if (p.state !== was) {
     clearInterval(clock);
     since = Date.now();
@@ -96,6 +108,9 @@ addEventListener('mouseup', e => {
   if (e.button !== 0 || !target || (e.target.closest('[data-act]') || pill) !== target) return;
   const act = target.dataset?.act;
   if (target === pill && e.detail === 2) return invoke('pill_reset');
+  if (act === 'copy') return invoke('pill_copy').then(() => (copyBtn.textContent = 'Copied'), () => {});
+  if (act === 'close') return invoke('pill_dismiss');
+  if (pill.classList.contains('card')) return; // the card's text is to read, not a button
   const active = pill.classList.contains('active');
   if (act === 'cancel') invoke('pill_cancel');
   else if (active && cur.action && cur.state !== 'recording') invoke('pill_open');

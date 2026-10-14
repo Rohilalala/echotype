@@ -13,6 +13,8 @@
     "allow-pill-open",
     "allow-pill-menu",
     "allow-pill-drag",
-    "allow-pill-reset"
+    "allow-pill-reset",
+    "allow-pill-copy",
+    "allow-pill-dismiss"
   ]
 }

@@ -103,7 +103,8 @@ pub struct Tray {
 
 impl Tray {
     /// Applies menu-bar mode (or undoes it) and, in it, the glyph and the menu.
-    pub fn sync(&mut self, app: &AppHandle, s: &Settings, bar: bool, glyph: Glyph, frame: u64, meter: f32, line: Option<&str>) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn sync(&mut self, app: &AppHandle, s: &Settings, bar: bool, glyph: Glyph, frame: u64, meter: f32, line: Option<&str>, copy: bool) {
         let Some(tray) = app.tray_by_id("main") else { return };
         if self.mode != Some(bar) {
             // Left click dictates in the menu bar; the menu moves to right click.
@@ -129,9 +130,9 @@ impl Tray {
         let mics = &self.mics.as_ref().expect("just filled").1;
         let recording = state(app).recording.load(std::sync::atomic::Ordering::SeqCst);
         let has_last = lock(&state(app).last_output).is_some();
-        let key = format!("{line:?}|{recording}|{has_last}|{:?}|{}|{mics:?}", s.input_device, s.language);
+        let key = format!("{line:?}|{copy}|{recording}|{has_last}|{:?}|{}|{mics:?}", s.input_device, s.language);
         if self.menu.as_ref() != Some(&key)
-            && let Ok(m) = crate::pill::menu(app, mics, Some(crate::pill::Bar { line, recording }))
+            && let Ok(m) = crate::pill::menu(app, mics, Some(crate::pill::Bar { line, recording, copy }))
         {
             let _ = tray.set_menu(Some(m));
             self.menu = Some(key);
