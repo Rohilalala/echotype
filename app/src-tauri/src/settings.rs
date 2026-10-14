@@ -57,7 +57,7 @@ pub struct Settings {
     pub copy_last_hotkey: String,
     /// Launch at login. Off for upgraders; onboarding offers it pre-checked.
     pub autostart: bool,
-    /// Start, stop and lock sounds (macOS).
+    /// Start, stop and lock sounds.
     pub sounds: bool,
     /// One-time notices already dismissed: "upgrade_offer", "bluetooth_tip", "no_cleanup_banner".
     pub dismissed: Vec<String>,

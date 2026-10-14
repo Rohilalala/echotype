@@ -55,7 +55,6 @@ pub fn wait_for_modifiers_up(max: Duration) -> bool {
 }
 
 /// Plays bundled `sounds/<pack>/<name>.wav` (start, stop, lock, nopaste) from the chosen pack.
-// ponytail: macOS only (NSSound); Windows/Linux get sounds when someone wants them (cpal output or rodio).
 pub fn play_sound(app: &AppHandle, name: &'static str) {
     play_from(app, &crate::current_settings(app).sound_pack, name);
 }
@@ -67,8 +66,17 @@ pub fn play_from(app: &AppHandle, pack: &str, name: &'static str) {
         let Ok(path) = app.path().resource_dir().map(|d| d.join("sounds").join(pack).join(format!("{name}.wav"))) else { return };
         let _ = app.run_on_main_thread(move || mac::play(&path));
     }
+    // ponytail: a thread and an output stream per chime (~110 ms each); keep one stream open if they ever lag.
     #[cfg(not(target_os = "macos"))]
-    let _ = (app, pack, name);
+    {
+        use tauri::Manager;
+        let Ok(path) = app.path().resource_dir().map(|d| d.join("sounds").join(pack).join(format!("{name}.wav"))) else { return };
+        std::thread::spawn(move || {
+            if let Err(e) = crate::audio::play(&path) {
+                eprintln!("echotype: could not play {name}: {e}");
+            }
+        });
+    }
 }
 
 fn clipboard() -> Result<std::sync::MutexGuard<'static, Option<arboard::Clipboard>>, String> {
