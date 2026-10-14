@@ -22,6 +22,7 @@ const settings = {
   autostart: !q.has('upgrade'), sounds: true,
   look: q.get('look') === 'v2' ? 'v2' : 'classic',
   pill_idle: !q.has('pilloff'), pill_hidden_until: q.has('pillhidden') ? now + 42 * 60000 : 0, pill_in_recordings: false,
+  pill_positions: {}, pill_screen: null, pill_follow_cursor: true, show_in: q.has('menubar') ? 'menubar' : 'pill',
   dismissed: q.has('upgrade') || q.has('onboarding') ? [] : ['upgrade_offer'],
 };
 if (q.has('bt')) settings.input_device = 'AirPods Pro';
@@ -129,6 +130,10 @@ const commands = {
   pill_cancel: () => null,
   pill_open: () => null,
   pill_menu: () => null,
+  pill_drag: () => null,
+  pill_reset: () => null,
+  pill_copy: () => null,
+  pill_dismiss: () => null,
   check_permissions: () => ({ microphone: 'granted', accessibility: !q.has('noaccess') }),
   open_permission_settings: () => null,
   cloud_start_login: async ({ email }) => {
@@ -191,12 +196,14 @@ if (q.has('view') || q.has('hover')) {
 
 // overlay.html?state=<state>&chip=<chip> (and index.html?state=... for the Home hero) renders any
 // dictation state through the real overlay/Home code: state = recording|transcribing|cleaning|done|error|hint,
-// chip = quiet|too_quiet|no_cleanup, plus message=, error=, action=, copied=1, locked=1, muted=1.
+// chip = quiet|too_quiet|no_cleanup, plus message=, error=, action=, copied=1, locked=1, muted=1,
+// card=1 (nowhere to paste; text= sets the transcript, nokey=1 drops the paste-last hint).
 if (q.has('state')) {
   setTimeout(() => {
     const state = q.get('state');
     emit('dictation-state', {
-      state, text: state === 'done' ? 'Let’s move the standup to 10:30 tomorrow.' : undefined,
+      state, text: state === 'done' ? q.get('text') || 'Let’s move the standup to 10:30 tomorrow.' : undefined,
+      card: q.has('card'), paste_key: q.has('card') && !q.has('nokey') ? '⌘ ⌃ V' : undefined,
       error: state === 'error' ? q.get('error') || 'Microphone access is off' : undefined,
       message: q.get('message') || undefined, chip: q.get('chip') || undefined, action: q.get('action') || undefined,
       warning: q.get('warning') || undefined, copied: q.has('copied'), locked: q.has('locked'), retry: q.has('retry'),

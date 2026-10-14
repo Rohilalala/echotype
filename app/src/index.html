@@ -256,11 +256,18 @@
 
       <h2 class="group-title" id="pillTitle">Pill</h2>
       <div class="group" id="pillGroup">
-        <label class="row"><span class="row-text"><span class="row-title">Show pill when idle</span><span class="row-desc">A thin bar at the bottom of the screen. Click it to dictate, right-click for options.</span></span>
+        <div class="row"><span class="row-text"><span class="row-title" id="showInLabel">Show Echotype in</span><span class="row-desc" id="showInDesc"></span></span>
+          <span class="seg" role="radiogroup" aria-labelledby="showInLabel">
+            <label><input type="radio" name="show_in" value="pill" data-bind="show_in" /><span>Pill</span></label>
+            <label><input type="radio" name="show_in" value="menubar" data-bind="show_in" /><span>Menu bar</span></label>
+          </span></div>
+        <label class="row" id="pillFollowRow"><span class="row-text"><span class="row-title">Move to the screen I'm using</span><span class="row-desc">Off keeps the pill on the screen you last dragged it to.</span></span>
+          <input type="checkbox" class="switch" data-bind="pill_follow_cursor" /></label>
+        <label class="row" id="pillIdleRow"><span class="row-text"><span class="row-title">Show pill when idle</span><span class="row-desc">A thin bar at the bottom of the screen. Click it to dictate, right-click for options.</span></span>
           <input type="checkbox" class="switch" data-bind="pill_idle" /></label>
         <div class="row" id="pillHideRow"><span class="row-text"><span class="row-title">Hide for 1 hour</span><span class="row-desc" id="pillHidden" role="status"></span></span>
           <button class="btn" id="pillHide" type="button"></button></div>
-        <label class="row"><span class="row-text"><span class="row-title">Show pill in screen recordings</span><span class="row-desc">Off keeps it out of screenshots and screen sharing. Some screen-sharing apps may still show it.</span></span>
+        <label class="row" id="pillRecRow"><span class="row-text"><span class="row-title">Show pill in screen recordings</span><span class="row-desc">Off keeps it out of screenshots and screen sharing. Some screen-sharing apps may still show it.</span></span>
           <input type="checkbox" class="switch" data-bind="pill_in_recordings" /></label>
       </div>
 

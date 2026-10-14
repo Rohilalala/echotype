@@ -11,6 +11,10 @@
     "allow-pill-click",
     "allow-pill-cancel",
     "allow-pill-open",
-    "allow-pill-menu"
+    "allow-pill-menu",
+    "allow-pill-drag",
+    "allow-pill-reset",
+    "allow-pill-copy",
+    "allow-pill-dismiss"
   ]
 }

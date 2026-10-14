@@ -127,7 +127,7 @@ function changed(p) {
   if (p === 'cleanup.enabled') { setCleanupInert(); renderCloud(); refreshCloud(); }
   if (p.startsWith('local_api')) refreshApi();
   if (p === 'history_enabled') renderHistory();
-  if (p === 'pill_idle') renderPill();
+  if (p === 'pill_idle' || p === 'show_in') renderPill();
   if (p === 'look') applyLook();
   renderChips();
 }
@@ -903,6 +903,10 @@ function renderStartup() {
 let pillTimer;
 const HIDE_MS = 3600 * 1000; // pill.rs HIDE_FOR
 function renderPill() {
+  const bar = S.show_in === 'menubar';
+  $('#showInDesc').textContent = bar ? 'No pill on screen. The menu bar icon shows when Echotype listens; click it to dictate, right-click for options.'
+    : 'Drag the pill anywhere on any display; double-click it to put it back.';
+  $('#pillFollowRow').hidden = $('#pillIdleRow').hidden = $('#pillHideRow').hidden = $('#pillRecRow').hidden = bar;
   const until = S.pill_hidden_until || 0, hidden = until > Date.now();
   const at = new Date(until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); // as the tray says it
   $('#pillHidden').textContent = !S.pill_idle ? 'The pill shows only while you dictate.'

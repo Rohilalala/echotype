@@ -8,6 +8,7 @@ mod platform;
 mod settings;
 mod stats;
 mod stt;
+mod tray;
 
 use audio::{LevelStats, Quality};
 use hotkey::{Act, Ev};
@@ -33,6 +34,9 @@ const SOUND_WINDOWS: u32 = 4;
 /// A key-started recording shows itself (pill, start sound) only after this long without another
 /// key, so fn+arrow or Right ⌘+C stays silent. The mic opens at once, so no words are lost.
 const SHOW_AFTER: Duration = Duration::from_millis(150);
+/// A pill click shows its recording this much later (the mic opens at once), so the second
+/// click of a double-click (put the pill back) can take it back before anything shows or plays.
+const CLICK_SHOW_AFTER: Duration = Duration::from_millis(250);
 
 struct AppState {
     settings: Mutex<Settings>,
@@ -48,8 +52,12 @@ struct AppState {
     /// The settings window shows Home (main.js emits `main-page` on every page change).
     main_home: AtomicBool,
     clicks: Mutex<pill::Debounce>,
+    /// The press on the pill that may be a drag (pill.rs moves the window while it is held).
+    drag: Mutex<Option<pill::Drag>>,
     /// The tray's hide/show pill item (macOS), relabelled by the pill loop.
     tray_pill: Mutex<Option<MenuItem<tauri::Wry>>>,
+    /// The tray's own menu, put back when menu-bar mode ends.
+    tray_menu: Mutex<Option<Menu<tauri::Wry>>>,
     /// The last recording whose transcription failed, kept so `retry_last` can run it again.
     // ponytail: only the last one, in memory; a failed-recordings folder if users need more than one retry.
     last_failed: Mutex<Option<Vec<f32>>>,
@@ -66,6 +74,8 @@ struct AppState {
 
 enum Cmd {
     Key(Ev),
+    /// A click on the pill: Ev::Toggle, with the recording shown after CLICK_SHOW_AFTER.
+    Click,
     Retry,
     /// Recording `n`'s microphone went away: transcribe what it captured.
     Lost(u64),
@@ -100,6 +110,12 @@ struct DictationState {
     /// What the settings window offers to fix it: "microphone" | "accessibility" | "model" | "cleanup" | "settings".
     #[serde(skip_serializing_if = "Option::is_none")]
     action: Option<&'static str>,
+    /// "done" with nowhere to paste: the pill opens into a card with the text and Copy.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    card: bool,
+    /// The paste-last shortcut as the card names it ("⌘ ⌃ V"); None when it is unbound.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    paste_key: Option<String>,
 }
 
 fn state(app: &AppHandle) -> tauri::State<'_, AppState> {
@@ -201,6 +217,8 @@ struct Live {
     id: u64,
     /// The pill and start sound have been shown for it.
     shown: bool,
+    /// Hands-free from the start (a click in hold mode), so the pill shows the lock when it shows.
+    locked: bool,
     rec: audio::Recorder,
     stats: Arc<Mutex<LevelStats>>,
     lost: Arc<AtomicBool>,
@@ -216,9 +234,10 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
         let mut live: Option<Live> = None;
         for cmd in rx {
             let s = current_settings(&app);
-            let ev = match cmd {
-                Cmd::Key(ev) => ev,
-                Cmd::Lost(id) => Ev::AutoStop(id),
+            let (ev, click) = match cmd {
+                Cmd::Key(ev) => (ev, false),
+                Cmd::Click => (Ev::Toggle, true),
+                Cmd::Lost(id) => (Ev::AutoStop(id), false),
                 Cmd::Show(id, locked) => {
                     if let Some(l) = live.as_mut().filter(|l| l.id == id && (locked || !l.shown)) {
                         l.shown = true;
@@ -226,7 +245,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                             lock(&l.stats).exclude(SOUND_WINDOWS);
                             platform::play_sound(&app, if locked { "lock" } else { "start" });
                         }
-                        emit_state(&app, DictationState { state: "recording", locked, ..Default::default() });
+                        emit_state(&app, DictationState { state: "recording", locked: locked || l.locked, ..Default::default() });
                     }
                     continue;
                 }
@@ -249,8 +268,13 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                 Act::None => {}
                 Act::Start { id, locked } => match start_recording(&app, &s, id) {
                     Ok(mut l) => {
-                        let _ = app.global_shortcut().register(escape());
-                        if ev == Ev::Toggle {
+                        // Recording before anything shows, so the pill loop takes Esc for it (pill.rs owns Esc).
+                        state(&app).recording.store(true, Ordering::SeqCst);
+                        let _ = state(&app).pill_wake.send(());
+                        l.locked = locked && !toggle_mode;
+                        if click {
+                            show_later(&app, id, false, CLICK_SHOW_AFTER);
+                        } else if ev == Ev::Toggle {
                             l.shown = true;
                             if s.sounds {
                                 lock(&l.stats).exclude(SOUND_WINDOWS);
@@ -258,10 +282,9 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                             }
                             emit_state(&app, DictationState { state: "recording", locked: locked && !toggle_mode, ..Default::default() });
                         } else {
-                            show_later(&app, id, false);
+                            show_later(&app, id, false, SHOW_AFTER);
                         }
                         live = Some(l);
-                        state(&app).recording.store(true, Ordering::SeqCst);
                     }
                     Err(e) => {
                         fsm.start_failed();
@@ -271,7 +294,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                 // Deferred like Show: a lock press that turns out to be a chord (tap, then Right ⌘+V) stays silent.
                 Act::Lock => {
                     if let Some(l) = &live {
-                        show_later(&app, l.id, true);
+                        show_later(&app, l.id, true, SHOW_AFTER);
                     }
                 }
                 Act::ArmTap { id, seq } => {
@@ -286,7 +309,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                         l.rec.stop();
                     }
                     state(&app).recording.store(false, Ordering::SeqCst);
-                    let _ = app.global_shortcut().unregister(escape());
+                    let _ = state(&app).pill_wake.send(());
                     let verb = if toggle_mode { "Press" } else { "Hold" };
                     emit_state(&app, if show { hint(format!("{verb} {} to dictate", key_label(&s, cfg!(target_os = "macos"))), None) } else { simple("idle") });
                 }
@@ -294,7 +317,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                     let Some(l) = live.take() else { continue };
                     state(&app).recording.store(false, Ordering::SeqCst);
                     let pcm = l.rec.stop();
-                    let _ = app.global_shortcut().unregister(escape());
+                    let _ = state(&app).pill_wake.send(());
                     if s.sounds {
                         platform::play_sound(&app, "stop");
                     }
@@ -315,10 +338,10 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
     tx
 }
 
-fn show_later(app: &AppHandle, id: u64, locked: bool) {
+fn show_later(app: &AppHandle, id: u64, locked: bool, after: Duration) {
     let a = app.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(SHOW_AFTER);
+        std::thread::sleep(after);
         send(&a, Cmd::Show(id, locked));
     });
 }
@@ -341,7 +364,7 @@ fn start_recording(app: &AppHandle, s: &Settings, id: u64) -> Result<Live, Dicta
     let (a, st, lost2, started, sent) = (app.clone(), stats.clone(), lost.clone(), Instant::now(), AtomicBool::new(false));
     let rec = audio::Recorder::start(s.input_device.clone(), move |db, gone| {
         let level = lock(&st).push(db);
-        lock(&state(&a).pill).set_muted(level.muted);
+        lock(&state(&a).pill).set_level(level.muted, level.meter);
         let _ = a.emit("audio-level", level);
         if gone && !lost2.swap(true, Ordering::SeqCst) {
             send(&a, Cmd::Lost(id));
@@ -351,7 +374,7 @@ fn start_recording(app: &AppHandle, s: &Settings, id: u64) -> Result<Live, Dicta
         }
     });
     match rec {
-        Ok(rec) => Ok(Live { id, shown: false, rec, stats, lost }),
+        Ok(rec) => Ok(Live { id, shown: false, locked: false, rec, stats, lost }),
         Err(_) if platform::microphone_status() == "denied" => {
             Err(DictationState { state: "error", error: Some("Microphone access is off".into()), action: Some("microphone"), ..Default::default() })
         }
@@ -419,19 +442,22 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
                 let paste = paste && s.onboarded && !main_window_focused(&app);
                 let warning = out.warning.clone().or(clip.warning);
                 let chip = chip(clip.quality, out.no_cleanup && out.warning.is_none());
-                let res = if paste { platform::paste(&app, &out.text, s.restore_clipboard) } else { platform::copy(&out.text).map_err(|e| (e, false)) };
+                // Nothing focused takes text (the desktop, a list, Accessibility off): no ⌘V into nowhere.
+                let nowhere = paste && platform::paste_target() == platform::Target::Card;
+                let res = if nowhere && !platform::accessibility_granted() {
+                    // As before: on the clipboard, since there is no way to paste it.
+                    platform::copy(&out.text).map_err(|e| (e, false)).and(Err(("Accessibility is off, so Echotype copied instead of pasting".into(), true)))
+                } else if nowhere {
+                    Err(("Nowhere to paste".to_string(), true))
+                } else if paste {
+                    platform::paste(&app, &out.text, s.restore_clipboard)
+                } else {
+                    platform::copy(&out.text).map_err(|e| (e, false))
+                };
                 match res {
                     Ok(()) => DictationState { state: "done", text: Some(out.text), warning, copied: !paste, chip, ..Default::default() },
-                    // Accessibility off or the keystroke blocked (secure input): the text is on the clipboard.
-                    Err((e, true)) => DictationState {
-                        state: "done",
-                        text: Some(out.text),
-                        warning: Some(e),
-                        copied: true,
-                        chip,
-                        action: (!platform::accessibility_granted()).then_some("accessibility"),
-                        ..Default::default()
-                    },
+                    // Nowhere to paste, or the keystroke blocked (secure input): the card, with Copy.
+                    Err((e, true)) => card(&s, out.text, Some(e), chip),
                     Err((e, false)) => DictationState { state: "error", text: Some(out.text), error: Some(e), warning, ..Default::default() },
                 }
             }
@@ -439,6 +465,21 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
         drop(guard);
         emit_state(&app, ev);
     });
+}
+
+/// The "nowhere to paste" card. Home offers the Accessibility fix when that is why.
+fn card(s: &Settings, text: String, warning: Option<String>, chip: Option<&'static str>) -> DictationState {
+    DictationState {
+        state: "done",
+        text: Some(text),
+        warning,
+        chip,
+        card: true,
+        // Paste-last needs Accessibility too, so the card only names it when it would work.
+        paste_key: (!s.paste_last_hotkey.is_empty() && platform::accessibility_granted()).then(|| accel_label(&s.paste_last_hotkey, cfg!(target_os = "macos"))),
+        action: (!platform::accessibility_granted()).then_some("accessibility"),
+        ..Default::default()
+    }
 }
 
 /// Paste-last / copy-last: the last dictated text again, after the shortcut's own keys are up so
@@ -632,6 +673,10 @@ fn local_api_token() -> Result<String, String> {
 }
 
 fn show_main(app: &AppHandle) {
+    // On-screen tests drive the pill without ever putting the settings window over the desktop.
+    if std::env::var_os("ECHOTYPE_NO_MAIN").is_some() {
+        return;
+    }
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
@@ -891,11 +936,41 @@ async fn toggle_dictation(app: AppHandle) -> R<()> {
 // ---------- the pill (the only commands the overlay may call) ----------
 
 /// A click on the idle pill starts a hands-free recording; on a recording (or ✓) it finishes.
+/// The mouse-up that ends a drag is not a click.
 #[tauri::command]
 async fn pill_click(app: AppHandle) -> R<()> {
-    if lock(&state(&app).clicks).accept(Instant::now()) {
-        send(&app, Cmd::Key(Ev::Toggle));
+    let (st, now) = (state(&app), Instant::now());
+    if pill::is_drop(&app, now) {
+        return Ok(());
     }
+    let mut clicks = lock(&st.clicks);
+    if clicks.accept(now) {
+        if !st.recording.load(Ordering::SeqCst) {
+            clicks.started(now);
+        }
+        send(&app, Cmd::Click);
+    }
+    Ok(())
+}
+
+/// The button went down on the pill: it may be the start of a drag.
+#[tauri::command]
+async fn pill_drag(app: AppHandle) -> R<()> {
+    pill::grab(&app);
+    Ok(())
+}
+
+/// Double-click on the pill: back to bottom-centre of this display, and the dictation its
+/// first click started is taken back.
+#[tauri::command]
+async fn pill_reset(app: AppHandle) -> R<()> {
+    if pill::is_drop(&app, Instant::now()) {
+        return Ok(()); // the second press of a "double-click" was a drag
+    }
+    if lock(&state(&app).clicks).undo_start(Instant::now()) {
+        send(&app, Cmd::Key(Ev::Cancel));
+    }
+    pill::reset(&app);
     Ok(())
 }
 
@@ -911,9 +986,27 @@ async fn pill_cancel(app: AppHandle) -> R<()> {
 /// notice back never opens the settings window.
 #[tauri::command]
 async fn pill_open(app: AppHandle) -> R<()> {
-    if lock(&state(&app).clicks).accept(Instant::now()) {
+    if !pill::is_drop(&app, Instant::now()) && lock(&state(&app).clicks).accept(Instant::now()) {
         open_page(&app, "home");
     }
+    Ok(())
+}
+
+/// Copy on the card (and the menu-bar menu's copy item): the last transcript to the clipboard.
+#[tauri::command]
+async fn pill_copy(app: AppHandle) -> R<()> {
+    copy_last(&app)
+}
+
+fn copy_last(app: &AppHandle) -> R<()> {
+    let text = lock(&state(app).last_output).clone().ok_or("Nothing to copy yet")?;
+    platform::copy(&text)
+}
+
+/// ✕ on the card.
+#[tauri::command]
+async fn pill_dismiss(app: AppHandle) -> R<()> {
+    pill::dismiss_card(&app);
     Ok(())
 }
 
@@ -1042,12 +1135,22 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
         menu.insert_items(&[&item, &PredefinedMenuItem::separator(app)?], 2)?;
         *lock(&state(app.handle()).tray_pill) = Some(item);
     }
+    *lock(&state(app.handle()).tray_menu) = Some(menu.clone());
     let mut tray = TrayIconBuilder::with_id("main").tooltip("Echotype").menu(&menu).on_menu_event(|app, e| match e.id.as_ref() {
         "open" => show_main(app),
         "toggle" => send(app, Cmd::Key(Ev::Toggle)),
         "pill" => pill::on_tray(app),
         "quit" => app.exit(0),
         _ => {}
+    });
+    // Menu-bar mode: a left click dictates (pill.rs moves the menu to the right click).
+    tray = tray.on_tray_icon_event(|tray, e| {
+        use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+        if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e
+            && pill::in_menu_bar(&current_settings(tray.app_handle()))
+        {
+            send(tray.app_handle(), Cmd::Key(Ev::Toggle));
+        }
     });
     if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
@@ -1062,8 +1165,9 @@ pub fn run() {
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());
+    // On-screen tests (ECHOTYPE_NO_MAIN) run beside the installed app instead of opening its window.
+    let builder = if std::env::var_os("ECHOTYPE_NO_MAIN").is_some() { builder } else { builder.plugin(tauri_plugin_single_instance::init(|app, _, _| show_main(app))) };
     let app = builder
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| show_main(app)))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(
@@ -1075,6 +1179,7 @@ pub fn run() {
                     if sc.id() == escape().id() {
                         if pressed {
                             send(app, Cmd::Key(Ev::Cancel));
+                            pill::dismiss_card(app);
                         }
                     } else if is(&s.hotkey) {
                         send(app, Cmd::Key(if pressed { Ev::Press } else { Ev::Release }));
@@ -1098,7 +1203,9 @@ pub fn run() {
                 main_key: AtomicBool::new(false),
                 main_home: AtomicBool::new(true),
                 clicks: Mutex::new(pill::Debounce::default()),
+                drag: Mutex::new(None),
                 tray_pill: Mutex::new(None),
+                tray_menu: Mutex::new(None),
                 last_failed: Mutex::new(None),
                 last_output: Mutex::new(None),
                 downloads: Mutex::new(HashMap::new()),
@@ -1153,6 +1260,16 @@ pub fn run() {
             if !s.onboarded {
                 show_main(app.handle());
             }
+            // On-screen checks: the card for this text after 2 s, without dictating or typing.
+            if let Some(text) = std::env::var("ECHOTYPE_TEST_CARD").ok().filter(|t| !t.is_empty()) {
+                let (h, s) = (app.handle().clone(), s.clone());
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(2));
+                    eprintln!("echotype: paste target {:?}", platform::paste_target());
+                    *lock(&state(&h).last_output) = Some(text.clone());
+                    emit_state(&h, card(&s, text, None, None));
+                });
+            }
             std::thread::spawn(move || stt::warm_up(&s));
             Ok(())
         })
@@ -1203,6 +1320,10 @@ pub fn run() {
             pill_cancel,
             pill_open,
             pill_menu,
+            pill_drag,
+            pill_reset,
+            pill_copy,
+            pill_dismiss,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Echotype");
