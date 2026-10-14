@@ -270,9 +270,12 @@ pub fn quiet_whisper_logs() {
     whisper_rs::install_logging_hooks();
 }
 
-/// Whisper prompt from the dictionary: biases spelling of names at no latency cost.
+/// Whisper prompt from the dictionary: biases spelling of names at no latency cost. Whisper
+/// copies the prompt's style, so it ends like a sentence: a bare comma list made it drop full
+/// stops, which ran a meeting's sentences (and so its speakers) together.
 pub fn prompt(dictionary: &[String]) -> String {
-    dictionary.iter().map(|w| w.trim().replace('\0', "")).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(", ")
+    let words: Vec<String> = dictionary.iter().map(|w| w.trim().replace('\0', "")).filter(|w| !w.is_empty()).collect();
+    if words.is_empty() { String::new() } else { format!("{}.", words.join(", ")) }
 }
 
 /// Drops whisper's non-speech tags such as "[BLANK_AUDIO]" and trims.
@@ -491,6 +494,7 @@ mod tests {
     fn whisper_text_cleanup_and_prompt() {
         assert_eq!(clean_text(" [BLANK_AUDIO] "), "");
         assert_eq!(clean_text(" Hello [Music] world. "), "Hello world.");
-        assert_eq!(prompt(&["Arnav".into(), " ".into(), "Xoxoday".into()]), "Arnav, Xoxoday");
+        assert_eq!(prompt(&["Arnav".into(), " ".into(), "Xoxoday".into()]), "Arnav, Xoxoday.");
+        assert_eq!(prompt(&[" ".into()]), "");
     }
 }
