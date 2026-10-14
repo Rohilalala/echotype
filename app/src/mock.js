@@ -15,7 +15,7 @@ const settings = {
   replacements: [{ from: 'my email', to: 'aditya@example.com' }],
   restore_clipboard: true, history_enabled: true,
   usage_stats: !q.has('statsoff'), display_name: q.get('name') || '',
-  onboarded: !q.has('onboarding'),
+  onboarded: !q.has('onboarding'), onboard_step: 0,
   talk_key: q.get('talk') || 'accelerator',
   paste_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+V',
   copy_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+C',
@@ -39,12 +39,12 @@ const presets = [
 ];
 // The same catalog, sizes and notes as stt.rs MODELS.
 const models = [
-  { id: 'large-v3-turbo-q5_0', label: 'Large v3 Turbo (Q5)', size_mb: 547, ram_mb: 761, downloaded: !q.has('onboarding'), note: 'Best default: near-large accuracy, fast, 99 languages. Cannot translate.' },
+  { id: 'large-v3-turbo-q5_0', label: 'Large v3 Turbo (Q5)', size_mb: 547, ram_mb: 761, downloaded: !q.has('onboarding') || q.get('model') === 'ready', note: 'Best default: near-large accuracy, fast, 99 languages. Cannot translate.' },
   { id: 'large-v3-turbo', label: 'Large v3 Turbo', size_mb: 1624, ram_mb: 1840, downloaded: false, note: 'Full-precision turbo. Slightly more accurate, twice the size. Cannot translate.' },
   { id: 'medium', label: 'Medium', size_mb: 1533, ram_mb: 1869, downloaded: false, note: 'Multilingual and translates to English (Hinglish → English).' },
   { id: 'small', label: 'Small', size_mb: 488, ram_mb: 717, downloaded: false, note: 'Multilingual, translates; lighter and less accurate than medium.' },
-  { id: 'base.en', label: 'Base (English)', size_mb: 148, ram_mb: 316, downloaded: true, note: 'English only. For low-memory machines.' },
-  { id: 'tiny.en', label: 'Tiny (English)', size_mb: 78, ram_mb: 224, downloaded: false, note: 'English only. Fastest, least accurate.' },
+  { id: 'base.en', label: 'Base (English)', size_mb: 148, ram_mb: 316, downloaded: !q.has('onboarding'), note: 'English only. For low-memory machines.' },
+  { id: 'tiny.en', label: 'Tiny (English)', size_mb: 78, ram_mb: 224, downloaded: q.get('model') === 'tiny', note: 'English only. Fastest, least accurate.' },
 ];
 // ?ram=8 previews an 8 GB Mac (Automatic's light setup and its warnings); ?cloud shows Echotype Cloud.
 const low = q.get('ram') === '8';
@@ -54,7 +54,11 @@ const sys = { total_ram_gb: low ? 8 : 24, available_ram_gb: low ? 3.2 : 5.1, os:
 for (const m of models) Object.assign(m, { english_only: m.id.endsWith('.en'), translates: ['medium', 'small'].includes(m.id), fits: m.ram_mb + 2048 <= sys.available_ram_gb * 1024 });
 const rec = models.find(m => m.id === (low ? 'small' : 'large-v3-turbo-q5_0'));
 rec.recommended = true;
-(rec.downloaded ? rec : models.find(m => m.downloaded)).automatic = true;
+// Automatic: the recommendation once downloaded, else the downloaded model closest in RAM (stt.rs auto_model).
+const automatic = () => {
+  const have = models.filter(m => m.downloaded).sort((a, b) => (a.ram_mb > rec.ram_mb) - (b.ram_mb > rec.ram_mb) || Math.abs(a.ram_mb - rec.ram_mb) - Math.abs(b.ram_mb - rec.ram_mb));
+  for (const m of models) m.automatic = m === (rec.downloaded ? rec : have[0] ?? rec);
+};
 for (const m of models) m.warning = low && m.ram_mb > rec.ram_mb ? `Uses about ${(m.ram_mb / 1024).toFixed(1)} GB while dictating. On an 8 GB Mac this can slow other apps.` : null;
 
 const ago = min => Math.floor((now - min * 60000) / 1000);
@@ -76,6 +80,9 @@ let cloudAccount = ['free', 'pro'].includes(q.get('cloud')) ? sampleAccount(q.ge
 if (q.has('cloud')) settings.stt.provider = 'cloud';
 if (q.has('builtin')) Object.assign(settings.cleanup, { enabled: true, provider: 'echotype', model: 'echotype-clean' });
 let busy = false;
+// Onboarding: ?mic=unknown|denied|granted|restricted (onboarding starts at unknown), ?ax=1 (starts on).
+const perm = { mic: q.get('mic') || (q.has('onboarding') ? 'unknown' : 'granted'), ax: q.has('onboarding') ? q.get('ax') === '1' : !q.has('noaccess') };
+let micTimer;
 
 const commands = {
   get_settings: () => structuredClone(settings),
@@ -89,10 +96,16 @@ const commands = {
   set_secret: ({ name }) => { secrets.add(name); return null; },
   has_secret: ({ name }) => secrets.has(name),
   delete_secret: ({ name }) => { secrets.delete(name); return null; },
-  list_models: () => structuredClone(models),
+  list_models: () => { automatic(); return structuredClone(models); },
+  // ?dl=slow takes five times as long; ?dl=stuck never finishes (onboarding's "getting ready").
   download_model: async ({ id }) => {
     const m = models.find(x => x.id === id), total = m.size_mb * 1048576;
-    for (let i = 1; i <= 40; i++) { await wait(70); emit('model-download', { id, downloaded: (total * i) / 40, total, done: false }); }
+    const steps = id === 'tiny.en' ? 16 : 40, ms = (id === 'tiny.en' ? 60 : 110) * (q.get('dl') === 'slow' ? 5 : 1);
+    for (let i = 1; i <= steps; i++) {
+      await wait(ms);
+      if (q.get('dl') === 'stuck' && i > steps / 3) return new Promise(() => {});
+      emit('model-download', { id, downloaded: (total * i) / steps, total, done: false });
+    }
     m.downloaded = true;
     emit('model-download', { id, downloaded: total, total, done: true });
     return null;
@@ -145,8 +158,34 @@ const commands = {
   pill_reset: () => null,
   pill_copy: () => null,
   pill_dismiss: () => null,
-  check_permissions: () => ({ microphone: 'granted', accessibility: !q.has('noaccess') }),
-  open_permission_settings: () => null,
+  check_permissions: () => ({ microphone: perm.mic === 'restricted' ? 'denied' : perm.mic, microphone_restricted: perm.mic === 'restricted', accessibility: perm.ax }),
+  // A grant made "in System Settings" a moment later (?mic=denied&later, and Accessibility unless ?stale).
+  open_permission_settings: ({ kind }) => {
+    if (kind === 'microphone' && perm.mic === 'denied' && q.has('later')) setTimeout(() => (perm.mic = 'granted'), 2500);
+    if (kind === 'accessibility' && !q.has('stale')) setTimeout(() => (perm.ax = true), 2500);
+    return null;
+  },
+  // The system prompt, answered after a moment: ?answer=deny says no.
+  request_microphone: () => {
+    if (perm.mic === 'unknown') setTimeout(() => (perm.mic = q.get('answer') === 'deny' ? 'denied' : 'granted'), 900);
+    return perm.mic;
+  },
+  reset_accessibility: () => { setTimeout(() => (perm.ax = true), 2000); return null; },
+  // The sound check: a quiet room, then a voice (?silent keeps it quiet).
+  mic_check: ({ on }) => {
+    clearInterval(micTimer);
+    if (!on) return null;
+    let i = 0;
+    micTimer = setInterval(() => {
+      const voice = !q.has('silent') && i++ > 24;
+      emit('mic-level', { meter: voice ? 0.45 + 0.35 * Math.abs(Math.sin(i / 3)) : 0.04 * Math.random(), muted: false });
+    }, 50);
+    return null;
+  },
+  focus_main: () => 'TextEdit',
+  play_sound: () => null,
+  open_textedit: () => null,
+  quit_app: () => null,
   cloud_start_login: async ({ email }) => {
     await wait(500);
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw 'Enter a valid email address.';
@@ -266,3 +305,37 @@ if (q.has('state')) {
     }
   }, 50);
 }
+
+// The dictation shortcut in the preview: hold ⌥ Space (or call __mock.hold(ms)) for what hotkey.rs
+// and lib.rs send: hotkey-state with the keys, then a dictation of "Echotype, meet my Mac." A tap is
+// a hint. From onboarding's step 3 on it counts as pasted into another app.
+let held = 0, live = false;
+async function release() {
+  const ms = performance.now() - held;
+  held = 0;
+  emit('hotkey-state', false);
+  clearInterval(levelTimer);
+  if (!live) return;
+  live = false;
+  if (ms < 300) { emit('dictation-state', { state: 'hint', message: 'Hold ⌥ Space to dictate' }); return; }
+  emit('dictation-state', { state: 'transcribing' }); await wait(650);
+  emit('dictation-state', { state: 'done', text: 'Echotype, meet my Mac.', copied: settings.onboard_step < 3 && !settings.onboarded });
+  await wait(400);
+  emit('dictation-state', { state: 'idle' });
+}
+let levelTimer;
+function press() {
+  if (held) return;
+  held = performance.now();
+  emit('hotkey-state', true);
+  const ready = models.some(m => m.downloaded);
+  if (!ready) return emit('dictation-state', { state: 'hint', message: 'Model downloading 40%', action: 'model' });
+  live = true;
+  emit('dictation-state', { state: 'recording' });
+  let i = 0;
+  levelTimer = setInterval(() => emit('audio-level', { meter: Math.abs(Math.sin(i++ / 3)) * 0.55 + 0.15, muted: false }), 50);
+}
+addEventListener('keydown', e => { if (e.code === 'Space' && e.altKey && !e.repeat) { e.preventDefault(); press(); } }, true);
+addEventListener('keyup', e => { if (held && (e.code === 'Space' || e.key === 'Alt')) { e.preventDefault(); release(); } }, true);
+window.__mock.hold = async ms => { press(); await wait(ms); return release(); };
+window.__mock.perm = perm;
