@@ -53,7 +53,7 @@ Set up Echotype (https://github.com/Rohilalala/echotype) on this computer.
 
 1. Install what's missing: Rust (rustup), CMake and Node 20+. A Mac needs macOS 13 or later.
    On Linux also install
-   libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev libxdo-dev.
+   libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libxdo-dev clang.
 2. Clone the repo, then in app/ run `npm install` and `npm run tauri build`.
 3. Install the built app (macOS: copy Echotype.app from
    app/src-tauri/target/release/bundle/macos to /Applications) and open it.
@@ -124,6 +124,16 @@ defaults read com.apple.HIToolbox AppleFnUsageType
 - **Microphone**, to hear you while you dictate.
 - **Accessibility**, to press ⌘V in the app you're using. Without it, Echotype copies the text and you paste it yourself.
 - **Input Monitoring**, only for a talk key. Echotype watches for that one key and whether another key is pressed with it; it never records, stores or logs what you type. After granting it, relaunch Echotype. macOS ties these grants to the app's signature, so a self-built, unsigned Echotype may need them granted again after each rebuild.
+
+## Windows and Linux
+
+Releases include a Windows installer (.msi or .exe, x64 and ARM64) and a Linux .AppImage and .deb. Dictation, local models, cleanup, history, voice notes and the local API work as on a Mac. What differs:
+
+- Dictate with <kbd>Alt Space</kbd> and paste with Ctrl+V; no Accessibility permission is needed. GNOME and KDE use Alt Space themselves, so pick another shortcut in Settings there.
+- The pill shows only while you dictate, on the main display. The talk key, the idle pill, menu-bar mode and telling speakers apart are macOS-only.
+- On Windows, if Echotype hears nothing, turn on microphone access for desktop apps in Settings → Privacy & security → Microphone. The installers are unsigned, so SmartScreen warns the first time.
+- Meeting notes on Windows include the computer's audio, with everyone else labelled Others. On Linux they transcribe your microphone only.
+- Linux on Wayland: Echotype runs through XWayland so the pill can float. Apps can't press keys in each other there, so install `wtype` (Sway, Hyprland, KDE) or `ydotool` (any desktop, with `ydotoold` running) to paste; without either, the text stays on the clipboard. The shortcut reaches Echotype only while an X11 app is focused, so bind `echotype --toggle` to a key in your desktop's keyboard settings to dictate anywhere.
 
 ## Local models
 
