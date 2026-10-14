@@ -12,7 +12,7 @@ const clock = s => {
   const mm = String(Math.floor(s / 60) % 60).padStart(2, '0'), ss = String(s % 60).padStart(2, '0');
   return s >= 3600 ? `${Math.floor(s / 3600)}:${mm}:${ss}` : `${mm}:${ss}`;
 };
-const when = ms => new Date(ms).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+const when = ms => new Date(ms).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 const STATE = { recording: 'Recording', processing: 'Writing up', interrupted: 'Interrupted' };
 const live = () => status.live?.recording ? status.live : null;
 const elapsed = () => (Date.now() - live().started_ms) / 1000;
