@@ -505,8 +505,10 @@ fn name<'a>(m: &'a Meeting, id: &'a str) -> &'a str {
 fn no_summary_reason(s: &Settings) -> Option<&'static str> {
     if !s.cleanup.enabled || crate::cleanup::keyless(s) {
         Some("Set up cleanup to get summaries")
-    } else if s.cleanup.provider == "echotype" {
+    } else if s.cleanup.provider == "echotype" && crate::settings::CLOUD {
         Some("Summaries need a general model, such as Echotype Cloud or Ollama, as the cleanup provider")
+    } else if s.cleanup.provider == "echotype" {
+        Some("Summaries need a general model, such as Ollama or an API key, as the cleanup provider")
     } else {
         None
     }
@@ -843,6 +845,7 @@ fn run(app: AppHandle, mut session: Session, rx: mpsc::Receiver<Piece>, stopped:
     impl Drop for Done {
         fn drop(&mut self) {
             lock(&LIVE).take();
+            stt::free_vad(); // the Silero detector is for meetings only
         }
     }
     let _done = Done;
@@ -1004,6 +1007,7 @@ pub fn cli(args: &[String]) -> i32 {
                 if let Some(m) = it.next() {
                     s.stt.provider = "local".into();
                     s.stt.local_model = std::fs::canonicalize(m).map_or(m.clone(), |p| p.to_string_lossy().into_owned());
+                    s.advanced = true; // a model named here is a manual pick
                 }
             }
             other => {
@@ -1037,6 +1041,8 @@ fn cli_run(s: &Settings, file: &str, mic: Option<&str>, n: Option<i32>) -> Resul
     let pcm = read(file)?;
     let mic = mic.map(read).transpose()?.unwrap_or_default();
     let secs = pcm.len() as f32 / RATE as f32;
+    stt::warm_up(s); // dictation's model, loaded as in the app, so "after" shows only what the meeting freed
+    let before = rss_mb();
     for m in speakers::MODELS.iter().filter(|m| !speakers::path(m).is_file()) {
         eprintln!("downloading {} ({} MB, {})", m.file, m.size_mb, m.license);
     }
@@ -1061,14 +1067,31 @@ fn cli_run(s: &Settings, file: &str, mic: Option<&str>, n: Option<i32>) -> Resul
     };
     session.finish(Some(&mut diarize), Some(pcm))?;
     let total = t.elapsed().as_secs_f32();
+    let (stt_ms, out) = (session.stt_ms, plain(&lock(&session.meeting)).trim_end().to_string());
+    drop(session); // the speaker models go with it
+    stt::free_vad();
     eprintln!(
-        "audio {secs:.1} s, transcription {:.1} s, final diarization {:.1} s, total {total:.1} s, real-time factor {:.3}, peak RAM {} MB",
-        session.stt_ms as f32 / 1000.0,
+        "audio {secs:.1} s, transcription {:.1} s, final diarization {:.1} s, total {total:.1} s, real-time factor {:.3}, RSS before {before} MB, peak {} MB, after {} MB",
+        stt_ms as f32 / 1000.0,
         diarize_ms as f32 / 1000.0,
         total / secs.max(0.001),
-        peak_rss_mb()
+        peak_rss_mb(),
+        rss_mb()
     );
-    Ok(plain(&lock(&session.meeting)).trim_end().to_string())
+    Ok(out)
+}
+
+/// Resident memory right now, MB.
+fn rss_mb() -> u64 {
+    #[cfg(target_os = "macos")]
+    // SAFETY: proc_pid_rusage fills a zeroed rusage_info_v2 for this process.
+    unsafe {
+        let mut ri: libc::rusage_info_v2 = std::mem::zeroed();
+        if libc::proc_pid_rusage(std::process::id() as i32, libc::RUSAGE_INFO_V2, &mut ri as *mut _ as *mut _) == 0 {
+            return ri.ri_resident_size >> 20;
+        }
+    }
+    0
 }
 
 fn peak_rss_mb() -> u64 {

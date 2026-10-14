@@ -88,6 +88,21 @@ pub struct Settings {
     pub pill_fade: bool,
     /// Which bundled sound pack plays (one of SOUND_PACKS) when `sounds` is on.
     pub sound_pack: String,
+    /// "Show advanced settings". Off: Echotype picks the speech model, the cleaner and its memory
+    /// mode for this Mac (Automatic). On: the manual picks below and `stt.local_model` apply. They
+    /// stay stored while it is off, so turning it back on restores them.
+    pub advanced: bool,
+    /// The built-in cleaner's memory (advanced): "save" (macOS may page the model out) | "ready" (mlocked).
+    pub cleaner_memory: String,
+    /// Stop the built-in cleaner after `cleaner_idle_minutes` without use (advanced).
+    pub cleaner_idle_unload: bool,
+    pub cleaner_idle_minutes: u32,
+    /// The built-in cleaner's context in tokens (advanced); llm::CONTEXT otherwise.
+    pub cleaner_context: u32,
+    /// A saved Echotype Cloud provider was moved to this Mac's models; Home says so once.
+    pub cloud_moved: bool,
+    /// A short hello at the top of Home, by time of day (Settings → Advanced). On for upgraders too.
+    pub greetings: bool,
 }
 
 /// The bundled sound packs (sounds/<pack>/{start,stop,lock,nopaste}.wav).
@@ -168,6 +183,13 @@ impl Default for Settings {
             ball_size: 1.0,
             sound_pack: "classic".into(),
             pill_fade: true,
+            advanced: false,
+            cleaner_memory: "ready".into(),
+            cleaner_idle_unload: false,
+            cleaner_idle_minutes: 10,
+            cleaner_context: 1024,
+            cloud_moved: false,
+            greetings: true,
         }
     }
 }
@@ -224,8 +246,8 @@ impl Settings {
         s
     }
 
-    /// Fixes values older builds wrote.
-    fn migrate(&mut self) {
+    /// Fixes values older builds wrote, and keeps settings off providers this build hides.
+    pub(crate) fn migrate(&mut self) {
         if self.look == "foundry" {
             self.look = "classic".into(); // the Foundry look is gone
         }
@@ -237,6 +259,21 @@ impl Settings {
         self.ball_size = fit(self.ball_size, 0.6, 2.0, 1.0);
         if !SOUND_PACKS.contains(&self.sound_pack.as_str()) {
             self.sound_pack = "classic".into();
+        }
+        if !matches!(self.cleaner_memory.as_str(), "save" | "ready") {
+            self.cleaner_memory = "ready".into();
+        }
+        // No Echotype Cloud in this build: its users land on this Mac's own models, on Automatic.
+        if !CLOUD && self.stt.provider == "cloud" {
+            self.stt.provider = "local".into();
+            self.advanced = false;
+            self.cloud_moved = true;
+        }
+        if !CLOUD && self.cleanup.provider == "cloud" {
+            self.cleanup.provider = "echotype".into();
+            self.cleanup.model = String::new();
+            self.advanced = false;
+            self.cloud_moved = true;
         }
     }
 
@@ -289,6 +326,10 @@ pub(crate) fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
 
 // ---------- presets ----------
 
+/// Echotype Cloud is offered: `cargo build --features cloud`. Off for the launch build, which then
+/// shows no Cloud provider, sign-in, plan or upgrade anywhere (cloud.rs and server/ stay).
+pub const CLOUD: bool = cfg!(feature = "cloud");
+
 /// Echotype Cloud, the optional hosted tier (server/ in this repo).
 pub const CLOUD_URL: &str = "https://cloud.echotype.app/v1";
 
@@ -320,7 +361,7 @@ pub fn presets() -> Vec<Preset> {
         default_cleanup_model,
         needs_key,
     };
-    vec![
+    let mut all = vec![
         p("cloud", "Echotype Cloud", true, true, CLOUD_URL, "whisper-large-v3-turbo", "openai/gpt-oss-20b", true),
         p("openai", "OpenAI", true, true, "https://api.openai.com/v1", "gpt-4o-mini-transcribe", "gpt-4.1-nano", true),
         p("groq", "Groq", true, true, "https://api.groq.com/openai/v1", "whisper-large-v3-turbo", "openai/gpt-oss-20b", true),
@@ -330,7 +371,9 @@ pub fn presets() -> Vec<Preset> {
         // Built in: llm.rs runs it on a free localhost port, so it has no fixed URL.
         p("echotype", "Echotype model (local)", false, true, "", "", "echotype-clean", false),
         p("custom", "Custom (OpenAI-compatible)", true, true, "", "", "", false),
-    ]
+    ];
+    all.retain(|p| CLOUD || p.id != "cloud");
+    all
 }
 
 pub fn preset(id: &str) -> Option<Preset> {
@@ -530,7 +573,8 @@ mod tests {
     #[test]
     fn presets_and_base_urls() {
         let ids: Vec<_> = presets().iter().map(|p| p.id).collect();
-        assert_eq!(ids, ["cloud", "openai", "groq", "openrouter", "ollama", "lmstudio", "echotype", "custom"]);
+        let all = ["cloud", "openai", "groq", "openrouter", "ollama", "lmstudio", "echotype", "custom"];
+        assert_eq!(ids, if CLOUD { &all[..] } else { &all[1..] }, "Echotype Cloud only with the cloud feature");
         assert_eq!(preset("openai").unwrap().default_stt_model, "gpt-4o-mini-transcribe");
         assert_eq!(preset("groq").unwrap().default_cleanup_model, "openai/gpt-oss-20b");
         assert!(!preset("openrouter").unwrap().stt);
@@ -539,6 +583,30 @@ mod tests {
         assert_eq!(base_url("custom", "http://127.0.0.1:9/v1/").unwrap(), "http://127.0.0.1:9/v1");
         assert_eq!(base_url("cloud", "").unwrap(), CLOUD_URL);
         assert!(base_url("custom", " ").is_err());
+    }
+
+    #[test]
+    fn a_saved_cloud_provider_lands_on_local_automatic_without_the_cloud_feature() {
+        let mut s: Settings = serde_json::from_str(r#"{"advanced":true,"stt":{"provider":"cloud"},"cleanup":{"enabled":true,"provider":"cloud","model":"openai/gpt-oss-20b"}}"#).unwrap();
+        s.migrate();
+        if CLOUD {
+            assert_eq!((s.stt.provider.as_str(), s.cleanup.provider.as_str(), s.cloud_moved), ("cloud", "cloud", false));
+            return;
+        }
+        assert_eq!((s.stt.provider.as_str(), s.cleanup.provider.as_str(), s.cleanup.model.as_str()), ("local", "echotype", ""));
+        assert!(s.cleanup.enabled && !s.advanced && s.cloud_moved);
+        assert!(presets().iter().all(|p| p.id != "cloud"), "settings never point at a hidden provider");
+        let mut plain = Settings::default();
+        plain.migrate();
+        assert!(!plain.cloud_moved);
+    }
+
+    #[test]
+    fn advanced_is_off_and_its_picks_have_defaults() {
+        let s: Settings = serde_json::from_str(r#"{"cleaner_memory":"bogus"}"#).map(|mut s: Settings| { s.migrate(); s }).unwrap();
+        assert!(!s.advanced && !s.cleaner_idle_unload);
+        assert!(s.greetings, "the Home greeting is on for upgraders");
+        assert_eq!((s.cleaner_memory.as_str(), s.cleaner_idle_minutes, s.cleaner_context), ("ready", 10, 1024));
     }
 
     #[test]

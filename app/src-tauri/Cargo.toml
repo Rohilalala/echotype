@@ -10,6 +10,10 @@ edition = "2024"
 name = "echotype_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Echotype Cloud (cloud.rs, server/): the provider, sign-in and plans. Off for the launch build.
+cloud = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

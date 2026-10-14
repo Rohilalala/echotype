@@ -5,31 +5,118 @@
 //! A separate process because whisper-rs already links its own ggml and a second copy collides.
 
 use crate::settings::Settings;
+use crate::stt;
+use serde::Serialize;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// Q4_K_M of the fine-tuned Qwen2.5-1.5B: same exact-match score as the MLX 4-bit build on
-/// model/eval/handwritten.jsonl (70.7%), ~100 ms a dictation on Apple silicon.
-pub const MODEL_FILE: &str = "echotype-clean-q4_k_m.gguf";
-pub const MODEL_MB: u64 = 940;
-// ponytail: not downloadable yet. Once the GGUF is published at a pinned Hugging Face revision
-// (like stt::HF_COMMIT), add its URL and fetch it with stt::fetch(url, &model_path(), sha256, ..)
-// the way stt::download does; its SHA-256 is
-// 95481186c2dc0197833e3c4e5759c09f30a29f172c4035b3602666651a73b798
-/// Resident once loaded (weights, 2k context, Metal buffers), measured at ~1.1-1.2 GB.
-const RAM_MB: u64 = 1300;
-const START_TIMEOUT: Duration = Duration::from_secs(60);
-
-pub fn model_path() -> PathBuf {
-    crate::stt::models_dir().join(MODEL_FILE)
+pub struct Cleaner {
+    /// Its stt::RAM_MB row, and what `cleanup.model` holds when it is picked by hand.
+    pub id: &'static str,
+    pub label: &'static str,
+    pub file: &'static str,
+    pub size_mb: u64,
 }
 
-/// (installed, size in MB) for the Cleanup page: the file's size, or the size it will be.
-pub fn status() -> (bool, u64) {
-    std::fs::metadata(model_path()).ok().filter(|m| m.is_file()).map_or((false, MODEL_MB), |m| (true, m.len() / 1_048_576))
+/// The Echotype cleanup models. A smaller one (a 0.5B) slots in with an entry here and its
+/// measured row in stt::RAM_MB; Automatic gives low-memory Macs the smallest one installed.
+pub const CLEANERS: &[Cleaner] = &[
+    // Q4_K_M of the fine-tuned Qwen2.5-1.5B: same exact-match score as the MLX 4-bit build on
+    // model/eval/handwritten.jsonl (70.7%), ~100 ms a dictation on Apple silicon.
+    Cleaner { id: "echotype-clean", label: "Echotype 1.5B", file: "echotype-clean-q4_k_m.gguf", size_mb: 940 },
+];
+// ponytail: not downloadable yet. Once the GGUF is published at a pinned Hugging Face revision
+// (like stt::HF_COMMIT), add its URL and fetch it with stt::fetch(url, &model_path(c), sha256, ..)
+// the way stt::download does; the 1.5B's SHA-256 is
+// 95481186c2dc0197833e3c4e5759c09f30a29f172c4035b3602666651a73b798
+
+/// Tokens of context the cleaner is served with (prompt, transcript and answer together):
+/// cleanup::cleanup splits longer dictations to fit. Advanced settings can change it.
+pub const CONTEXT: u32 = 1024;
+const START_TIMEOUT: Duration = Duration::from_secs(60);
+
+pub fn model_path(c: &Cleaner) -> PathBuf {
+    stt::models_dir().join(c.file)
+}
+
+fn installed(c: &Cleaner) -> bool {
+    model_path(c).is_file()
+}
+
+/// The cleaner Automatic uses on a Mac with this much memory: the 1.5B, or on a low-memory Mac
+/// the smallest one; the closest installed one until that is installed.
+fn auto_cleaner(total_mb: u64, installed: impl Fn(&str) -> bool) -> &'static Cleaner {
+    let by_ram = |c: &&Cleaner| stt::ram_of(c.id);
+    let want = if stt::low_ram(total_mb) { CLEANERS.iter().min_by_key(by_ram) } else { CLEANERS.iter().max_by_key(by_ram) };
+    let want = want.expect("CLEANERS is not empty").id;
+    let id = stt::closest(CLEANERS.iter().map(|c| c.id), want, installed).unwrap_or(want);
+    CLEANERS.iter().find(|c| c.id == id).expect("an id from CLEANERS")
+}
+
+/// The cleaner these settings use: the manual pick (`cleanup.model`) with advanced settings on, else Automatic's.
+pub fn cleaner(s: &Settings) -> &'static Cleaner {
+    let manual = CLEANERS.iter().find(|c| s.advanced && c.id == s.cleanup.model);
+    manual.unwrap_or_else(|| auto_cleaner(stt::ram_mb().0, |id| CLEANERS.iter().any(|c| c.id == id && installed(c))))
+}
+
+/// "save" (macOS may page the mapped model out under pressure) or "ready" (locked in RAM):
+/// Automatic saves on a low-memory Mac.
+pub fn memory(s: &Settings) -> &str {
+    if s.advanced {
+        &s.cleaner_memory
+    } else if stt::low_ram(stt::ram_mb().0) {
+        "save"
+    } else {
+        "ready"
+    }
+}
+
+/// The context the built-in cleaner is served with: CONTEXT, or the advanced setting.
+pub fn context(s: &Settings) -> u32 {
+    if s.advanced { s.cleaner_context.clamp(512, 8192) } else { CONTEXT }
+}
+
+/// Minutes without a cleanup before the server stops; None = never (Automatic, or the switch off).
+fn idle(s: &Settings) -> Option<Duration> {
+    (s.advanced && s.cleaner_idle_unload).then(|| Duration::from_secs(60 * u64::from(s.cleaner_idle_minutes.max(5))))
+}
+
+#[derive(Serialize)]
+pub struct CleanerStatus {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub size_mb: u64,
+    pub ram_mb: u64,
+    pub installed: bool,
+    pub automatic: bool,
+    pub warning: Option<String>,
+}
+
+/// Every cleaner for the Cleanup page, with the same RAM labels and warnings as the speech models.
+pub fn cleaners(total_mb: u64) -> Vec<CleanerStatus> {
+    let auto = auto_cleaner(total_mb, |id| CLEANERS.iter().any(|c| c.id == id && installed(c)));
+    CLEANERS
+        .iter()
+        .map(|c| CleanerStatus {
+            id: c.id,
+            label: c.label,
+            size_mb: model_path(c).metadata().ok().filter(|m| m.is_file()).map_or(c.size_mb, |m| m.len() / 1_048_576),
+            ram_mb: stt::ram_of(c.id),
+            installed: installed(c),
+            automatic: c.id == auto.id,
+            warning: stt::ram_warning(stt::ram_of(c.id), stt::ram_of(auto.id), total_mb),
+        })
+        .collect()
+}
+
+/// (installed, size in MB) of the cleaner these settings use, for the Cleanup page.
+pub fn status(s: &Settings) -> (bool, u64) {
+    let c = cleaner(s);
+    cleaners(stt::ram_mb().0).into_iter().find(|x| x.id == c.id).map_or((false, c.size_mb), |x| (x.installed, x.size_mb))
 }
 
 /// Whether these settings use the built-in model, so its server should be running.
@@ -43,7 +130,7 @@ pub fn apply(s: &Settings) {
         return stop();
     }
     let t = Instant::now();
-    match ensure() {
+    match ensure(s) {
         Ok(_) => eprintln!("echotype: cleanup model ready in {} ms", t.elapsed().as_millis()),
         Err(e) => eprintln!("echotype: cleanup model not started: {e}"),
     }
@@ -53,7 +140,24 @@ struct Server {
     child: Child,
     port: u16,
     key: String,
+    /// What it was started with; different settings restart it on the next cleanup.
+    opts: Opts,
+    last_used: Instant,
 }
+
+/// The settings that become llama-server flags.
+#[derive(Clone, Debug, PartialEq)]
+struct Opts {
+    model: PathBuf,
+    ctx: u32,
+    /// "ready": keep the weights locked in RAM.
+    lock: bool,
+}
+
+/// mlock failed once in this run, so "ready" loads the weights unmapped instead (--load-mode none).
+static MLOCK_FAILED: AtomicBool = AtomicBool::new(false);
+/// "Unload when idle", in seconds; 0 = never. Read by the reaper thread.
+static IDLE_SECS: AtomicU64 = AtomicU64::new(0);
 
 impl Drop for Server {
     fn drop(&mut self) {
@@ -65,22 +169,70 @@ impl Drop for Server {
 // ponytail: one server, one request at a time (-np 1); cleanup is one short request per dictation.
 static SERVER: Mutex<Option<Server>> = Mutex::new(None);
 
-/// Base URL and bearer key of the running server, starting it first if it is not running.
-pub fn ensure() -> Result<(String, String), String> {
+/// Base URL and bearer key of the running server, starting it first if it is not running or was
+/// started with other settings (a memory, context or model change applies on the next cleanup).
+pub fn ensure(settings: &Settings) -> Result<(String, String), String> {
+    let c = cleaner(settings);
+    let opts = Opts { model: model_path(c), ctx: context(settings), lock: memory(settings) == "ready" };
+    IDLE_SECS.store(idle(settings).map_or(0, |d| d.as_secs()), Ordering::Relaxed);
     let mut g = SERVER.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(s) = g.as_mut()
         && matches!(s.child.try_wait(), Ok(None))
+        && s.opts == opts
     {
+        s.last_used = Instant::now();
         return Ok((url(s.port), s.key.clone()));
     }
-    *g = None; // died (or never started): reap it before starting another
-    let model = model_path();
+    *g = None; // died, never started or other settings: stop it before starting another
     let bin = sidecar();
-    preflight(bin.as_deref(), &model, crate::stt::ram_mb().1)?;
-    let s = start(&bin.expect("checked by preflight"), &model, &crate::settings::data_dir().join("llama-server.log"))?;
+    preflight(bin.as_deref(), &opts.model, stt::ram_of(c.id), stt::ram_mb().1)?;
+    stt::warn_if_not_internal(&opts.model);
+    let log = crate::settings::data_dir().join("llama-server.log");
+    let mut s = start(&bin.clone().expect("checked by preflight"), &opts, &log)?;
+    if opts.lock && !MLOCK_FAILED.load(Ordering::Relaxed) && mlock_failed(&log) {
+        // "Keep ready" never fails a cleanup: load the weights unmapped instead, which macOS
+        // can only swap, not drop. Remembered for this run so later starts skip the attempt.
+        eprintln!("echotype: could not lock the cleanup model in memory (see {}); loading it without mmap instead", log.display());
+        MLOCK_FAILED.store(true, Ordering::Relaxed);
+        drop(s);
+        s = start(&bin.expect("checked by preflight"), &opts, &log)?;
+    }
     let out = (url(s.port), s.key.clone());
     *g = Some(s);
+    reap_when_idle();
     Ok(out)
+}
+
+/// llama.cpp logs this and carries on unlocked when mlock is refused (a wired-memory limit).
+fn mlock_failed(log: &Path) -> bool {
+    std::fs::read_to_string(log).is_ok_and(|l| l.contains("failed to mlock"))
+}
+
+/// "Unload when idle": one thread for the life of the app stops the server once it has gone
+/// unused for IDLE_SECS; the next cleanup starts it again.
+fn reap_when_idle() {
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(|| {
+        loop {
+            std::thread::sleep(Duration::from_secs(30));
+            let idle = IDLE_SECS.load(Ordering::Relaxed);
+            let mut g = SERVER.lock().unwrap_or_else(|e| e.into_inner());
+            if idle > 0 && g.as_ref().is_some_and(|s| s.last_used.elapsed().as_secs() >= idle) {
+                *g = None;
+                eprintln!("echotype: cleanup model stopped after {} min unused", idle / 60);
+            }
+        }
+    });
+}
+
+/// After a cleanup: counts as use, so "Unload when idle" waits from the end of a long request.
+pub fn touch() {
+    if let Some(s) = SERVER.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        s.last_used = Instant::now();
+    }
 }
 
 /// Stops the server; it starts again on the next cleanup. Also called on exit.
@@ -95,15 +247,16 @@ fn sidecar() -> Option<PathBuf> {
     exe.ancestors().skip(1).take(2).map(|d| d.join("llama-server")).find(|p| p.is_file())
 }
 
-fn preflight(sidecar: Option<&Path>, model: &Path, free_mb: u64) -> Result<(), String> {
+fn preflight(sidecar: Option<&Path>, model: &Path, need_mb: u64, free_mb: u64) -> Result<(), String> {
     if !model.is_file() {
-        return Err(format!("The Echotype model isn't installed. Put {MODEL_FILE} in {} or pick another cleanup provider", model.parent().unwrap_or(model).display()));
+        let file = model.file_name().unwrap_or_default().to_string_lossy();
+        return Err(format!("The Echotype model isn't installed. Put {file} in {} or pick another cleanup provider", model.parent().unwrap_or(model).display()));
     }
     if sidecar.is_none() {
         return Err("The Echotype model runner (llama-server) is missing from this copy of Echotype. Reinstall Echotype".into());
     }
-    if RAM_MB > free_mb {
-        return Err(format!("Not enough free memory for the Echotype model: it needs about {RAM_MB} MB and {free_mb} MB is free. Close some apps or pick another cleanup provider"));
+    if need_mb > free_mb {
+        return Err(format!("Not enough free memory for the Echotype model: it needs about {need_mb} MB and {free_mb} MB is free. Close some apps or pick another cleanup provider"));
     }
     Ok(())
 }
@@ -113,12 +266,16 @@ fn url(port: u16) -> String {
 }
 
 /// llama-server flags for llama.cpp b11619. The GGUF carries Qwen's chat template, used as is.
-// ponytail: 2048 tokens of context fits a few minutes of dictation plus its cleanup; longer ones
-// fail over to the raw transcript. Raise -c (~28 KB of KV cache a token) if that shows up.
-fn args(model: &Path, port: u16) -> Vec<OsString> {
-    let mut a: Vec<OsString> = vec!["-m".into(), model.into()];
-    for s in ["--host", "127.0.0.1", "--port", &port.to_string(), "-c", "2048", "-ngl", "99", "-np", "1", "--no-webui", "--offline"] {
+/// Memory: "save" keeps llama.cpp's default (the weights mapped from the file, so macOS can drop
+/// them under pressure and read them back); "ready" adds mlock (b11619's spelling of --mlock is
+/// --load-mode mmap+mlock), or after a failed mlock loads them unmapped (--no-mmap: --load-mode none).
+fn args(o: &Opts, port: u16, mlock_failed: bool) -> Vec<OsString> {
+    let mut a: Vec<OsString> = vec!["-m".into(), o.model.clone().into()];
+    for s in ["--host", "127.0.0.1", "--port", &port.to_string(), "-c", &o.ctx.to_string(), "-ngl", "99", "-np", "1", "--no-webui", "--offline"] {
         a.push(s.into());
+    }
+    if o.lock {
+        a.extend(["--load-mode".into(), if mlock_failed { "none" } else { "mmap+mlock" }.into()]);
     }
     a
 }
@@ -130,14 +287,14 @@ fn free_port() -> Result<u16, String> {
     l.local_addr().map(|a| a.port()).map_err(|e| e.to_string())
 }
 
-fn start(bin: &Path, model: &Path, log: &Path) -> Result<Server, String> {
+fn start(bin: &Path, opts: &Opts, log: &Path) -> Result<Server, String> {
     let (port, key) = (free_port()?, crate::api::new_token()?);
     if let Some(dir) = log.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     let stderr = std::fs::File::create(log).map(Stdio::from).unwrap_or_else(|_| Stdio::null());
     let child = Command::new(bin)
-        .args(args(model, port))
+        .args(args(opts, port, MLOCK_FAILED.load(Ordering::Relaxed)))
         .env("LLAMA_API_KEY", &key) // in the environment, not argv, so `ps` never shows it
         // The pinned llama-server's router-child mode: it exits when its stdin closes, so it can
         // never outlive Echotype, even after a crash or kill -9. We hold the pipe and never write to it.
@@ -147,7 +304,7 @@ fn start(bin: &Path, model: &Path, log: &Path) -> Result<Server, String> {
         .stderr(stderr)
         .spawn()
         .map_err(|e| format!("The Echotype model could not start: {e}"))?;
-    let mut s = Server { child, port, key };
+    let mut s = Server { child, port, key, opts: opts.clone(), last_used: Instant::now() };
     wait_ready(&mut s, START_TIMEOUT).map_err(|e| format!("The Echotype model did not start: {e} (see {})", log.display()))?;
     Ok(s) // on error `s` drops above, which kills the process
 }
@@ -177,11 +334,39 @@ mod tests {
 
     #[test]
     fn server_args_bind_localhost_on_the_given_port() {
-        let a = args(Path::new("/m/echotype-clean-q4_k_m.gguf"), 4321);
-        let want = ["-m", "/m/echotype-clean-q4_k_m.gguf", "--host", "127.0.0.1", "--port", "4321", "-c", "2048", "-ngl", "99", "-np", "1", "--no-webui", "--offline"];
+        let o = Opts { model: "/m/echotype-clean-q4_k_m.gguf".into(), ctx: CONTEXT, lock: false };
+        let a = args(&o, 4321, false);
+        let want = ["-m", "/m/echotype-clean-q4_k_m.gguf", "--host", "127.0.0.1", "--port", "4321", "-c", "1024", "-ngl", "99", "-np", "1", "--no-webui", "--offline"];
         assert_eq!(a, want.map(OsString::from));
         assert!(!a.iter().any(|x| x.to_string_lossy().contains("api-key")), "the key goes in the environment, never argv");
         assert_eq!(url(4321), "http://127.0.0.1:4321/v1");
+    }
+
+    #[test]
+    fn memory_modes_become_load_flags() {
+        let mut o = Opts { model: "/m/x.gguf".into(), ctx: 2048, lock: false };
+        let tail = |o: &Opts, failed| args(o, 1, failed).into_iter().skip(14).map(|a| a.into_string().unwrap()).collect::<Vec<_>>();
+        assert!(tail(&o, false).is_empty(), "save: llama.cpp's default mmap");
+        assert!(args(&o, 1, false).contains(&"2048".into()));
+        o.lock = true;
+        assert_eq!(tail(&o, false), ["--load-mode", "mmap+mlock"], "ready: --mlock");
+        assert_eq!(tail(&o, true), ["--load-mode", "none"], "ready after a failed mlock: --no-mmap");
+    }
+
+    #[test]
+    fn automatic_cleaner_memory_and_context_follow_the_mac() {
+        assert_eq!(auto_cleaner(8192, |_| true).id, "echotype-clean", "the smallest one (the only one so far)");
+        assert_eq!(auto_cleaner(24_576, |_| false).id, "echotype-clean");
+        let mut s = Settings { cleaner_memory: "save".into(), cleaner_context: 4096, cleaner_idle_unload: true, cleaner_idle_minutes: 1, ..Default::default() };
+        assert_eq!(context(&s), CONTEXT, "advanced off: the one constant");
+        assert_eq!(idle(&s), None);
+        s.advanced = true;
+        assert_eq!((memory(&s), context(&s)), ("save", 4096));
+        assert_eq!(idle(&s), Some(Duration::from_secs(300)), "at least 5 minutes, longer than any request");
+        s.cleanup.model = "not-a-cleaner".into();
+        assert_eq!(cleaner(&s).id, "echotype-clean");
+        let st = cleaners(8192);
+        assert!(st.iter().all(|c| c.ram_mb > 0 && c.warning.is_none()), "one cleaner: nothing larger to warn about");
     }
 
     #[test]
@@ -195,14 +380,14 @@ mod tests {
     fn preflight_says_what_is_missing_first() {
         let dir = std::env::temp_dir().join(format!("echotype-llm-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let (model, bin) = (dir.join(MODEL_FILE), dir.join("llama-server"));
-        let err = preflight(Some(&bin), &model, 64_000).unwrap_err();
+        let (model, bin) = (dir.join(CLEANERS[0].file), dir.join("llama-server"));
+        let err = preflight(Some(&bin), &model, 1113, 64_000).unwrap_err();
         assert!(err.starts_with("The Echotype model isn't installed. Put echotype-clean-q4_k_m.gguf in "), "{err}");
         std::fs::write(&model, b"x").unwrap();
-        assert!(preflight(None, &model, 64_000).unwrap_err().contains("runner (llama-server) is missing"));
-        let err = preflight(Some(&bin), &model, 1000).unwrap_err();
-        assert!(err.contains("needs about 1300 MB and 1000 MB is free"), "{err}");
-        assert!(preflight(Some(&bin), &model, RAM_MB).is_ok());
+        assert!(preflight(None, &model, 1113, 64_000).unwrap_err().contains("runner (llama-server) is missing"));
+        let err = preflight(Some(&bin), &model, 1113, 1000).unwrap_err();
+        assert!(err.contains("needs about 1113 MB and 1000 MB is free"), "{err}");
+        assert!(preflight(Some(&bin), &model, 1113, 1113).is_ok());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -222,8 +407,8 @@ mod tests {
     #[test]
     #[ignore]
     fn real_sidecar_cleans_a_transcript() {
-        if !model_path().is_file() {
-            eprintln!("skipped: no {}", model_path().display());
+        if !installed(&CLEANERS[0]) {
+            eprintln!("skipped: no {}", model_path(&CLEANERS[0]).display());
             return;
         }
         let mut s = Settings::default();
@@ -233,7 +418,7 @@ mod tests {
         let out = crate::cleanup::cleanup(&s, "um so arnav said the meeting is at uh five").unwrap();
         assert!(out.contains("Arnav") && !out.contains("um ") && !out.contains("uh"), "{out}");
         assert_eq!(crate::cleanup::cleanup(&s, "um").unwrap(), "", "filler only is no speech");
-        let (base, _) = ensure().unwrap();
+        let (base, _) = ensure(&s).unwrap();
         let unauthorized = reqwest::blocking::Client::new().post(format!("{base}/chat/completions")).json(&crate::cleanup::request_body("x", "s", "t", false)).send().unwrap();
         assert_eq!(unauthorized.status(), 401, "other local processes cannot use it without the key");
         let pid = || SERVER.lock().unwrap().as_ref().unwrap().child.id();
