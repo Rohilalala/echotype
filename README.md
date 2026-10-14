@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src=".github/assets/screenshot.png" width="760" alt="Echotype's History page: what you said on the left, with the filler words cleanup removed struck through, and what was pasted on the right">
+  <img src=".github/assets/screenshot.png" width="760" alt="Echotype's Home page: hold Option Space to dictate, a drop zone for voice notes, today's word counts and recent dictations">
 </p>
 
 ## What it does
@@ -24,14 +24,14 @@
 - **Dictate into any app.** Hold <kbd>⌥ Space</kbd>, talk, release. Echotype transcribes, cleans up and pastes, then puts your clipboard back.
 - **Reads like you typed it.** Filler words go, "four, no wait, five" becomes "5", spoken lists become lists, "new line" starts a new line.
 - **Speak Hinglish, get English.** Talk in Hindi, English or both at once; Echotype writes English.
-- **A pill that stays out of the way.** A thin bar at the bottom of the screen. While you talk it shows a needle that swings with your voice. Drag it anywhere; it follows the screen you are using, or stays where you put it. Prefer nothing on screen? Use the menu bar icon instead. When nothing can take text, it shows your words in a small card with **Copy** rather than pasting into nowhere.
+- **A pill that stays out of the way.** A thin bar at the bottom of the screen. While you talk its bars move with your voice. Drag it anywhere; it follows the screen you are using, or stays where you put it. Prefer nothing on screen? Use the menu bar icon instead. When nothing can take text, it shows your words in a small card with **Copy** rather than pasting into nowhere.
 - **Meeting notes.** Echotype hears your microphone and the computer's audio, writes down who said what and, with a cleanup model set up, sums up decisions and action items. It all runs on your Mac.
 - **Drop in a voice note.** Drag a WhatsApp `.opus`, `.m4a`, `.mp3` or `.wav` onto the window for a clean transcript.
 - **Any model, both stages.** Local whisper.cpp on your machine, or any OpenAI-compatible endpoint: OpenAI, Groq, OpenRouter, Ollama, LM Studio, or your own server.
 - **Knows your machine.** Echotype checks free memory before it loads or recommends a model.
 - **A local API for your scripts and agents.** `POST http://127.0.0.1:7811/v1/audio/transcriptions` runs the same pipeline.
 - **See how much you talk.** The Stats page shows your words, words per minute and a year grid of the days you dictated. They are counts only, never your text, and stay on your computer; switch them off or clear them on the same page.
-- **Three looks.** Foundry, pewter and ink with your words set in Recursive, is the default. Classic and Ink are one click away in Settings. All three follow your light or dark setting.
+- **Two looks.** Classic, or Ink, deep blue ink on warm paper, one click away in Settings. Both follow your light or dark setting.
 
 With local models, nothing leaves your computer. API keys live in the system keychain.
 
