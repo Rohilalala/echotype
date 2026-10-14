@@ -204,10 +204,18 @@ impl Settings {
             }),
             Err(_) => Self::default(),
         };
-        if s.local_api.port < MIN_PORT {
-            s.local_api.port = LocalApi::default().port; // older builds saved 0 from a cleared field
-        }
+        s.migrate();
         s
+    }
+
+    /// Fixes values older builds wrote.
+    fn migrate(&mut self) {
+        if self.look == "foundry" {
+            self.look = "classic".into(); // the Foundry look is gone
+        }
+        if self.local_api.port < MIN_PORT {
+            self.local_api.port = LocalApi::default().port; // older builds saved 0 from a cleared field
+        }
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -462,6 +470,9 @@ mod tests {
         assert!(s.sounds && s.dismissed.is_empty());
         assert!(s.pill_idle && s.pill_hidden_until == 0 && !s.pill_in_recordings, "the idle pill is on for upgraders, hidden from capture");
         assert_eq!(s.look, "classic", "upgraders keep the classic look");
+        let mut f: Settings = serde_json::from_str(r#"{"look":"foundry","look_chosen":true}"#).unwrap();
+        f.migrate();
+        assert_eq!(f.look, "classic", "a saved Foundry look loads as Classic");
         assert!(s.pill_positions.is_empty() && s.show_in == "pill", "upgraders keep the pill, bottom-centre");
         assert!(s.pill_follow_cursor && s.pill_screen.is_none(), "...on the screen they are using");
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
