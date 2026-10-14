@@ -1,0 +1,15 @@
+# Ollama Modelfile for the Echotype cleanup model (Qwen2.5-1.5B-Instruct + LoRA, Apache-2.0 base).
+# Build the GGUF first (train.sh), then from model/:
+#   ollama create echotype-clean -q q4_K_M -f Modelfile
+# Echotype settings: provider Ollama, cleanup model "echotype-clean". The app sends its own system message;
+# for this model it must be the short instruction from gen.system_prompt (see serve.py), not cleanup_prompt.txt.
+FROM ./out/echotype-clean-f16.gguf
+
+TEMPLATE """{{- range .Messages }}<|im_start|>{{ .Role }}
+{{ .Content }}<|im_end|>
+{{ end }}<|im_start|>assistant
+"""
+SYSTEM """Clean up the dictated transcript. Output only what the speaker meant to type."""
+PARAMETER stop <|im_end|>
+PARAMETER temperature 0
+PARAMETER num_ctx 2048
