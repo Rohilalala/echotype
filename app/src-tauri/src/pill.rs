@@ -504,6 +504,10 @@ fn read_dock() -> f64 {
 
 // ---------- the window ----------
 
+/// Windows: where the hidden pill waits, far outside every display.
+#[cfg(target_os = "windows")]
+const PARKED: (f64, f64) = (-32000.0, -32000.0);
+
 #[cfg(target_os = "macos")]
 mod panel {
     tauri_nspanel::tauri_panel! {
@@ -537,8 +541,13 @@ pub fn create(app: &tauri::App, s: &Settings) -> tauri::Result<WebviewWindow> {
         .focusable(false)
         .accept_first_mouse(true)
         .content_protected(protect(s))
-        .visible(false)
-        .build()?;
+        .visible(false);
+    // Windows shows a hidden window with SW_SHOW, which activates it and takes focus from the app
+    // being dictated into. So the pill is shown once, inactive, at creation and parked off-screen
+    // instead of hidden (see `run`).
+    #[cfg(target_os = "windows")]
+    let win = win.visible(true).position(PARKED.0, PARKED.1);
+    let win = win.build()?;
     win.set_zoom(zoom())?;
     #[cfg(target_os = "macos")]
     {
@@ -839,6 +848,9 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
             }
             // Hide before the view drops to idle, so a finished notice never flashes the idle bar.
             if want != shown {
+                #[cfg(target_os = "windows")]
+                let _ = win.set_position(LogicalPosition::new(if want { at.0 } else { PARKED.0 }, if want { at.1 } else { PARKED.1 }));
+                #[cfg(not(target_os = "windows"))]
                 let _ = if want { win.show() } else { win.hide() };
                 shown = want;
             }
