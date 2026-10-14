@@ -50,7 +50,7 @@ def words_marks(s):
     out = []
     for t in (s or "").split():
         core = t.strip("\"'()“”‘’*-")
-        mark = core[-1] if core[-1:] in MARKS else ""
+        mark = core[-1] if core and core[-1] in MARKS else ""
         w = core.rstrip(".,?!:;")
         if w:
             out.append((w.lower(), mark, w[:1].isupper()))

@@ -21,7 +21,9 @@ Quick fixes (section 7 of the bench brief, none of them in the app today):
 
 import argparse
 import json
+import os
 import re
+import subprocess
 import sys
 import time
 import urllib.error
@@ -119,7 +121,11 @@ def main():
     todo = [c for c in cases if c["id"] not in done]
     print(f"{len(cases)} cases, {len(todo)} to run -> {out}", flush=True)
     with open(out, "a") as f:
+        gate = os.environ.get("BENCH_GATE")  # script that exits non-zero when the run should pause (battery, memory pressure)
         for k, c in enumerate(todo):
+            while gate and k % 25 == 0 and subprocess.run([gate], capture_output=True).returncode:
+                print("  paused by gate", flush=True)
+                time.sleep(30)
             text = c[a.input_field]
             sysp = system_prompt(c.get("dictionary", []), c.get("translate", False)) if a.prompt == "finetuned" else app_system_prompt(c.get("dictionary", []), c.get("translate", False))
             row = {"id": c["id"], "input": text}
@@ -144,9 +150,9 @@ def main():
                     o, t, u, fin = call(a.url, body, a.timeout)
                     outs.append(o)
                     ms += t
-                    for k, v in u.items():
+                    for key, v in u.items():
                         if isinstance(v, int):
-                            usage[k] = usage.get(k, 0) + v
+                            usage[key] = usage.get(key, 0) + v
                 except (urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError) as e:
                     err = f"{type(e).__name__}: {e}"
                     break
