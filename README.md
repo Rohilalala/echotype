@@ -129,7 +129,7 @@ defaults read com.apple.HIToolbox AppleFnUsageType
 
 ## Windows and Linux
 
-Releases include a Windows installer (.msi or .exe, x64 and ARM64) and a Linux .AppImage and .deb. Dictation, local models, cleanup, history, voice notes and the local API work as on a Mac. What differs:
+Releases include a Windows installer (.msi or .exe, x64) and a Linux .AppImage and .deb. Dictation, local models, cleanup, history, voice notes and the local API work as on a Mac. What differs:
 
 - Dictate with <kbd>Alt Space</kbd> and paste with Ctrl+V; no Accessibility permission is needed. GNOME and KDE use Alt Space themselves, so pick another shortcut in Settings there.
 - The pill shows only while you dictate, on the main display. The talk key, the idle pill, menu-bar mode and telling speakers apart are macOS-only.

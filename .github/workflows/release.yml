@@ -21,11 +21,10 @@ jobs:
             args: --target x86_64-apple-darwin
           - os: ubuntu-22.04
             args: --bundles appimage,deb
+          # ponytail: no Windows ARM64 yet. ggml needs clang-cl there and cmake-rs pins the VS
+          # toolset, so it takes a Ninja + clang-cl cross build (vcvars x64_arm64) to add it.
           - os: windows-latest
             args: --bundles msi,nsis
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
-            args: --target aarch64-pc-windows-msvc --bundles msi,nsis
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -36,7 +35,7 @@ jobs:
           node-version: 22
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
-          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
+          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - name: Linux deps
         if: runner.os == 'Linux'
         run: |
@@ -47,10 +46,6 @@ jobs:
         run: app/scripts/build-llama-server.sh "${ARGS#--target }"
         env:
           ARGS: ${{ matrix.args }}
-      # ggml refuses MSVC for ARM; clang-cl builds whisper.cpp there.
-      - name: Windows ARM toolset
-        if: matrix.target == 'aarch64-pc-windows-msvc'
-        run: echo "CMAKE_GENERATOR_TOOLSET=ClangCL" >> $env:GITHUB_ENV
       - run: npm ci
         working-directory: app
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
@@ -78,10 +73,6 @@ jobs:
           - os: windows-latest
             name: windows-x64
             args: --bundles msi,nsis
-          - os: windows-latest
-            name: windows-arm64
-            target: aarch64-pc-windows-msvc
-            args: --target aarch64-pc-windows-msvc --bundles msi,nsis
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -91,16 +82,11 @@ jobs:
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
-        with:
-          targets: ${{ matrix.target }}
       - name: Linux deps
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev libxdo-dev libssl-dev cmake clang
-      - name: Windows ARM toolset
-        if: matrix.target == 'aarch64-pc-windows-msvc'
-        run: echo "CMAKE_GENERATOR_TOOLSET=ClangCL" >> $env:GITHUB_ENV
       - run: npm ci
         working-directory: app
       - run: npm run tauri build -- ${{ matrix.args }}
