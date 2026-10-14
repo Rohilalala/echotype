@@ -1,27 +1,30 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
   <defs>
-    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#F7F7F6"/>
-      <stop offset="1" stop-color="#E1E2E1"/>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#14403b"/>
+      <stop offset="1" stop-color="#0a2522"/>
+    </linearGradient>
+    <linearGradient id="wave" gradientUnits="userSpaceOnUse" x1="264" y1="0" x2="628" y2="0">
+      <stop offset="0" stop-color="#3cc2b1" stop-opacity="0.72"/>
+      <stop offset="1" stop-color="#5fdcca"/>
     </linearGradient>
     <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
-      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000" flood-opacity="0.24"/>
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000" flood-opacity="0.28"/>
     </filter>
   </defs>
-  <!-- macOS grid: 824 px pewter body, 100 px margin -->
-  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#body)" filter="url(#shadow)"/>
-  <rect x="100.5" y="100.5" width="823" height="823" rx="184.5" fill="none" stroke="#1D2024" stroke-opacity="0.1"/>
-  <!-- the E's open side is the meter's scale -->
-  <g stroke="#666A6F" stroke-width="12" stroke-linecap="round">
-    <line x1="737" y1="320" x2="763" y2="309"/>
-    <line x1="768" y1="414" x2="795" y2="408"/>
-    <line x1="768" y1="512" x2="806" y2="512"/>
-    <line x1="768" y1="610" x2="795" y2="616"/>
-    <line x1="737" y1="704" x2="763" y2="715"/>
+  <!-- macOS grid: 824 px body with a 100 px margin -->
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#bg)" filter="url(#shadow)"/>
+  <rect x="100.5" y="100.5" width="823" height="823" rx="185.5" fill="none" stroke="#ffffff" stroke-opacity="0.08"/>
+  <!-- a voice waveform that settles into a text caret -->
+  <g stroke-linecap="round" stroke="url(#wave)" stroke-width="44">
+    <line x1="286" y1="472" x2="286" y2="552"/>
+    <line x1="366" y1="402" x2="366" y2="622"/>
+    <line x1="446" y1="340" x2="446" y2="684"/>
+    <line x1="526" y1="424" x2="526" y2="600"/>
+    <line x1="606" y1="482" x2="606" y2="542"/>
   </g>
-  <!-- the settled letter, in ink -->
-  <path fill="#0F4C81" d="M262 262H610a12 12 0 0 1 12 12V346a12 12 0 0 1-12 12H362V666H642a12 12 0 0 1 12 12V750a12 12 0 0 1-12 12H262a12 12 0 0 1-12-12V274a12 12 0 0 1 12-12Z"/>
-  <!-- its middle arm is the live needle, in molten bronze, pivoting on the stem -->
-  <line x1="306" y1="512" x2="729" y2="445" stroke="#9A6A35" stroke-width="38" stroke-linecap="round"/>
-  <circle cx="306" cy="512" r="40" fill="#9A6A35"/>
+  <g stroke="#f4fbfa" stroke-linecap="round" fill="none">
+    <line x1="708" y1="304" x2="708" y2="720" stroke-width="40" stroke-linecap="butt"/>
+    <path d="M656 304h104M656 720h104" stroke-width="34"/>
+  </g>
 </svg>
