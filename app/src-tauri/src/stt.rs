@@ -17,7 +17,6 @@ pub struct Model {
     pub id: &'static str,
     pub label: &'static str,
     pub size_mb: u64,
-    pub ram_mb: u64,
     pub note: &'static str,
     /// SHA-256 of the file at HF_COMMIT; downloads that don't match are discarded.
     pub sha256: &'static str,
@@ -28,13 +27,81 @@ const HF_COMMIT: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
 
 /// Best first: `recommended` is the first entry that fits in RAM.
 pub const MODELS: &[Model] = &[
-    Model { id: "large-v3-turbo-q5_0", label: "Large v3 Turbo (Q5)", size_mb: 547, ram_mb: 800, note: "Best default: near-large accuracy, fast, 99 languages. Cannot translate.", sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2" },
-    Model { id: "large-v3-turbo", label: "Large v3 Turbo", size_mb: 1624, ram_mb: 1700, note: "Full-precision turbo. Slightly more accurate, twice the size. Cannot translate.", sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69" },
-    Model { id: "medium", label: "Medium", size_mb: 1533, ram_mb: 1800, note: "Multilingual and translates to English (Hinglish → English).", sha256: "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208" },
-    Model { id: "small", label: "Small", size_mb: 488, ram_mb: 852, note: "Multilingual, translates; lighter and less accurate than medium.", sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b" },
-    Model { id: "base.en", label: "Base (English)", size_mb: 148, ram_mb: 388, note: "English only. For low-memory machines.", sha256: "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002" },
-    Model { id: "tiny.en", label: "Tiny (English)", size_mb: 78, ram_mb: 273, note: "English only. Fastest, least accurate.", sha256: "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f" },
+    Model { id: "large-v3-turbo-q5_0", label: "Large v3 Turbo (Q5)", size_mb: 547, note: "Best default: near-large accuracy, fast, 99 languages. Cannot translate.", sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2" },
+    Model { id: "large-v3-turbo", label: "Large v3 Turbo", size_mb: 1624, note: "Full-precision turbo. Slightly more accurate, twice the size. Cannot translate.", sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69" },
+    Model { id: "medium", label: "Medium", size_mb: 1533, note: "Multilingual and translates to English (Hinglish → English).", sha256: "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208" },
+    Model { id: "small", label: "Small", size_mb: 488, note: "Multilingual, translates; lighter and less accurate than medium.", sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b" },
+    Model { id: "base.en", label: "Base (English)", size_mb: 148, note: "English only. For low-memory machines.", sha256: "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002" },
+    Model { id: "tiny.en", label: "Tiny (English)", size_mb: 78, note: "English only. Fastest, least accurate.", sha256: "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f" },
 ];
+
+/// Peak RAM of each model, loaded and running one dictation, in MB: what Automatic chooses by,
+/// what the warnings and the "about X RAM" labels say, and what the swap check at load time needs.
+// ponytail: measured 2026-10-15 on this repo's 24 GB Apple-silicon Mac, headless, one model at a
+// time. Whisper: `/usr/bin/time -l echotype --transcribe <8 s wav> --model <file>`, the larger of
+// max RSS and peak memory footprint (so the CLI's own ~40 MB is in). Cleaner: llama-server -c 1024
+// -ngl 99 with one cleanup, max RSS (mapped weights included). Measure again when whisper.cpp,
+// llama.cpp, a model or llm::CONTEXT changes.
+pub const RAM_MB: &[(&str, u64)] = &[
+    ("large-v3-turbo-q5_0", 761),
+    ("large-v3-turbo", 1840),
+    ("medium", 1869),
+    ("small", 717),
+    ("base.en", 316),
+    ("tiny.en", 224),
+    ("echotype-clean", 1113),
+];
+
+/// RAM_MB for a catalog id; anything unknown is assumed to be as large as the largest model.
+pub fn ram_of(id: &str) -> u64 {
+    RAM_MB.iter().find(|(m, _)| *m == id).map_or(1900, |(_, mb)| *mb)
+}
+
+/// Macs with this much memory or less get the light setup: whisper small, the smallest
+/// Echotype cleaner and "save" memory. Above it, turbo, the 1.5B cleaner and "ready".
+pub const LOW_RAM_MB: u64 = 8192;
+
+pub fn low_ram(total_mb: u64) -> bool {
+    total_mb <= LOW_RAM_MB
+}
+
+/// The speech model Automatic recommends for a Mac with this much memory.
+pub fn recommended(total_mb: u64) -> &'static str {
+    if low_ram(total_mb) { "small" } else { "large-v3-turbo-q5_0" }
+}
+
+/// Of `ids`, the one `available` that is closest in RAM to `want`, smaller first: `want` itself
+/// when it is available. Automatic uses it for both the speech model and the cleaner.
+pub fn closest<'a>(ids: impl IntoIterator<Item = &'a str>, want: &str, available: impl Fn(&str) -> bool) -> Option<&'a str> {
+    let w = ram_of(want);
+    ids.into_iter().filter(|id| available(id)).min_by_key(|id| {
+        let r = ram_of(id);
+        (r > w, r.abs_diff(w))
+    })
+}
+
+/// The speech model Automatic uses now: the recommendation once downloaded, else the closest one that is.
+fn auto_model(total_mb: u64, downloaded: impl Fn(&str) -> bool) -> &'static str {
+    let want = recommended(total_mb);
+    closest(MODELS.iter().map(|m| m.id), want, downloaded).unwrap_or(want)
+}
+
+/// The local speech model these settings use: the manual pick with advanced settings on, else Automatic's.
+pub fn local_model(s: &Settings) -> String {
+    if s.advanced { s.stt.local_model.clone() } else { auto_model(ram_mb().0, |id| model_file(id).is_some()).into() }
+}
+
+/// "Uses about 1.8 GB while dictating. On an 8 GB Mac this can slow other apps." for a model that
+/// needs more than Automatic's pick on a low-memory Mac. A warning only: it stays selectable.
+pub fn ram_warning(ram_mb: u64, auto_ram_mb: u64, total_mb: u64) -> Option<String> {
+    let gb = total_mb.div_ceil(1024);
+    (low_ram(total_mb) && ram_mb > auto_ram_mb).then(|| format!("Uses about {} while dictating. On {} {gb} GB Mac this can slow other apps.", fmt_mb(ram_mb), if gb == 8 { "an" } else { "a" }))
+}
+
+/// "800 MB", "1.8 GB".
+pub fn fmt_mb(mb: u64) -> String {
+    if mb < 1000 { format!("{mb} MB") } else { format!("{:.1} GB", mb as f64 / 1024.0).replace(".0 GB", " GB") }
+}
 
 pub fn translates(id: &str) -> bool {
     !id.contains("turbo") && !id.ends_with(".en")
@@ -70,7 +137,8 @@ fn resolve(id_or_path: &str) -> Result<PathBuf, String> {
     model_file(id_or_path).ok_or_else(|| format!("Model '{id_or_path}' is not downloaded. Download it under Models."))
 }
 
-/// (total, available) in MB.
+/// (total, available) in MB. ECHOTYPE_FAKE_RAM_MB (tests only) pretends the Mac has that much,
+/// so the low-memory choices can be checked on a bigger one; available is capped to match.
 pub fn ram_mb() -> (u64, u64) {
     let mut s = sysinfo::System::new();
     s.refresh_memory();
@@ -78,7 +146,11 @@ pub fn ram_mb() -> (u64, u64) {
     let avail = mac_available_bytes().unwrap_or(s.available_memory());
     #[cfg(not(target_os = "macos"))]
     let avail = s.available_memory();
-    (s.total_memory() / 1_048_576, avail / 1_048_576)
+    let (total, avail) = (s.total_memory() / 1_048_576, avail / 1_048_576);
+    match std::env::var("ECHOTYPE_FAKE_RAM_MB").ok().and_then(|v| v.parse::<u64>().ok()).filter(|v| *v > 0) {
+        Some(fake) => (fake, avail.min(fake)),
+        None => (total, avail),
+    }
 }
 
 /// free + inactive pages (speculative is inside free_count), what vm_stat users read as
@@ -100,8 +172,7 @@ fn mac_available_bytes() -> Option<u64> {
 
 /// RAM a model needs once loaded, by catalog id; an unknown file is assumed to be large.
 fn ram_need(model: &Path) -> u64 {
-    let id = model_id(&model.to_string_lossy());
-    MODELS.iter().find(|m| m.id == id).map_or(1700, |m| m.ram_mb)
+    ram_of(&model_id(&model.to_string_lossy()))
 }
 
 pub fn fits(ram_mb: u64, available_mb: u64) -> bool {
@@ -117,25 +188,37 @@ pub struct ModelStatus {
     pub english_only: bool,
     pub translates: bool,
     pub downloaded: bool,
+    /// Fits in the memory free right now, with HEADROOM_MB to spare.
     pub fits: bool,
+    /// What Automatic recommends for this Mac's total memory.
     pub recommended: bool,
+    /// What Automatic uses right now (the recommendation, or the closest downloaded model).
+    pub automatic: bool,
+    /// The low-memory warning, when this model needs more than Automatic's pick.
+    pub warning: Option<String>,
     pub note: &'static str,
 }
 
-pub fn list_models(available_mb: u64) -> Vec<ModelStatus> {
-    let best = MODELS.iter().find(|m| fits(m.ram_mb, available_mb)).map(|m| m.id);
+pub fn list_models(total_mb: u64, available_mb: u64) -> Vec<ModelStatus> {
+    list_models_with(total_mb, available_mb, |id| model_file(id).is_some())
+}
+
+fn list_models_with(total_mb: u64, available_mb: u64, downloaded: impl Fn(&str) -> bool) -> Vec<ModelStatus> {
+    let auto = auto_model(total_mb, &downloaded);
     MODELS
         .iter()
         .map(|m| ModelStatus {
             id: m.id,
             label: m.label,
             size_mb: m.size_mb,
-            ram_mb: m.ram_mb,
+            ram_mb: ram_of(m.id),
             english_only: m.id.ends_with(".en"),
             translates: translates(m.id),
-            downloaded: model_file(m.id).is_some(),
-            fits: fits(m.ram_mb, available_mb),
-            recommended: Some(m.id) == best,
+            downloaded: downloaded(m.id),
+            fits: fits(ram_of(m.id), available_mb),
+            recommended: m.id == recommended(total_mb),
+            automatic: m.id == auto,
+            warning: ram_warning(ram_of(m.id), ram_of(recommended(total_mb)), total_mb),
             note: m.note,
         })
         .collect()
@@ -145,12 +228,12 @@ pub fn list_models(available_mb: u64) -> Vec<ModelStatus> {
 /// cannot translate, falls back to the best downloaded translating model that fits in RAM,
 /// returning a warning that says so.
 pub fn pick_local_model(s: &Settings) -> Result<(PathBuf, Option<String>), String> {
-    let chosen = &s.stt.local_model;
+    let chosen = &local_model(s);
     if !s.translate_to_english || translates(&model_id(chosen)) {
         return Ok((resolve(chosen)?, None));
     }
     let (_, avail) = ram_mb();
-    for m in MODELS.iter().filter(|m| translates(m.id) && fits(m.ram_mb, avail)) {
+    for m in MODELS.iter().filter(|m| translates(m.id) && fits(ram_of(m.id), avail)) {
         if let Some(p) = model_file(m.id) {
             let w = format!("{} cannot translate, so {} was used for this translation.", model_id(chosen), m.id);
             return Ok((p, Some(w)));
@@ -170,7 +253,7 @@ pub fn ready(s: &Settings) -> Result<(), String> {
 
 fn ready_with(s: &Settings, has_key: impl Fn(&str, &str) -> bool) -> Result<(), String> {
     if s.stt.provider == "local" {
-        resolve(&s.stt.local_model).map_err(|_| "Choose a speech model".to_string())?;
+        resolve(&local_model(s)).map_err(|_| "Choose a speech model".to_string())?;
         return pick_local_model(s).map(|_| ());
     }
     match settings::preset(&s.stt.provider) {
@@ -251,12 +334,63 @@ pub fn delete(id: &str) -> Result<(), String> {
 
 // One loaded model + state, reused across calls (state creation costs ~0.5 s with Metal).
 // ponytail: one model resident at a time; a translate run swaps turbo for medium and back. Keep two slots if users flip often.
-static ENGINE: Mutex<Option<(PathBuf, WhisperState)>> = Mutex::new(None);
+static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
+
+struct Engine {
+    path: PathBuf,
+    ctx: WhisperContext,
+    state: WhisperState,
+    /// whisper.cpp keeps the Silero model inside the state once a call used it (meetings only).
+    vad: bool,
+}
 
 fn unload_if(path: &Path) {
     let mut g = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-    if g.as_ref().is_some_and(|(p, _)| p == path) {
+    if g.as_ref().is_some_and(|e| e.path == path) {
         *g = None;
+    }
+}
+
+/// Frees the Silero speech detector a meeting loaded into the whisper state, keeping the model
+/// loaded for dictation. Called when a meeting ends, however it ends.
+pub fn free_vad() {
+    let mut g = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(e) = g.as_mut().filter(|e| e.vad) {
+        match e.ctx.create_state() {
+            Ok(state) => {
+                e.state = state; // drops the old state, and the Silero context with it
+                e.vad = false;
+            }
+            Err(_) => *g = None,
+        }
+    }
+}
+
+/// Logs a warning when a model sits on an external or network volume: macOS pages a model back
+/// in from its file, which is slow (or gone, once unplugged) off the internal disk.
+pub fn warn_if_not_internal(path: &Path) {
+    #[cfg(target_os = "macos")]
+    if let Some(why) = not_internal(path) {
+        eprintln!("echotype: warning: {} is on {why}; keep models on the internal disk ({}) so they load fast", path.display(), models_dir().display());
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn not_internal(path: &Path) -> Option<&'static str> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: statfs fills a zeroed struct for a NUL-terminated path.
+    let st = unsafe {
+        let mut st: libc::statfs = std::mem::zeroed();
+        (libc::statfs(c.as_ptr(), &mut st) == 0).then_some(st)?
+    };
+    let mount: Vec<u8> = st.f_mntonname.iter().take_while(|&&b| b != 0).map(|&b| b as u8).collect();
+    if st.f_flags & libc::MNT_LOCAL as u32 == 0 {
+        Some("a network volume")
+    } else if mount.starts_with(b"/Volumes/") {
+        Some("an external volume")
+    } else {
+        None
     }
 }
 
@@ -357,7 +491,7 @@ pub fn transcribe_words(model: &Path, pcm: &[f32], language: Option<&str>, promp
 #[allow(clippy::too_many_arguments)]
 fn run_local<T>(model: &Path, pcm: &[f32], language: Option<&str>, translate: bool, prompt: &str, timestamps: bool, vad: Option<&Path>, read: impl FnOnce(&WhisperState) -> Result<T, String>) -> Result<T, String> {
     let mut g = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-    if g.as_ref().is_none_or(|(p, _)| p != model) {
+    if g.as_ref().is_none_or(|e| e.path != model) {
         *g = None; // free the old model before loading the next one
         // No headroom here (that is for recommendations): refuse only what would push the machine into swap.
         let (need, free) = (ram_need(model), ram_mb().1);
@@ -365,13 +499,16 @@ fn run_local<T>(model: &Path, pcm: &[f32], language: Option<&str>, translate: bo
             return Err(format!("Not enough free memory for {}: it needs about {need} MB and {free} MB is free. Close some apps or pick a smaller model.", model_id(&model.to_string_lossy())));
         }
         let path = model.to_str().ok_or("Model path is not valid UTF-8")?;
+        warn_if_not_internal(model);
         let mut cp = WhisperContextParameters::default();
         cp.flash_attn(true); // whisper.cpp's own CLI default; faster on Metal
         let ctx = WhisperContext::new_with_params(path, cp).map_err(|e| format!("{} could not load: {e}", model_id(&model.to_string_lossy())))?;
         let state = ctx.create_state().map_err(|e| format!("Could not start whisper: {e}"))?;
-        *g = Some((model.to_path_buf(), state));
+        *g = Some(Engine { path: model.to_path_buf(), ctx, state, vad: false });
     }
-    let state = &mut g.as_mut().expect("loaded above").1;
+    let engine = g.as_mut().expect("loaded above");
+    engine.vad |= vad.is_some();
+    let state = &mut engine.state;
     let mut p = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
     let lang = language.map(|l| l.replace('\0', ""));
     p.set_language(lang.as_deref());
@@ -467,17 +604,52 @@ mod tests {
     }
 
     #[test]
-    fn recommended_is_best_that_fits() {
-        let all = list_models(64_000);
-        assert_eq!(all.iter().filter(|m| m.recommended).count(), 1);
-        assert!(all.iter().find(|m| m.id == "large-v3-turbo-q5_0").unwrap().recommended);
-        // 3 GB free: turbo-q5 (800 + 2048) fits, medium (1800 + 2048) does not.
-        let tight = list_models(3_000);
+    fn automatic_picks_by_total_ram_and_uses_what_is_downloaded() {
+        let all = |_: &str| true;
+        let pick = |total, dl: &dyn Fn(&str) -> bool| list_models_with(total, 64_000, dl).into_iter().find(|m| m.automatic).unwrap().id;
+        assert_eq!(pick(8192, &all), "small", "an 8 GB Mac");
+        assert_eq!(pick(24_576, &all), "large-v3-turbo-q5_0", "a 24 GB Mac: today's default");
+        assert_eq!(pick(16_384, &all), "large-v3-turbo-q5_0");
+        // Until the recommendation is downloaded, the closest downloaded model, smaller first.
+        assert_eq!(pick(8192, &|id| id == "large-v3-turbo-q5_0" || id == "base.en"), "base.en");
+        assert_eq!(pick(8192, &|id| id == "medium"), "medium", "a larger one beats none");
+        assert_eq!(pick(24_576, &|id| id == "small" || id == "medium"), "small");
+        let m8 = list_models_with(8192, 64_000, all);
+        assert_eq!(m8.iter().filter(|m| m.recommended).count(), 1);
+        assert!(m8.iter().find(|m| m.id == "small").unwrap().recommended);
+        // 3 GB free: turbo-q5 (+ 2048 headroom) fits, medium does not.
+        let tight = list_models_with(24_576, 3_000, all);
         assert!(tight.iter().find(|m| m.id == "large-v3-turbo-q5_0").unwrap().fits);
         assert!(!tight.iter().find(|m| m.id == "medium").unwrap().fits);
-        let tiny = list_models(2_500);
-        assert_eq!(tiny.iter().find(|m| m.recommended).unwrap().id, "base.en");
-        assert!(list_models(100).iter().all(|m| !m.recommended && !m.fits));
+    }
+
+    #[test]
+    fn bigger_models_warn_on_low_memory_macs_only() {
+        let m8 = list_models_with(8192, 64_000, |_| true);
+        let warn = |id: &str| m8.iter().find(|m| m.id == id).unwrap().warning.clone();
+        assert_eq!(warn("medium").unwrap(), format!("Uses about {} while dictating. On an 8 GB Mac this can slow other apps.", fmt_mb(ram_of("medium"))));
+        assert!(warn("small").is_none() && warn("tiny.en").is_none(), "Automatic's pick and smaller ones carry no warning");
+        assert!(list_models_with(24_576, 64_000, |_| true).iter().all(|m| m.warning.is_none()));
+        assert_eq!(fmt_mb(800), "800 MB");
+        assert_eq!(fmt_mb(2048), "2 GB");
+        assert_eq!(fmt_mb(1869), "1.8 GB");
+        assert_eq!(ram_of("not-in-the-table"), 1900, "unknown files are assumed large");
+    }
+
+    #[test]
+    fn advanced_off_ignores_the_stored_manual_pick_and_on_restores_it() {
+        let mut s = Settings::default();
+        s.stt.local_model = "tiny.en".into();
+        assert_ne!(local_model(&s), "tiny.en", "Automatic");
+        s.advanced = true;
+        assert_eq!(local_model(&s), "tiny.en", "the manual pick, kept while advanced was off");
+    }
+
+    #[test]
+    fn every_catalog_model_has_a_measured_ram_row() {
+        for m in MODELS {
+            assert!(RAM_MB.iter().any(|(id, mb)| *id == m.id && *mb > 0), "{}", m.id);
+        }
     }
 
     #[test]
@@ -488,14 +660,16 @@ mod tests {
 
     #[test]
     fn ready_needs_a_local_model_or_a_remote_key() {
-        let mut s = Settings::default();
+        let mut s = Settings { advanced: true, ..Default::default() };
         s.stt.local_model = "not-a-model".into();
         assert_eq!(ready_with(&s, |_, _| true).unwrap_err(), "Choose a speech model");
         s.stt.provider = "groq".into();
         assert_eq!(ready_with(&s, |_, _| false).unwrap_err(), "Add your Groq API key to dictate");
         assert!(ready_with(&s, |stage, p| (stage, p) == ("stt", "groq")).is_ok());
-        s.stt.provider = "cloud".into();
-        assert_eq!(ready_with(&s, |_, _| false).unwrap_err(), "Sign in to Echotype Cloud to dictate");
+        if settings::CLOUD {
+            s.stt.provider = "cloud".into();
+            assert_eq!(ready_with(&s, |_, _| false).unwrap_err(), "Sign in to Echotype Cloud to dictate");
+        }
         s.stt.provider = "custom".into();
         assert!(ready_with(&s, |_, _| false).is_ok(), "custom servers may need no key");
     }

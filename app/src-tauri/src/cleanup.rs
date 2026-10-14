@@ -1,5 +1,6 @@
 //! Dictionary replacements, the cleanup LLM call, and the pipeline that ties STT and cleanup together.
 
+use crate::llm;
 use crate::settings::{self, Replacement, Settings};
 use crate::stt;
 use serde::Serialize;
@@ -66,7 +67,77 @@ pub fn parse_reply(v: &Value) -> Option<String> {
 }
 
 pub fn cleanup(s: &Settings, text: &str) -> Result<String, String> {
-    chat(s, &system_prompt(s), text, Duration::from_secs(30))
+    let system = system_prompt(s);
+    if s.cleanup.provider != "echotype" {
+        return chat(s, &system, text, Duration::from_secs(30));
+    }
+    // The built-in model has a small context (llm::CONTEXT): a long dictation is cleaned a few
+    // sentences at a time and joined, never cut off.
+    let budget = (llm::context(s) as usize).saturating_sub(64 + tokens(&system)) / 2;
+    let mut out = String::new();
+    for (piece, gap) in pieces(text, budget)? {
+        let c = chat(s, &system, piece, Duration::from_secs(30))?;
+        // A piece of filler is rightly nothing; a short answer the model dropped ("No.") is kept.
+        let c = if c.is_empty() && !only_filler(piece) { piece.trim().to_string() } else { c };
+        if !c.is_empty() {
+            out.push_str(&c);
+            out.push_str(gap);
+        }
+    }
+    Ok(out.trim_end().to_string())
+}
+
+/// Tokens a text may take, overestimated: about 4.5 bytes a token in English, 3 (one character)
+/// in Devanagari or CJK.
+fn tokens(text: &str) -> usize {
+    text.len().div_ceil(3)
+}
+
+/// `text` cut at sentence ends (. ! ? … or a line break) into pieces of at most `budget` tokens,
+/// each with the gap that followed it ("\n" for a line break, else " "). One sentence over the
+/// budget is an error: cleanup is then skipped with a notice rather than cut.
+fn pieces(text: &str, budget: usize) -> Result<Vec<(&str, &'static str)>, String> {
+    let mut sentences = vec![];
+    let mut start = 0;
+    let mut it = text.char_indices().peekable();
+    while let Some((i, c)) = it.next() {
+        let end = c == '\n' || (matches!(c, '.' | '!' | '?' | '…') && it.peek().is_none_or(|(_, n)| n.is_whitespace()));
+        if end {
+            let mut j = i + c.len_utf8();
+            let mut breaks = c == '\n';
+            while let Some(&(k, w)) = it.peek().filter(|(_, w)| w.is_whitespace()) {
+                breaks |= w == '\n';
+                j = k + w.len_utf8();
+                it.next();
+            }
+            sentences.push((&text[start..j], breaks));
+            start = j;
+        }
+    }
+    if start < text.len() {
+        sentences.push((&text[start..], false));
+    }
+    let mut out: Vec<(&str, &'static str)> = vec![];
+    let mut piece: Option<(usize, usize, bool)> = None; // byte range in `text`, ends with a line break
+    for (sentence, breaks) in sentences {
+        if tokens(sentence.trim()) > budget {
+            return Err(format!("a sentence of {} words is too long for it to clean in one go", sentence.split_whitespace().count()));
+        }
+        let at = sentence.as_ptr() as usize - text.as_ptr() as usize;
+        piece = match piece {
+            Some((a, _, _)) if tokens(text[a..at + sentence.len()].trim()) <= budget => Some((a, at + sentence.len(), breaks)),
+            Some((a, b, br)) => {
+                out.push((text[a..b].trim(), if br { "\n" } else { " " }));
+                Some((at, at + sentence.len(), breaks))
+            }
+            None => Some((at, at + sentence.len(), breaks)),
+        };
+    }
+    if let Some((a, b, br)) = piece {
+        out.push((text[a..b].trim(), if br { "\n" } else { " " }));
+    }
+    out.retain(|(p, _)| !p.is_empty());
+    Ok(out)
 }
 
 /// One chat completion with the configured cleanup provider: `system` as the system prompt and
@@ -74,7 +145,7 @@ pub fn cleanup(s: &Settings, text: &str) -> Result<String, String> {
 pub fn chat(s: &Settings, system: &str, text: &str, timeout: Duration) -> Result<String, String> {
     let c = &s.cleanup;
     let (base, key) = if c.provider == "echotype" {
-        let (url, key) = crate::llm::ensure()?; // the built-in model's server, started on first use
+        let (url, key) = llm::ensure(s)?; // the built-in model's server, started on first use
         (url, Some(key))
     } else {
         (settings::base_url(&c.provider, &c.base_url)?, settings::provider_key("llm", &c.provider))
@@ -102,6 +173,12 @@ pub fn chat(s: &Settings, system: &str, text: &str, timeout: Duration) -> Result
         return Err(format!("{status}: {}", body.chars().take(300).collect::<String>()));
     }
     let v: Value = serde_json::from_str(&body).map_err(|_| "it returned a non-JSON response".to_string())?;
+    if c.provider == "echotype" {
+        llm::touch();
+        if v["choices"][0]["finish_reason"] == "length" {
+            return Err("its answer ran out of room and was cut off".into()); // never paste a cut-off text
+        }
+    }
     parse_reply(&v).ok_or_else(|| "its response had no message content".to_string())
 }
 
@@ -377,6 +454,50 @@ mod tests {
             let o = after_stt(&s, word.into(), 1, None, false, true, || {}, |_, _| Ok(String::new()));
             assert_eq!(o.text, word);
         }
+    }
+
+    #[test]
+    fn long_dictations_split_at_sentence_ends_and_lose_nothing() {
+        let text = "One two three. Four five six! Seven eight?\nNine ten. Eleven";
+        let p = pieces(text, 6).unwrap();
+        assert_eq!(p, [("One two three.", " "), ("Four five six!", " "), ("Seven eight?", "\n"), ("Nine ten. Eleven", " ")]);
+        let whole = pieces(text, 1000).unwrap();
+        assert_eq!(whole, [(text, " ")], "short enough: one piece");
+        assert!(pieces("Mr. Smith and 3.5 kg", 1000).unwrap().len() == 1);
+        assert!(pieces("one very long sentence without any full stop at all", 5).unwrap_err().contains("10 words"));
+        // 600 words: every word arrives in exactly one piece, each within the budget.
+        let sentence = "so we walked down to the river and talked about the plan for next week.";
+        let long: String = std::iter::repeat_n(sentence, 600 / 15).collect::<Vec<_>>().join(" ");
+        assert_eq!(long.split_whitespace().count(), 600);
+        let budget = (CONTEXT_FOR_TEST - 64 - tokens(&system_prompt(&echotype()))) / 2;
+        let p = pieces(&long, budget).unwrap();
+        assert!(p.len() > 1 && p.iter().all(|(x, _)| tokens(x) <= budget));
+        let joined: Vec<&str> = p.iter().flat_map(|(x, _)| x.split_whitespace()).collect();
+        assert_eq!(joined, long.split_whitespace().collect::<Vec<_>>());
+    }
+
+    const CONTEXT_FOR_TEST: usize = crate::llm::CONTEXT as usize;
+
+    fn echotype() -> Settings {
+        let mut s = Settings::default();
+        s.cleanup.enabled = true;
+        s.cleanup.provider = "echotype".into();
+        s
+    }
+
+    /// The real sidecar on a 600-word dictation: `cargo test -- --ignored six_hundred`.
+    #[test]
+    #[ignore]
+    fn six_hundred_words_clean_without_truncation() {
+        let sentence = "um so we walked down to the river and uh talked about the plan for next week.";
+        let long: String = std::iter::repeat_n(sentence, 600 / 17).collect::<Vec<_>>().join(" ");
+        let t = Instant::now();
+        let out = cleanup(&echotype(), &long).unwrap();
+        let (n_in, n_out) = (long.split_whitespace().count(), out.split_whitespace().count());
+        eprintln!("{n_in} words in, {n_out} out, {} ms", t.elapsed().as_millis());
+        assert_eq!(out.matches("river").count(), long.matches("river").count(), "every sentence is still there: {out}");
+        assert!(!out.contains(" um ") && !out.contains(" uh "), "{out}");
+        crate::llm::stop();
     }
 
     #[test]

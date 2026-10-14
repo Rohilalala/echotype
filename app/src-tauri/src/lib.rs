@@ -169,6 +169,12 @@ fn error_action(e: &str) -> Option<&'static str> {
     }
 }
 
+/// A manual model pick (advanced settings) that would push the Mac into swap right now: the
+/// notice offers "Switch to automatic" rather than overriding the pick silently.
+fn memory_action(s: &Settings, text: &str) -> Option<&'static str> {
+    (s.advanced && text.contains("Not enough free memory")).then_some("automatic")
+}
+
 /// "⌥ Space", "fn", "Right ⌘", "Ctrl+Alt+K": how copy names the key the user dictates with.
 fn key_label(s: &Settings, mac: bool) -> String {
     let side = |k: &str| format!("Right {k}");
@@ -433,7 +439,7 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
         // Keep the audio of a failed transcription for retry_last; a success frees the old one.
         *lock(&state(&app).last_failed) = failed.then_some(pcm);
         let ev = match result {
-            Err(e) => DictationState { state: "error", action: error_action(&e), error: Some(e), retry: true, ..Default::default() },
+            Err(e) => DictationState { state: "error", action: memory_action(&s, &e).or(error_action(&e)), error: Some(e), retry: true, ..Default::default() },
             Ok(out) if out.text.is_empty() => {
                 hint(if clip.muted_seen { "No audio. Check your mic" } else { "Didn't catch that" }, clip.muted_seen.then_some("microphone"))
             }
@@ -456,8 +462,9 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
                 } else {
                     platform::copy(&out.text).map_err(|e| (e, false))
                 };
+                let action = warning.as_deref().and_then(|w| memory_action(&s, w));
                 match res {
-                    Ok(()) => DictationState { state: "done", text: Some(out.text), warning, copied: !paste, chip, ..Default::default() },
+                    Ok(()) => DictationState { state: "done", text: Some(out.text), warning, copied: !paste, chip, action, ..Default::default() },
                     // Nowhere to paste, or the keystroke blocked (secure input): the card, with Copy.
                     Err((e, true)) => {
                         // Not pasted anywhere: a sound of its own, so it's noticed without looking.
@@ -778,13 +785,14 @@ static SAVE: Mutex<()> = Mutex::new(());
 fn commit_settings(app: &AppHandle, change: impl FnOnce(&Settings) -> Settings) -> R<Option<String>> {
     let _g = lock(&SAVE);
     let old = current_settings(app);
-    let new = change(&old);
+    let mut new = change(&old);
+    new.migrate(); // never save a provider this build hides
     if new.local_api.port < settings::MIN_PORT {
         return Err(format!("The local API port must be between {} and 65535", settings::MIN_PORT));
     }
     let (new, warning) = commit(&old, new, |o, n| swap_hotkey(app, o, n), |on| set_autostart(app, on), Settings::save)?;
     *state(app).settings.lock().unwrap_or_else(|e| e.into_inner()) = new.clone();
-    if (new.stt.local_model != old.stt.local_model || new.stt.provider != old.stt.provider) && new.stt.provider == "local" {
+    if stt::local_model(&new) != stt::local_model(&old) || (new.stt.provider != old.stt.provider && new.stt.provider == "local") {
         let s = new.clone();
         std::thread::spawn(move || stt::warm_up(&s));
     }
@@ -836,7 +844,8 @@ async fn delete_secret(name: String) -> R<()> {
 
 #[tauri::command]
 async fn list_models() -> R<Vec<stt::ModelStatus>> {
-    Ok(stt::list_models(stt::ram_mb().1))
+    let (total, avail) = stt::ram_mb();
+    Ok(stt::list_models(total, avail))
 }
 
 #[tauri::command]
@@ -929,14 +938,31 @@ struct SystemInfo {
     /// The built-in cleanup model is on disk, and its size (or download size) in MB.
     echotype_model_installed: bool,
     echotype_model_mb: u64,
+    /// The Echotype cleaners with their RAM, for the Cleanup page's picker (advanced settings).
+    cleaners: Vec<llm::CleanerStatus>,
+    /// 8 GB or less: Automatic picks the light setup.
+    low_ram: bool,
+    /// Echotype Cloud is in this build (settings::CLOUD).
+    cloud: bool,
 }
 
 #[tauri::command]
-async fn get_system_info() -> R<SystemInfo> {
+async fn get_system_info(app: AppHandle) -> R<SystemInfo> {
     let (total, avail) = stt::ram_mb();
     let gb = |mb: u64| (mb as f64 / 1024.0 * 10.0).round() / 10.0;
-    let (echotype_model_installed, echotype_model_mb) = llm::status();
-    Ok(SystemInfo { total_ram_gb: gb(total), available_ram_gb: gb(avail), os: std::env::consts::OS, arch: std::env::consts::ARCH, can_autostart: can_autostart(), echotype_model_installed, echotype_model_mb })
+    let (echotype_model_installed, echotype_model_mb) = llm::status(&current_settings(&app));
+    Ok(SystemInfo {
+        total_ram_gb: gb(total),
+        available_ram_gb: gb(avail),
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        can_autostart: can_autostart(),
+        echotype_model_installed,
+        echotype_model_mb,
+        cleaners: llm::cleaners(total),
+        low_ram: stt::low_ram(total),
+        cloud: settings::CLOUD,
+    })
 }
 
 #[tauri::command]
@@ -1409,6 +1435,7 @@ pub fn cli(args: &[String]) -> i32 {
                 Some(m) => {
                     s.stt.provider = "local".into();
                     s.stt.local_model = std::fs::canonicalize(m).map_or(m.clone(), |p| p.to_string_lossy().into_owned());
+                    s.advanced = true; // a model named here is a manual pick
                 }
                 None => file = None,
             },
@@ -1636,9 +1663,21 @@ mod tests {
             assert_eq!(error_action(e), Some("model"), "{e}");
         }
         assert_eq!(error_action("Speech-to-text failed (500): boom"), None);
-        let mut s = Settings::default();
+        let mut s = Settings { advanced: true, ..Default::default() };
         s.stt.local_model = "not-a-model".into();
         assert_eq!(error_action(&crate::stt::ready(&s).unwrap_err()), Some("model"));
+    }
+
+    #[test]
+    fn a_manual_pick_refused_for_memory_offers_automatic_and_automatic_does_not() {
+        use super::memory_action;
+        let mut s = Settings::default();
+        let e = "Not enough free memory for medium: it needs about 1869 MB and 900 MB is free.";
+        let w = "Cleanup failed: Echotype model (local): Not enough free memory for the Echotype model: it needs about 1113 MB and 900 MB is free. Pasted the raw transcript instead.";
+        assert_eq!((memory_action(&s, e), memory_action(&s, w)), (None, None), "already Automatic");
+        s.advanced = true;
+        assert_eq!((memory_action(&s, e), memory_action(&s, w)), (Some("automatic"), Some("automatic")));
+        assert_eq!(memory_action(&s, "Cleanup failed: Groq: 401"), None);
     }
 
     #[test]
