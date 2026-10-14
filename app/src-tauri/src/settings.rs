@@ -66,7 +66,7 @@ pub struct Settings {
     pub pill_hidden_until: u64,
     /// Let screenshots and screen sharing see the pill. Off = content protection (best effort).
     pub pill_in_recordings: bool,
-    /// Settings window look: "classic" (the default) or "v2" (Ink).
+    /// Settings window look: "foundry" (the default), "classic" or "v2" (Ink).
     pub look: String,
     /// Where the pill was dropped on each display (macOS): its window's top-left as a fraction
     /// of the room it has in that display's visible frame, keyed by the display's name. A display
@@ -147,7 +147,7 @@ impl Default for Settings {
             pill_idle: true,
             pill_hidden_until: 0,
             pill_in_recordings: false,
-            look: "classic".into(),
+            look: "foundry".into(),
             pill_positions: BTreeMap::new(),
             pill_screen: None,
             pill_follow_cursor: true,
@@ -459,7 +459,8 @@ mod tests {
         assert_eq!(s.talk_key, "accelerator");
         assert!(s.sounds && s.dismissed.is_empty());
         assert!(s.pill_idle && s.pill_hidden_until == 0 && !s.pill_in_recordings, "the idle pill is on for upgraders, hidden from capture");
-        assert_eq!(s.look, "classic", "upgraders keep the classic look");
+        assert_eq!(s.look, "foundry", "upgraders who never picked a look get Foundry");
+        assert_eq!(serde_json::from_str::<Settings>(r#"{"look":"v2"}"#).unwrap().look, "v2", "a chosen look is kept");
         assert!(s.pill_positions.is_empty() && s.show_in == "pill", "upgraders keep the pill, bottom-centre");
         assert!(s.pill_follow_cursor && s.pill_screen.is_none(), "...on the screen they are using");
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
