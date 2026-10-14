@@ -160,7 +160,13 @@
 }
 :root[data-look="v2"] .chip { border-radius: var(--r-ctl); background: var(--card); }
 :root[data-look="v2"] .ob-foot .btn.primary { border-radius: var(--r-ctl); }
+:root[data-look="v2"] .ob-chips span { border-radius: var(--r-ctl); }
 
 /* The accent at the moment that matters: the live waveform while you speak, the current step. */
 :root[data-look="v2"] .meter i { background: var(--accent); }
-:root[data-look="v2"] .ob-steps li.on::before { background: var(--accent); }
+/* Onboarding: a paper card on the ink desk, the orb and the current step in ink blue. */
+:root[data-look="v2"] .onboard { background: var(--side); --ob-orb: var(--accent); --ob-desk-fg: #b7bcc7; }
+:root[data-look="v2"] .ob-model .link:hover { color: #f0eee9; }
+:root[data-look="v2"] .ob-card { border-color: transparent; box-shadow: 0 24px 60px -30px rgba(0, 0, 0, 0.55); }
+:root[data-look="v2"] .ob-dots li.on { background: var(--accent); }
+:root[data-look="v2"] .ob-result, :root[data-look="v2"] .ob-ax-demo, :root[data-look="v2"] .ob-note { background: var(--card); }
