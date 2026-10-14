@@ -38,6 +38,11 @@
     "resources": [
       "sounds/*.wav"
     ],
+    "linux": {
+      "deb": {
+        "depends": ["libasound2"]
+      }
+    },
     "macOS": {
       "entitlements": "Entitlements.plist",
       "signingIdentity": "-",
