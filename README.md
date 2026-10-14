@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src=".github/assets/screenshot.png" width="760" alt="Echotype's speech model settings, showing local whisper models with their download size and memory needs">
+  <img src=".github/assets/screenshot.png" width="760" alt="Echotype's History page: what you said on the left, with the filler words cleanup removed struck through, and what was pasted on the right">
 </p>
 
 ## What it does
@@ -24,11 +24,14 @@
 - **Dictate into any app.** Hold <kbd>⌥ Space</kbd>, talk, release. Echotype transcribes, cleans up and pastes, then puts your clipboard back.
 - **Reads like you typed it.** Filler words go, "four, no wait, five" becomes "5", spoken lists become lists, "new line" starts a new line.
 - **Speak Hinglish, get English.** Talk in Hindi, English or both at once; Echotype writes English.
+- **A pill that stays out of the way.** A thin bar at the bottom of the screen. While you talk it shows a needle that swings with your voice. Drag it anywhere; it follows the screen you are using, or stays where you put it. Prefer nothing on screen? Use the menu bar icon instead. When nothing can take text, it shows your words in a small card with **Copy** rather than pasting into nowhere.
+- **Meeting notes.** Echotype hears your microphone and the computer's audio, writes down who said what and, with a cleanup model set up, sums up decisions and action items. It all runs on your Mac.
 - **Drop in a voice note.** Drag a WhatsApp `.opus`, `.m4a`, `.mp3` or `.wav` onto the window for a clean transcript.
 - **Any model, both stages.** Local whisper.cpp on your machine, or any OpenAI-compatible endpoint: OpenAI, Groq, OpenRouter, Ollama, LM Studio, or your own server.
 - **Knows your machine.** Echotype checks free memory before it loads or recommends a model.
 - **A local API for your scripts and agents.** `POST http://127.0.0.1:7811/v1/audio/transcriptions` runs the same pipeline.
-- **See how much you talk.** The Stats page shows your words per minute, words per day and a year grid of the days you dictated. They are counts only, never your text, and stay on your computer; switch them off or clear them on the same page.
+- **See how much you talk.** The Stats page shows your words, words per minute and a year grid of the days you dictated. They are counts only, never your text, and stay on your computer; switch them off or clear them on the same page.
+- **Three looks.** Foundry, pewter and ink with your words set in Recursive, is the default. Classic and Ink are one click away in Settings. All three follow your light or dark setting.
 
 With local models, nothing leaves your computer. API keys live in the system keychain.
 
@@ -48,14 +51,17 @@ Paste this into Claude Code, Codex, Cursor or any agent that can run commands:
 ```text
 Set up Echotype (https://github.com/Rohilalala/echotype) on this computer.
 
-1. Install what's missing: Rust (rustup), CMake and Node 20+. On Linux also install
+1. Install what's missing: Rust (rustup), CMake and Node 20+. A Mac needs macOS 13 or later.
+   On Linux also install
    libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev libxdo-dev.
 2. Clone the repo, then in app/ run `npm install` and `npm run tauri build`.
 3. Install the built app (macOS: copy Echotype.app from
    app/src-tauri/target/release/bundle/macos to /Applications) and open it.
 4. Check how much memory is free. In Echotype's Speech model page, download the model it
-   marks Recommended; pick Medium instead if I speak a language other than English.
-5. Walk me through granting Microphone and Accessibility access.
+   marks Recommended. If I want Hindi or Hinglish written as English, also download Medium.
+5. Walk me through granting Microphone and Accessibility access. If I want meeting notes,
+   also Screen Recording (for the computer's audio). If I want to dictate with the fn key,
+   also Input Monitoring, then relaunch Echotype.
 6. Prove it works: run Echotype's CLI on a short recording,
    `/Applications/Echotype.app/Contents/MacOS/echotype --transcribe <file>`, and show me the text.
 
@@ -71,7 +77,7 @@ npm install
 npm run tauri build
 ```
 
-Needs Rust, CMake and Node 20+. Transcribe a file without opening the window:
+Needs Rust, CMake and Node 20+, and macOS 13 or later on a Mac. Transcribe a file without opening the window:
 
 ```sh
 echotype --transcribe note.opus
@@ -91,7 +97,7 @@ Every shortcut can be changed in Settings, and paste last and copy last can be t
 
 ### The pill (macOS)
 
-A thin bar waits at the bottom of the screen your cursor is on. Click it to dictate hands-free and click again (or ✓) to finish, ✕ cancels. Right-click it for the microphone, language, paste last, history, hide for 1 hour and settings. Turn it off under Settings → Pill, or hide it for an hour from the menu bar; it still shows while you dictate.
+A thin bar waits at the bottom of the screen your cursor is on. Click it to dictate hands-free and click again (or ✓) to finish, ✕ cancels. Right-click it for the microphone, language, paste last, history, meeting notes, hide for 1 hour and settings. Turn it off under Settings → Pill, or hide it for an hour from the menu bar; it still shows while you dictate.
 
 Drag the pill anywhere, on any display. Each display remembers where you left it, and a double-click puts it back at the bottom centre. It never goes off-screen or under the menu bar. The pill moves to the screen you are using; turn off **Move to the screen I'm using** to keep it on the screen you last dragged it to.
 
@@ -156,7 +162,7 @@ For computers that can't spare the memory, Echotype Cloud runs transcription and
 
 | Plan | Price | Includes |
 |---|---|---|
-| Free | $0 | 2,000 words a week |
+| Free | $0 | 2,000 words and 2 audio hours a week |
 | Pro | $6 a month or $60 a year | Unlimited words, 40 audio hours a month fair use |
 
 Pick **Echotype Cloud** as the speech provider and sign in with your email; there's no password. Audio is transcribed and dropped. The server keeps word and audio-second counts, nothing else.
