@@ -1157,7 +1157,8 @@ refreshCloud();
 renderMics();
 refreshPerms();
 refreshStatus();
-(await import('./stats.js')).init({ invoke, listen, h, go, settings: () => S, keys: () => `${verb()} ${hotkeyText(S.hotkey)}` });
+try { (await import('./stats.js')).init({ invoke, listen, h, go, settings: () => S, keys: () => `${verb()} ${hotkeyText(S.hotkey)}` }); }
+catch (e) { console.error('Stats did not load', e); } // the rest of the window still works
 const start = location.hash.slice(1);
 go($(`main > section[data-page="${start}"]`) ? start : 'home');
 if (!S.onboarded) { showOnboarding(true); obStartModel(); obShow(+new URLSearchParams(location.search).get('step') || 1); }

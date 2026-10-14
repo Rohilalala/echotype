@@ -1,6 +1,7 @@
 // The Stats page and the Home strip, drawn from get_stats (stats.rs). Counts only, kept on this computer.
 const $ = (s, el = document) => el.querySelector(s);
-let api, view = null, err = null, loaded = false;
+let api, view = null, err = null, loaded = false, seq = 0;
+let bodyOn; // usage_stats when #statsBody was last drawn
 
 const num = x => Math.round(x).toLocaleString();
 const words = x => `${num(x)} ${Math.round(x) === 1 ? 'word' : 'words'}`;
@@ -23,37 +24,53 @@ const MILESTONES = [
 export function init(deps) {
   api = deps;
   api.listen('stats-updated', refresh);
-  api.listen('settings-changed', render);
-  document.addEventListener('echotype:page', e => e.detail === 'stats' && refresh());
-  $('[data-bind="usage_stats"]').addEventListener('change', render);
+  // Settings saves (the name, every keystroke) redraw only what reads settings, so a focused grid survives.
+  api.listen('settings-changed', renderSettings);
+  $('[data-bind="usage_stats"]').addEventListener('change', renderSettings);
   $('[data-bind="display_name"]').addEventListener('input', renderTitle);
+  window.addEventListener('focus', refresh); // "today" moves on at midnight while the window is away
   $('#statsOn').addEventListener('click', () => {
     const sw = $('[data-bind="usage_stats"]');
     sw.checked = true;
     sw.dispatchEvent(new Event('change')); // the bound switch saves it
+    sw.focus(); // the notice holding this button goes away
   });
-  const confirm = on => { $('#clearStats').hidden = on; $('#clearStatsConfirm').hidden = !on; (on ? $('#clearStatsCancel') : $('#clearStats')).focus(); };
-  $('#clearStats').addEventListener('click', () => confirm(true));
+  const confirm = (on, focus = $('#clearStats')) => {
+    $('#clearStats').hidden = on;
+    $('#clearStatsConfirm').hidden = !on;
+    focus?.focus();
+  };
+  document.addEventListener('echotype:page', e => { confirm(false, null); if (e.detail === 'stats') refresh(); });
+  $('#clearStats').addEventListener('click', () => confirm(true, $('#clearStatsCancel')));
   $('#clearStatsCancel').addEventListener('click', () => confirm(false));
+  $('#clearStatsConfirm').addEventListener('keydown', e => { if (e.key === 'Escape') confirm(false); });
   $('#clearStatsYes').addEventListener('click', async () => {
-    try { await api.invoke('clear_stats'); } catch (e) { err = `Couldn't clear stats: ${e}`; }
-    confirm(false);
+    try { await api.invoke('clear_stats'); }
+    catch (e) { confirm(false); err = `Couldn't clear stats: ${e}`; return renderPage(); }
+    confirm(false, $('#statsTitle')); // Clear stats is disabled once there is nothing to clear
     refresh();
   });
   refresh();
 }
 
 async function refresh() {
-  try { view = await api.invoke('get_stats', { range: 53 }); err = null; }
-  catch (e) { err = `Couldn't read stats: ${e}`; }
+  const n = ++seq;
+  let next, e2 = null;
+  try { next = await api.invoke('get_stats', { range: 53 }); }
+  catch (e) { e2 = `Couldn't read stats: ${e}`; }
+  if (n !== seq) return; // a newer refresh started meanwhile
+  if (next) view = next;
+  err = e2;
   loaded = true;
-  render();
-}
-
-function render() {
   renderTitle();
   renderStrip();
   renderPage();
+}
+
+function renderSettings() {
+  renderTitle();
+  renderStrip();
+  if (bodyOn !== api.settings().usage_stats) renderPage();
 }
 
 function renderTitle() {
@@ -83,7 +100,8 @@ function renderPage() {
   const { h } = api, S = api.settings();
   $('#statsOff').hidden = S.usage_stats;
   $('#clearStats').disabled = !view?.count_total;
-  const body = $('#statsBody');
+  const body = $('#statsBody'), gridFocused = document.activeElement?.classList.contains('heat');
+  bodyOn = S.usage_stats;
   if (err) return body.replaceChildren(h('p', { className: 'empty', role: 'alert' }, err, h('button', { className: 'btn', type: 'button', onclick: refresh }, 'Try again')));
   if (!loaded || !view) return body.replaceChildren(h('p', { className: 'empty' }, 'Loading stats…'));
   const v = view, has = v.count_total > 0;
@@ -97,6 +115,7 @@ function renderPage() {
     has && facts(v),
     milestones(v),
   ].filter(Boolean));
+  if (gridFocused) $('.heat', body).focus(); // a dictation landed while reading the grid
 }
 
 const fig = (label, value, unit, sub, big) => api.h('div', { className: 'fig' + (big ? ' big' : '') },
