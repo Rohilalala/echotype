@@ -297,7 +297,7 @@ pub fn transcribe_local(model: &Path, pcm: &[f32], language: Option<&str>, trans
     if pcm.is_empty() {
         return Ok(String::new());
     }
-    run_local(model, pcm, language, translate, prompt, false, |state| {
+    run_local(model, pcm, language, translate, prompt, false, None, |state| {
         let mut text = String::new();
         for i in 0..state.full_n_segments() {
             if let Some(seg) = state.get_segment(i) {
@@ -319,11 +319,12 @@ pub struct Word {
 /// Local whisper with token timestamps, grouped into words (a token that starts with a space
 /// starts a word). Meeting notes use the times to cut overlapping chunks and to line words up
 /// with speaker turns.
-pub fn transcribe_words(model: &Path, pcm: &[f32], language: Option<&str>, prompt: &str) -> Result<Vec<Word>, String> {
+/// `vad`: a Silero model; whisper then transcribes only the speech it finds.
+pub fn transcribe_words(model: &Path, pcm: &[f32], language: Option<&str>, prompt: &str, vad: Option<&Path>) -> Result<Vec<Word>, String> {
     if pcm.is_empty() {
         return Ok(vec![]);
     }
-    run_local(model, pcm, language, false, prompt, true, |state| {
+    run_local(model, pcm, language, false, prompt, true, vad, |state| {
         let mut words: Vec<Word> = vec![];
         for i in 0..state.full_n_segments() {
             let Some(seg) = state.get_segment(i) else { continue };
@@ -344,16 +345,17 @@ pub fn transcribe_words(model: &Path, pcm: &[f32], language: Option<&str>, promp
                 }
             }
         }
-        // "[BLANK_AUDIO]" and "[Music]" arrive as ordinary tokens.
+        // "[BLANK_AUDIO]" and "[Music]" arrive as ordinary tokens; a lone "." or "-" is noise.
         words.retain_mut(|w| {
             w.text = clean_text(&w.text);
-            !w.text.is_empty()
+            w.text.chars().any(char::is_alphanumeric)
         });
         Ok(words)
     })
 }
 
-fn run_local<T>(model: &Path, pcm: &[f32], language: Option<&str>, translate: bool, prompt: &str, timestamps: bool, read: impl FnOnce(&WhisperState) -> Result<T, String>) -> Result<T, String> {
+#[allow(clippy::too_many_arguments)]
+fn run_local<T>(model: &Path, pcm: &[f32], language: Option<&str>, translate: bool, prompt: &str, timestamps: bool, vad: Option<&Path>, read: impl FnOnce(&WhisperState) -> Result<T, String>) -> Result<T, String> {
     let mut g = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
     if g.as_ref().is_none_or(|(p, _)| p != model) {
         *g = None; // free the old model before loading the next one
@@ -381,6 +383,14 @@ fn run_local<T>(model: &Path, pcm: &[f32], language: Option<&str>, translate: bo
     p.set_token_timestamps(timestamps);
     if !prompt.is_empty() {
         p.set_initial_prompt(prompt);
+    }
+    let vad = vad.and_then(Path::to_str);
+    if vad.is_some() {
+        p.set_vad_model_path(vad); // before enable_vad, which panics without it
+        p.enable_vad(true);
+        let mut v = whisper_rs::WhisperVadParams::new();
+        v.set_speech_pad(200); // keep word edges; the default 30 ms clips first and last sounds
+        p.set_vad_params(v);
     }
     state.full(p, pcm).map_err(|e| format!("Transcription failed: {e}"))?;
     read(state)
