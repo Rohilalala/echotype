@@ -529,6 +529,7 @@ function fillRemote(kind) {
   url.placeholder = custom ? 'http://localhost:8000/v1' : '';
   $(`#${kind}UrlDesc`).textContent = custom
     ? `Any OpenAI-compatible ${kind === 'stt' ? '/audio/transcriptions' : '/chat/completions'} endpoint.`
+    : cfg.provider === 'echotype' ? 'Run the Echotype model with mlx_lm.server on port 8899. See model/ in the repo.'
     : `Set by the ${p?.label ?? ''} preset.`;
   const model = $(`#${kind}Model`);
   model.value = cfg.model;

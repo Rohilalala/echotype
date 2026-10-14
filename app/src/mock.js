@@ -33,6 +33,7 @@ const presets = [
   { id: 'openrouter', label: 'OpenRouter', stt: false, cleanup: true, base_url: 'https://openrouter.ai/api/v1', default_stt_model: '', default_cleanup_model: 'meta-llama/llama-3.1-8b-instruct', needs_key: true },
   { id: 'ollama', label: 'Ollama', stt: false, cleanup: true, base_url: 'http://localhost:11434/v1', default_stt_model: '', default_cleanup_model: 'gemma3:4b', needs_key: false },
   { id: 'lmstudio', label: 'LM Studio', stt: false, cleanup: true, base_url: 'http://localhost:1234/v1', default_stt_model: '', default_cleanup_model: 'qwen3-4b', needs_key: false },
+  { id: 'echotype', label: 'Echotype model (local)', stt: false, cleanup: true, base_url: 'http://127.0.0.1:8899/v1', default_stt_model: '', default_cleanup_model: 'default_model', needs_key: false },
   { id: 'custom', label: 'Custom', stt: true, cleanup: true, base_url: '', default_stt_model: '', default_cleanup_model: '', needs_key: false },
 ];
 // The same catalog, sizes and notes as stt.rs MODELS.
