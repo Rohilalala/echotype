@@ -1,13 +1,7 @@
-// ?preview: the live preview in Settings → Pill, driven by the settings page through mock.js and
-// never by (or able to reach) the real app.
-const preview = new URLSearchParams(location.search).has('preview');
-if (!window.__TAURI__ || preview) await import('./mock.js');
+if (!window.__TAURI__) await import('./mock.js');
 import { resolvePreset, MODE_FRAMES } from './vendor/thinking-orbs.js';
-const api = preview ? window.__mock.api : window.__TAURI__;
-// Same colour scheme as the Settings page around it, or the frame is painted opaque in dark mode.
-if (preview) document.documentElement.style.colorScheme = 'light dark';
-const { listen } = api.event;
-const { invoke } = api.core;
+const { listen } = window.__TAURI__.event;
+const { invoke } = window.__TAURI__.core;
 const pill = document.getElementById('pill'), label = document.getElementById('label');
 const chipEl = document.getElementById('chip');
 const creason = document.getElementById('creason'), fixBtn = document.getElementById('fix');
@@ -107,7 +101,7 @@ const LISTEN = resolvePreset('listening', 64), THINK = resolvePreset('working', 
 // Dots visible in the ball and along an edge; the rest wait, unseen, on those same spots.
 const BALL_DOTS = 90, EDGE_GAP = 4;
 // The window shows this page zoomed 1.5x (pill.rs ZOOM): draw at 3x so the dots stay crisp.
-const dpr = Math.max(preview ? 4 : 3, devicePixelRatio || 1); // the Settings preview is scaled up to 2x
+const dpr = Math.max(3, devicePixelRatio || 1);
 cvs.width = W * dpr;
 cvs.height = H * dpr;
 const box = { x: W / 2 - 5, y: H - 21, w: 10, h: 10, r: 5 };

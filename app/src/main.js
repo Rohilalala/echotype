@@ -994,43 +994,19 @@ function renderPill() {
 }
 $('#soundPlay').addEventListener('click', () => invoke('preview_sounds', { pack: S.sound_pack || 'classic' }).catch(() => {}));
 
-// Settings → Pill size: the real overlay page in an iframe (overlay.html?preview, fed by mock.js,
-// never by the app), zoomed like the pill window and cycling ball → orb → card while it's on screen.
-const pillPreview = $('#pillPreview');
+// Settings → Pill size: the labels follow the sliders; letting go (or Show on screen) has the real
+// pill act out a dictation at the new size.
 function sizePreview() {
   $('#pillSizeOut').textContent = `${Math.round((S.pill_size ?? 1.5) * 100)}%`;
   $('#ballSizeOut').textContent = `${Math.round((S.ball_size ?? 1) * 100)}%`;
-  // A transform, not CSS zoom: WebKit's zoom on a frame puts the drawn backing and the words
-  // in different places. The frame's box keeps its height, so the container is sized here.
-  const z = S.pill_size ?? 1.5;
-  pillPreview.style.transform = `scale(${z})`;
-  pillPreview.parentElement.style.height = `${100 * z + 13}px`;
-  pillPreview.contentDocument?.documentElement.style.setProperty('--ball', S.ball_size ?? 1);
 }
+const showPill = () => saving.then(() => invoke('show_pill_demo')).catch(() => {});
 for (const id of ['pill_size', 'ball_size']) {
-  // Dragging moves the preview at once; letting go saves (and the real pill follows).
-  $(`[data-bind="${id}"]`).addEventListener('input', e => { S[id] = Number(e.target.value); sizePreview(); });
+  const el = $(`[data-bind="${id}"]`);
+  el.addEventListener('input', e => { S[id] = Number(e.target.value); sizePreview(); });
+  el.addEventListener('change', showPill);
 }
-const DEMO = [
-  [0, 'pill', { active: false, near: true }], [0, 'dictation-state', { state: 'idle' }],
-  [1400, 'pill', { active: true, near: true }], [0, 'dictation-state', { state: 'recording' }],
-  [2600, 'dictation-state', { state: 'transcribing' }],
-  [1500, 'dictation-state', { state: 'done', card: true, text: 'Let’s move the standup to 10:30 tomorrow.', warning: 'Nowhere to paste', paste_key: '⌃⌥V' }],
-  [3200, 'dictation-state', { state: 'idle' }], [0, 'pill', { active: false, near: true }],
-];
-let demoAt = 0, demoTimer, levelTimer;
-function demoStep() {
-  const m = pillPreview.contentWindow?.__mock;
-  if (!m || pillPreview.closest('[hidden]')) { demoTimer = setTimeout(demoStep, 500); return; } // not on screen: wait
-  const [, ev, payload] = DEMO[demoAt];
-  m.emit(ev, ev === 'pill' ? { hover: false, expand: false, hint: '', drag: false, ball: S.ball_size ?? 1, ...payload } : payload);
-  clearInterval(levelTimer);
-  if (payload.state === 'recording') levelTimer = setInterval(() => m.emit('audio-level', { meter: 0.25 + Math.random() * 0.6, muted: false }), 60);
-  demoAt = (demoAt + 1) % DEMO.length;
-  demoTimer = setTimeout(demoStep, DEMO[demoAt][0]);
-}
-pillPreview.addEventListener('load', () => { sizePreview(); clearTimeout(demoTimer); demoAt = 0; demoStep(); });
-demoStep(); // if the frame loaded before this script ran; it waits for the frame otherwise
+$('#pillShow').addEventListener('click', showPill);
 
 $('#pillHide').addEventListener('click', () => {
   S.pill_hidden_until = S.pill_hidden_until > Date.now() ? 0 : Date.now() + HIDE_MS;

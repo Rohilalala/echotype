@@ -17,6 +17,7 @@
     "opener:default",
     "allow-get-settings",
     "allow-preview-sounds",
+    "allow-show-pill-demo",
     "allow-save-settings",
     "allow-get-presets",
     "allow-set-secret",

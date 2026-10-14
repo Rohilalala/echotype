@@ -288,7 +288,8 @@
           <span class="range"><input type="range" min="1" max="2" step="0.05" data-bind="pill_size" aria-labelledby="pillSizeLabel" /><output id="pillSizeOut" for="pillSizeRow"></output></span></div>
         <div class="row" id="ballSizeRow"><span class="row-text"><span class="row-title" id="ballSizeLabel">Ball size</span><span class="row-desc">The ball that waits at the bottom of the screen.</span></span>
           <span class="range"><input type="range" min="0.6" max="2" step="0.05" data-bind="ball_size" aria-labelledby="ballSizeLabel" /><output id="ballSizeOut" for="ballSizeRow"></output></span></div>
-        <div class="pill-preview" id="pillPreviewRow" aria-hidden="true"><iframe id="pillPreview" src="overlay.html?preview" tabindex="-1" title="Pill preview"></iframe></div>
+        <div class="row" id="pillPreviewRow"><span class="row-text"><span class="row-title">Preview</span><span class="row-desc">The pill acts out a dictation on your screen at this size. Nothing is recorded or pasted.</span></span>
+          <button class="btn" id="pillShow" type="button">Show on screen</button></div>
       </div>
 
       <h2 class="group-title">Audio</h2>

@@ -1047,6 +1047,42 @@ async fn pill_open(app: AppHandle) -> R<()> {
     Ok(())
 }
 
+/// The real pill acts out a dictation: it listens to a made-up voice, thinks, then shows the card.
+/// No microphone, nothing pasted, the last dictation untouched. Settings → Pill "Show on screen"
+/// (and ECHOTYPE_TEST_DEMO for on-screen checks). A real dictation always wins.
+fn pill_demo(app: &AppHandle) {
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    let recording = |h: &AppHandle| state(h).recording.load(Ordering::SeqCst);
+    if recording(app) || RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let h = app.clone();
+    std::thread::spawn(move || {
+        let s = current_settings(&h);
+        emit_state(&h, DictationState { state: "recording", ..Default::default() });
+        for i in 0..50 {
+            if recording(&h) {
+                return RUNNING.store(false, Ordering::SeqCst);
+            }
+            let meter = (0.35 + 0.3 * (i as f32 / 3.0).sin()).clamp(0.0, 1.0);
+            let _ = h.emit("audio-level", audio::Level { meter, ..Default::default() });
+            std::thread::sleep(Duration::from_millis(60));
+        }
+        emit_state(&h, DictationState { state: "transcribing", ..Default::default() });
+        std::thread::sleep(Duration::from_millis(1400));
+        if !recording(&h) {
+            emit_state(&h, card(&s, "Let's move the standup to 10:30 tomorrow.".into(), Some("Nowhere to paste".into()), None));
+        }
+        RUNNING.store(false, Ordering::SeqCst);
+    });
+}
+
+#[tauri::command]
+async fn show_pill_demo(app: AppHandle) -> R<()> {
+    pill_demo(&app);
+    Ok(())
+}
+
 /// Settings → Sounds: plays a pack's start, stop and not-pasted sounds in turn.
 #[tauri::command]
 async fn preview_sounds(app: AppHandle, pack: String) -> R<()> {
@@ -1345,19 +1381,10 @@ pub fn run() {
             // On-screen checks: listening (with a made-up voice level), thinking, then the card,
             // without a microphone, a key press or a paste.
             if std::env::var_os("ECHOTYPE_TEST_DEMO").is_some() {
-                let (h, s) = (app.handle().clone(), s.clone());
+                let h = app.handle().clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_secs(2));
-                    emit_state(&h, DictationState { state: "recording", ..Default::default() });
-                    for i in 0..50 {
-                        let meter = (0.35 + 0.3 * (i as f32 / 3.0).sin()).clamp(0.0, 1.0);
-                        let _ = h.emit("audio-level", audio::Level { meter, ..Default::default() });
-                        std::thread::sleep(Duration::from_millis(60));
-                    }
-                    emit_state(&h, DictationState { state: "transcribing", ..Default::default() });
-                    std::thread::sleep(Duration::from_millis(1500));
-                    *lock(&state(&h).last_output) = Some("Let's move the standup to 10:30 tomorrow.".into());
-                    emit_state(&h, card(&s, "Let's move the standup to 10:30 tomorrow.".into(), Some("Nowhere to paste".into()), None));
+                    pill_demo(&h);
                 });
             }
             std::thread::spawn(move || {
@@ -1417,6 +1444,7 @@ pub fn run() {
             pill_reset,
             pill_copy,
             preview_sounds,
+            show_pill_demo,
             pill_dismiss,
             meeting::meeting_start,
             meeting::meeting_stop,
