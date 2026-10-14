@@ -15,11 +15,14 @@ use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 /// The overlay window: the "nowhere to paste" card plus room for its soft shadow (points). Every
 /// capsule sits on one line ANCHOR above the window's bottom edge; the card grows up from it.
-pub const WIN: (f64, f64) = (260.0, 84.0);
+pub const WIN: (f64, f64) = (300.0, 124.0);
 const ANCHOR: f64 = 16.0;
-/// The card: as wide as the widest notice, the text on one or two 15 pt lines above a 22 pt row (overlay.html).
-const CARD_W: f64 = MAX_W;
-// ponytail: ~7 pt a character at 11 px; a long word wraps sooner, so this errs towards two lines.
+/// The card (overlay.html): a caption row, the text on one or two 16 pt lines, then Copy.
+const CARD_W: f64 = 264.0;
+const CARD_H: f64 = 74.0;
+const CARD_LINE_H: f64 = 16.0;
+// ponytail: ~6.5 pt an average character at 12 px over 242 pt is ~37, but capitals and digits are
+// wider and a long word wraps sooner, so 26 errs towards a two-line (taller) hit area, never a short one.
 const CARD_LINE: usize = 26;
 /// Gap between the tallest capsule and the bottom of the visible frame (or the auto-hidden Dock).
 const MARGIN: f64 = 10.0;
@@ -28,8 +31,14 @@ const MAX_W: f64 = 240.0;
 /// The idle bar is 32x4 to look at and 48x14 to hit.
 const IDLE_HIT: (f64, f64) = (48.0, 14.0);
 /// Recording capsule widths; overlay.html sets the same.
-const REC_W: f64 = 100.0;
-const REC_LOCKED_W: f64 = 112.0;
+const REC_W: f64 = 96.0;
+const REC_LOCKED_W: f64 = 110.0;
+/// The ink "Pasted" / "Copied" capsule is at least this wide; overlay.html sets the same.
+const DONE_W: f64 = 96.0;
+/// "● Meeting · 1:23:45" at its widest (overlay.html caps it there), 20 pt tall like the recording capsule.
+// ponytail: under an hour it draws ~121 pt, so ~10 pt each side catch clicks meant for the app
+// below; size it from the elapsed time if that ever bites.
+const MEET: (f64, f64) = (140.0, 20.0);
 /// Hover must rest this long before the idle bar opens into its hint (D1), so passing over it
 /// on the way to the Dock does nothing.
 const DWELL: Duration = Duration::from_millis(200);
@@ -59,6 +68,8 @@ pub struct Ctx {
     pub main_home: bool,
     /// Show Echotype in the menu bar: the status item is the indicator and the pill never shows.
     pub menubar: bool,
+    /// Echotype's window is key on Meetings, which shows a running meeting itself.
+    pub main_meetings: bool,
 }
 
 impl Ctx {
@@ -78,6 +89,14 @@ pub fn visible(c: &Ctx, active: bool) -> bool {
         return active && !c.main_home;
     }
     active || (c.mac && c.onboarded && c.idle_on && !c.hidden_for_now())
+}
+
+/// On screen for a dictation state, or for a recording meeting the same way, even with the idle
+/// pill off: the loop's one visibility call. The meeting state alone gives way to "Hide for 1
+/// hour" (the menu bar title still shows it) and to the Meetings page, which shows it already.
+pub fn shows(c: &Ctx, active: bool, meeting: bool) -> bool {
+    let meeting = meeting && !c.hidden_for_now() && !(c.main_key && c.main_meetings);
+    visible(c, active || meeting)
 }
 
 /// What the tray's pill item does now (D12/X5).
@@ -172,6 +191,8 @@ pub struct Pill {
     last_tick: Option<Instant>,
     /// The live input level, 0..1 (the menu-bar waveform).
     pub meter: f32,
+    /// Meeting notes are recording: shown whenever no dictation state is.
+    meeting: bool,
     /// What the pill says, for the menu-bar menu.
     said: Option<Said>,
 }
@@ -212,8 +233,16 @@ impl Pill {
                     return false;
                 }
                 // A chip is a second thing to read, so the result stays up longer; the card has
-                // a whole transcript and a button.
-                let linger = Duration::from_millis(if s.card { CARD_FOR } else if s.chip.is_some() { 2500 } else { 1200 });
+                // a whole transcript and a button. "Pasted" is the 900 ms ink moment; "Copied,
+                // ⌘V to paste" is an instruction, so it gets time to be read.
+                let linger = match s.state {
+                    _ if s.card => CARD_FOR,
+                    _ if s.chip.is_some() => 2500,
+                    "done" if s.copied => 1500,
+                    "done" => 900,
+                    _ => 1200,
+                };
+                let linger = Duration::from_millis(linger);
                 // Wide characters (CJK, emoji) count double: about two Latin letters each.
                 let chars = if s.card { s.text.as_deref().unwrap_or_default().chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum() } else { chars };
                 Some(Active { recording: false, locked: false, chars, notice: Some((r, now + linger)), card: s.card })
@@ -229,6 +258,10 @@ impl Pill {
             _ => Some(Said { text: said(s), rank: rank(s), card: s.card }),
         };
         true
+    }
+
+    pub fn set_meeting(&mut self, on: bool) {
+        self.meeting = on;
     }
 
     pub fn set_level(&mut self, muted: bool, meter: f32) {
@@ -274,7 +307,7 @@ impl Pill {
 
     /// Advances the timers with the cursor `inside` the capsule or not. A notice ends after its
     /// linger time, which stands still while the cursor rests on it (D2); the idle bar opens
-    /// into its hint after DWELL of hover. Returns (active, expanded).
+    /// into its hint after DWELL of hover (not while a meeting shows). Returns (active, expanded).
     pub fn tick(&mut self, now: Instant, inside: bool) -> (bool, bool) {
         let dt = self.last_tick.map_or(Duration::ZERO, |t| now.saturating_duration_since(t));
         self.last_tick = Some(now);
@@ -288,7 +321,7 @@ impl Pill {
             }
         }
         self.hover_since = if inside { Some(self.hover_since.unwrap_or(now)) } else { None };
-        let expanded = self.active.is_none() && self.hover_since.is_some_and(|t| now.duration_since(t) >= DWELL);
+        let expanded = self.active.is_none() && !self.meeting && self.hover_since.is_some_and(|t| now.duration_since(t) >= DWELL);
         (self.active.is_some(), expanded)
     }
 
@@ -300,12 +333,15 @@ impl Pill {
     /// The capsule's size in points, from the same state that picks the words (E-A3).
     pub fn capsule(&self, expanded: bool, hint_chars: usize) -> (f64, f64) {
         match self.active {
+            None if self.meeting => MEET,
             None if expanded => (text_w(hint_chars), LINE_H),
             None => IDLE_HIT,
             // ✕ and ✓ (16 pt each) stay either side of the words.
             Some(a) if a.recording && self.muted => (text_w("Is your mic muted?".len()) + 36.0, LINE_H),
             Some(a) if a.recording => (if a.locked { REC_LOCKED_W } else { REC_W }, 20.0),
-            Some(a) if a.card => (CARD_W, 42.0 + 15.0 * if a.chars > CARD_LINE { 2.0 } else { 1.0 }),
+            Some(a) if a.card => (CARD_W, CARD_H + CARD_LINE_H * if a.chars > CARD_LINE { 2.0 } else { 1.0 }),
+            // "Pasted" / "Copied": rank 2 is a result.
+            Some(Active { notice: Some((2, _)), chars, .. }) => (text_w(chars).max(DONE_W), LINE_H),
             Some(a) => (text_w(a.chars), LINE_H),
         }
     }
@@ -411,7 +447,7 @@ pub fn place(work: Rect, dock: f64) -> (f64, f64) {
 
 /// The window's top-left kept inside `work` (a display's visible frame), so no part of the pill,
 /// even the card, can go off-screen, under the menu bar or behind a visible Dock.
-// ponytail: so the idle bar stops ~68 pt below the top edge (room for the card above it); move the
+// ponytail: so the idle bar stops ~108 pt below the top edge (room for the card above it); move the
 // window down while a card is up near the top if that ever bothers anyone.
 pub fn clamp(work: Rect, (x, y): (f64, f64)) -> (f64, f64) {
     (x.clamp(work.x, work.x + (work.w - WIN.0).max(0.0)), y.clamp(work.y, work.y + (work.h - WIN.1).max(0.0)))
@@ -519,6 +555,9 @@ struct View {
     hint: String,
     /// Picked up and moving: the capsule lifts.
     drag: bool,
+    /// Meeting notes are recording, since this time (ms since the epoch): the overlay shows
+    /// "Meeting" and its timer whenever no dictation state outranks it.
+    meeting: Option<u64>,
 }
 
 struct Screen {
@@ -624,6 +663,7 @@ fn ctx(app: &AppHandle, s: &Settings) -> Ctx {
         main_key: state(app).main_key.load(std::sync::atomic::Ordering::SeqCst),
         main_home: state(app).main_home.load(std::sync::atomic::Ordering::SeqCst) || !s.onboarded,
         menubar: in_menu_bar(s),
+        main_meetings: state(app).main_meetings.load(std::sync::atomic::Ordering::SeqCst),
     }
 }
 
@@ -660,9 +700,12 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
             let s = crate::current_settings(&app);
             let c = ctx(&app, &s);
             let hint = hint(&s);
+            // Read before the pill lock, so the two locks are never held together.
+            let meeting = crate::meeting::started_ms();
             let (active, expanded, size, deadline, glyph, meter, line, copy, card) = {
                 let st = state(&app);
                 let mut p = lock(&st.pill);
+                p.set_meeting(meeting.is_some());
                 let (active, expanded) = p.tick(now, inside);
                 let line = p.menu_line().map(String::from);
                 (active, expanded, p.capsule(expanded, hint.chars().count()), p.deadline(), p.glyph(), p.meter, line, p.menu_copy(), p.card_up())
@@ -675,7 +718,7 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
                 let _ = if want_esc { gs.register(crate::escape()) } else { gs.unregister(crate::escape()) };
                 esc = want_esc;
             }
-            let mut want = visible(&c, active);
+            let mut want = shows(&c, active, meeting.is_some());
             let mut near = false;
             let mut held = false;
             let mut dropped: Option<(String, [f64; 2])> = None;
@@ -775,7 +818,7 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
                 shown = want;
             }
             // Picked up, the idle bar is a bar again: the hint is for hovering, not carrying.
-            let view = View { active, hover: inside, expand: expanded && !held, hint, drag: held && lock(&state(&app).drag).is_some_and(|d| d.moved) };
+            let view = View { active, hover: inside, expand: expanded && !held, hint, drag: held && lock(&state(&app).drag).is_some_and(|d| d.moved), meeting };
             if emitted.as_ref() != Some(&view) {
                 let _ = app.emit_to("overlay", "pill", &view);
                 emitted = Some(view);
@@ -983,7 +1026,7 @@ mod tests {
     }
 
     fn ctx() -> Ctx {
-        Ctx { mac: true, onboarded: true, idle_on: true, hidden_until: 0, now_ms: 1_000_000, main_key: false, main_home: false, menubar: false }
+        Ctx { mac: true, onboarded: true, idle_on: true, hidden_until: 0, now_ms: 1_000_000, main_key: false, main_home: false, menubar: false, main_meetings: false }
     }
 
     #[test]
@@ -1085,17 +1128,20 @@ mod tests {
         let mut p = Pill::default();
         assert!(p.on_state(&card("Hello there."), t0));
         assert!(p.card_up());
-        assert_eq!(p.capsule(false, 0), (CARD_W, 57.0), "one line of text");
+        assert_eq!(p.capsule(false, 0), (CARD_W, 90.0), "one line of text");
         assert!(p.tick(ms(5999), false).0, "still up just before 6 s");
         assert!(!p.tick(ms(6000), false).0, "and gone at 6 s");
         assert!(p.menu_copy() && p.menu_line() == Some("Hello there."), "the menu-bar menu keeps it to copy");
 
         let mut p = Pill::default();
         p.on_state(&card(&"word ".repeat(30)), t0);
-        assert_eq!(p.capsule(false, 0), (CARD_W, 72.0), "two lines, then an ellipsis");
-        let mut wide = Pill::default();
-        wide.on_state(&card(&"漢字".repeat(8)), t0);
-        assert_eq!(wide.capsule(false, 0).1, 72.0, "16 wide characters fill two lines");
+        assert_eq!(p.capsule(false, 0), (CARD_W, 106.0), "two lines, then an ellipsis");
+        // The boundary: 26 units is one line, 27 two; a wide character counts as two.
+        for (text, h) in [("x".repeat(26), 90.0), ("x".repeat(27), 106.0), ("漢".repeat(13), 90.0), ("漢".repeat(14), 106.0)] {
+            let mut b = Pill::default();
+            b.on_state(&card(&text), t0);
+            assert_eq!(b.capsule(false, 0).1, h, "{} units", text.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum::<usize>());
+        }
         p.tick(ms(2000), false);
         for t in (2066..=5000).step_by(66) {
             assert!(p.tick(ms(t), true).0, "paused while hovered (at {t} ms)");
@@ -1214,9 +1260,18 @@ mod tests {
         let ms = |n| t0 + Duration::from_millis(n);
         let mut p = Pill::default();
         assert!(p.on_state(&DictationState { state: "done", ..Default::default() }, t0));
-        assert_eq!(p.tick(ms(1000), false), (true, false));
-        assert_eq!(p.tick(ms(1199), false).0, true);
-        assert_eq!(p.tick(ms(1200), false).0, false, "1.2 s without a chip");
+        assert_eq!(p.tick(ms(800), false), (true, false));
+        assert_eq!(p.tick(ms(899), false).0, true);
+        assert_eq!(p.capsule(false, 0), (DONE_W, LINE_H), "the ink capsule's hit area is as wide as it is drawn");
+        assert_eq!(p.tick(ms(900), false).0, false, "Pasted: the 900 ms ink moment");
+
+        let mut p = Pill::default();
+        p.on_state(&DictationState { state: "done", copied: true, ..Default::default() }, t0);
+        assert!(p.tick(ms(1400), false).0 && !p.tick(ms(1500), false).0, "Copied, ⌘V to paste: long enough to read");
+
+        let mut p = Pill::default();
+        p.on_state(&DictationState { state: "hint", message: Some("Didn't catch that".into()), ..Default::default() }, t0);
+        assert!(p.tick(ms(1100), false).0 && !p.tick(ms(1200), false).0, "a hint: 1.2 s");
 
         let mut p = Pill::default();
         p.on_state(&DictationState { state: "done", chip: Some("no_cleanup"), ..Default::default() }, t0);
@@ -1227,8 +1282,50 @@ mod tests {
         p.tick(ms(500), false);
         p.tick(ms(1500), true); // a second on it
         assert!(p.tick(ms(2100), true).0, "paused while hovered");
-        assert!(p.tick(ms(2300), false).0 && !p.tick(ms(2900), false).0, "the remaining time runs once the cursor leaves");
+        assert!(p.tick(ms(2300), false).0 && !p.tick(ms(2600), false).0, "the remaining time runs once the cursor leaves");
         assert!(p.deadline().is_none());
+    }
+
+    #[test]
+    fn a_meeting_shows_whenever_no_dictation_state_outranks_it() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let mut p = Pill::default();
+        p.set_meeting(true);
+        assert_eq!(p.capsule(false, 32), MEET);
+        assert_eq!(p.tick(t0, true), (false, false));
+        assert_eq!(p.tick(ms(400), true), (false, false), "hovering a meeting never opens the dictation hint");
+        // Dictating during a meeting: every dictation state and its notice come first.
+        p.on_state(&st("recording"), ms(500));
+        assert_eq!(p.capsule(false, 32), (REC_W, 20.0));
+        p.on_state(&st("transcribing"), ms(600));
+        assert_eq!(p.capsule(false, 32).1, LINE_H);
+        p.on_state(&st("done"), ms(700));
+        assert_eq!(p.capsule(false, 32), (DONE_W, LINE_H), "Pasted shows over the meeting");
+        assert!(!p.on_state(&st("idle"), ms(800)), "the notice still lingers");
+        assert_eq!(p.tick(ms(1600), false), (false, false));
+        assert_eq!(p.capsule(false, 32), MEET, "and the meeting comes back once it ends");
+        // An error or the card outrank it the same way, and the menu-bar glyph ignores it.
+        p.on_state(&DictationState { state: "error", error: Some("Microphone access is off".into()), ..Default::default() }, ms(2000));
+        assert_ne!(p.capsule(false, 32), MEET);
+        assert_eq!(p.glyph(), Glyph::Warning);
+        p.tick(ms(5000), false);
+        assert_eq!((p.capsule(false, 32), p.glyph()), (MEET, Glyph::Idle), "the menu bar shows the meeting in its title, not its glyph");
+        p.set_meeting(false);
+        assert_eq!(p.capsule(false, 32), IDLE_HIT);
+        p.tick(ms(5300), true);
+        assert_eq!(p.tick(ms(5500), true), (false, true), "without a meeting the hint opens again");
+        // On screen while it records, even with the idle pill off.
+        let c = Ctx { idle_on: false, ..ctx() };
+        assert!(shows(&c, false, true) && !shows(&c, false, false), "a meeting alone keeps the pill up");
+        assert!(!shows(&Ctx { menubar: true, ..c }, false, true), "menu-bar mode: the title carries it");
+        let hidden = Ctx { hidden_until: c.now_ms + 1, ..c };
+        assert!(!shows(&hidden, false, true), "Hide for 1 hour hides the meeting state too");
+        assert!(shows(&hidden, true, true), "but never a dictation");
+        let meetings = Ctx { main_key: true, main_meetings: true, ..c };
+        assert!(!shows(&meetings, false, true), "Meetings shows the running meeting itself");
+        assert!(shows(&Ctx { main_meetings: false, ..meetings }, false, true), "other pages still get the pill");
+        assert!(shows(&meetings, true, true), "a dictation still shows over Meetings");
     }
 
     #[test]
@@ -1292,15 +1389,16 @@ mod tests {
         assert_eq!(retina, Rect { x: 0.0, y: 0.0, w: 1512.0, h: 982.0 });
         // The pill bottom-centre of the external visible frame (menu bar 25 pt, no Dock).
         let at = place(Rect { x: 1512.0, y: -675.0, w: 2560.0, h: 1575.0 }, 0.0);
-        assert_eq!(at, (2662.0, 1575.0 - 675.0 - 10.0 - 79.0));
+        assert_eq!(at, (2642.0, 1575.0 - 675.0 - 10.0 - 119.0));
         let r = capsule_rect(at, IDLE_HIT);
         assert_eq!((r.x, r.w), (2768.0, 48.0));
         // Every line capsule's bottom sits MARGIN above the visible frame; the card grows up from it.
         let line_bottom = |size: (f64, f64)| { let r = capsule_rect(at, size); r.y + r.h };
         assert_eq!(line_bottom((MAX_W, LINE_H)), 1575.0 - 675.0 - 10.0);
-        assert_eq!(line_bottom((CARD_W, 72.0)), 1575.0 - 675.0 - 10.0);
+        assert_eq!(line_bottom((CARD_W, 106.0)), 1575.0 - 675.0 - 10.0);
         assert_eq!(capsule_rect(at, IDLE_HIT).y + 7.0, capsule_rect(at, (REC_W, 20.0)).y + 10.0, "every capsule centred on one line");
-        assert!(capsule_rect(at, (CARD_W, 72.0)).y >= at.1, "the card fits in the window");
+        assert!(capsule_rect(at, (CARD_W, 106.0)).y >= at.1 + 12.0, "the card and its shadow fit in the window");
+        assert!(WIN.0 - CARD_W >= 2.0 * 12.0 && capsule_rect(at, MEET).y + 10.0 == capsule_rect(at, IDLE_HIT).y + 7.0);
         // The cursor on the capsule centre, as Tauri reports it: points x PRIMARY scale (2), not 1.
         let centre = (r.x + 24.0, r.y + 7.0);
         let phys = (centre.0 * 2.0, centre.1 * 2.0);

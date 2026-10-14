@@ -6,6 +6,29 @@
 <title>Echotype overlay</title>
 <link rel="icon" href="data:," />
 <style>
+  /* Foundry, always the dark tokens: the pill sits on any wallpaper. Text on the black 75% glass
+     stays at least 80% white (secondary) so it passes 4.5:1 even over a white wallpaper. */
+  :root {
+    --glass: rgba(0, 0, 0, 0.75);
+    --edge: rgba(255, 255, 255, 0.18);
+    --text: #E3E4E2;
+    --text-2: rgba(227, 228, 226, 0.8);
+    --ink: #7FA3C9;
+    --on-ink: #10202F;
+    --molten: #C9925A;
+    /* Marsala lifted toward the text colour, so an error line still reads 4.5:1 over a light wallpaper. */
+    --error: color-mix(in oklab, #C78381 60%, #E3E4E2);
+    --warning: #D2B356;
+    /* Short and tight: a capsule sits 5 px above the window's bottom edge, which would cut a
+       longer shadow into a hard line. */
+    --lift: 0 0 0 1px var(--edge), 0 1px 4px rgba(0, 0, 0, 0.28);
+    /* TODO(foundry-fonts): Recursive (MONO 1, CASL 0 for numerals; proportional CASL 0 for the
+       transcript) once the UI branch adds its files under app/src/fonts/. Until then the system
+       mono with tabular figures, and SF Pro for the card's text. */
+    --num: ui-monospace, "SF Mono", Menlo, monospace;
+    --words: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    --keys: "SF Mono", ui-monospace, Menlo, monospace;
+  }
   html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
   /* Every capsule is centred on one line 16 px above the window's bottom edge (pill.rs ANCHOR),
      so the margins below differ by height; the card grows up from that line. */
@@ -20,9 +43,10 @@
     user-select: none;
     cursor: default;
   }
-  /* Sizes match pill.rs (its hit areas): idle 32x4 (hit 48x14), recording 100 or 112 x 20,
-     any line of text 22 tall and at most 240 wide. Black 75%; the idle bar adds a 1 px white
-     hairline so it reads on dark wallpapers, the active states a soft shadow. */
+  .num { font-family: var(--num); font-variant-numeric: tabular-nums; letter-spacing: 0; }
+  /* Sizes match pill.rs (its hit areas): idle 32x4 (hit 48x14), recording 96 or 110 x 20, Pasted
+     at least 96 x 20, meeting at most 140 x 20, any other line of text 22 tall and at most 240
+     wide, the card 264 wide. */
   .pill {
     display: flex;
     align-items: center;
@@ -35,39 +59,41 @@
     box-sizing: border-box;
     margin-bottom: 14px;
     position: relative;
-    border-radius: 11px;
-    background: rgba(0, 0, 0, 0.75);
-    color: rgba(255, 255, 255, 0.94);
-    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18), 0 1px 4px rgba(0, 0, 0, 0.12);
+    border-radius: 2px;
+    background: var(--glass);
+    color: var(--text);
+    box-shadow: 0 0 0 1px var(--edge);
     overflow: hidden;
-    transition: transform 0.12s ease, box-shadow 0.12s ease;
+    transition: transform 0.12s ease-in-out, box-shadow 0.12s ease-out, background-color 0.12s ease-out, color 0.12s ease-out;
   }
   .pill > * { display: none; }
   /* Picked up: a little larger with a lift shadow, so it reads as held while it moves. */
-  .pill.drag { transform: scale(1.15); box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18), 0 3px 9px rgba(0, 0, 0, 0.3); }
-  /* A line of text can be 240 wide in a 260 window: it lifts less, so it is never cut off. */
-  .pill.drag.active:not([data-state="recording"]) { transform: scale(1.06); }
-  /* Idle, hovered for 200 ms: the hint. */
-  .pill.expand { width: auto; height: 22px; margin-bottom: 5px; padding: 0 10px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.16); }
+  .pill.drag { transform: scale(1.15); box-shadow: 0 0 0 1px var(--edge), 0 2px 6px rgba(0, 0, 0, 0.34); }
+  /* A line of text or the card lifts less, so it is never cut off by the window. */
+  .pill.drag:is(.active, .meeting):not([data-state="recording"]) { transform: scale(1.06); }
+  /* Idle, hovered for 200 ms: the hint, in SF Pro 11. */
+  .pill.expand { width: auto; height: 22px; margin-bottom: 5px; padding: 0 10px; border-radius: 11px; box-shadow: var(--lift); }
   .pill.expand .label { display: block; }
   /* Any dictation state: a line of text plus at most one chip. */
-  .pill.active { width: auto; height: 22px; margin-bottom: 5px; padding: 0 10px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.16); }
+  .pill.active { width: auto; height: 22px; margin-bottom: 5px; padding: 0 10px; border-radius: 11px; box-shadow: var(--lift); }
   .pill.active .label, .pill.active .secs { display: block; }
-  .secs { white-space: nowrap; flex: none; color: rgba(255, 255, 255, 0.62); font-variant-numeric: tabular-nums; }
+  .secs { white-space: nowrap; flex: none; color: var(--text-2); }
+  .pill.active .secs:empty { display: none; } /* or the gap before a chip doubles */
   .pill.active .chip:not([hidden]) { display: block; }
-  /* Listening: ✕, waveform, timer (a lock glyph in front once hands-free), ✓. */
-  .pill.active[data-state="recording"] { width: 100px; height: 20px; margin-bottom: 6px; padding: 0 2px; gap: 0; justify-content: space-between; border-radius: 10px; }
-  .pill.active[data-state="recording"].locked { width: 112px; }
-  .pill.active[data-state="recording"] .label, .pill.active[data-state="recording"] .chip { display: none; }
-  .pill.active[data-state="recording"] :is(.btn, .wave, .meta) { display: flex; }
-  .pill.active[data-state="recording"].muted { width: auto; height: 22px; margin-bottom: 5px; gap: 4px; padding: 0 10px; }
-  .pill.active[data-state="recording"].muted .wave, .pill.active[data-state="recording"].muted .meta { display: none; }
+
+  /* Listening: ✕, the needle meter, the time (a lock in front once hands-free), ✓. */
+  .pill.active[data-state="recording"] { width: 96px; height: 20px; margin-bottom: 6px; padding: 0 2px; gap: 0; justify-content: space-between; border-radius: 10px; }
+  .pill.active[data-state="recording"].locked { width: 110px; }
+  .pill.active[data-state="recording"] :is(.label, .secs, .chip) { display: none; }
+  .pill.active[data-state="recording"] :is(.btn, .live) { display: flex; }
+  .pill.active[data-state="recording"].muted { width: auto; height: 22px; margin-bottom: 5px; gap: 4px; padding: 0 10px; border-radius: 11px; }
+  .pill.active[data-state="recording"].muted .live { display: none; }
   .pill.active[data-state="recording"].muted .label { display: block; }
 
   .btn {
     width: 16px; height: 16px; flex: none; padding: 0; border: 0; border-radius: 8px;
     align-items: center; justify-content: center;
-    background: transparent; color: rgba(255, 255, 255, 0.85);
+    background: transparent; color: var(--text);
     opacity: 0; transition: opacity 0.12s ease-out, background-color 0.12s ease-out;
   }
   .btn svg { width: 8px; height: 8px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
@@ -76,47 +102,73 @@
   /* D5: hands-free has no key to let go of, so ✓ stays in sight. */
   .pill.locked .btn.ok { opacity: 1; background: rgba(255, 255, 255, 0.16); }
 
-  .wave { align-items: center; gap: 1.5px; height: 12px; flex: none; }
-  .wave i { width: 1.5px; height: 100%; border-radius: 1px; background: currentColor; transform: scaleY(0.12); transition: transform 0.08s linear; }
-  .meta { align-items: center; gap: 3px; flex: none; }
-  .time { font-size: 10px; font-variant-numeric: tabular-nums; color: rgba(255, 255, 255, 0.62); letter-spacing: 0.01em; }
-  .lock { width: 9px; height: 9px; display: none; }
-  .lock svg { width: 9px; height: 9px; fill: none; stroke: rgba(255, 255, 255, 0.8); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; display: block; }
+  /* One hairline needle over five ticks, pivoting below the capsule like a VU meter. */
+  .live { align-items: center; gap: 4px; flex: none; }
+  .meter { width: 28px; height: 16px; display: block; overflow: hidden; }
+  .meter .tick { stroke: rgba(255, 255, 255, 0.34); stroke-width: 0.75; }
+  .needle { stroke: var(--molten); stroke-width: 1; stroke-linecap: round; transform-box: view-box; transform-origin: 21px 19px; transform: rotate(-48deg); }
+  .time { font-size: 10px; color: var(--text-2); }
+  .lock { width: 9px; height: 9px; display: none; flex: none; }
+  .lock svg { width: 9px; height: 9px; fill: none; stroke: var(--text-2); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; display: block; }
   .pill.locked .lock { display: block; }
 
   /* The primary line keeps its words; the chip gives way first. */
-  .label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 0 auto; max-width: 100%; letter-spacing: 0; }
-  .chip { white-space: nowrap; color: rgba(255, 255, 255, 0.6); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .chip::before { content: "·"; margin-right: 6px; color: rgba(255, 255, 255, 0.35); }
-  .chip[data-chip="too_quiet"] { color: #ffd59a; }
-  .pill[data-state="error"] .label { color: #ffd59a; }
-  .pill[data-state="transcribing"] .label, .pill[data-state="cleaning"] .label { color: rgba(255, 255, 255, 0.8); }
+  /* 14 px lines, so overflow: hidden never clips a descender (the "g" of Meeting). */
+  .label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 0 auto; max-width: 100%; letter-spacing: 0; line-height: 14px; }
+  .chip { line-height: 14px; white-space: nowrap; color: var(--text-2); font-weight: 400; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .chip::before { content: "·"; margin-right: 6px; opacity: 0.5; }
+  .chip[data-chip="too_quiet"] { color: var(--warning); }
+  .pill[data-state="error"] .label { color: var(--error); }
+  .pill[data-state="transcribing"] .label, .pill[data-state="cleaning"] .label { color: var(--text-2); }
 
-  /* Nowhere to paste: the transcript (two lines at most), a 6 s countdown ring, the paste-last
-     shortcut and Copy, which is the one thing to do here, so it is the only filled control.
-     Sizes match pill.rs (CARD_W, 42 + 15 per line). */
-  .pill.active.card { flex-direction: column; align-items: stretch; width: 240px; height: auto; padding: 8px 10px 6px; gap: 6px; border-radius: 10px; transform-origin: 50% 100%; animation: card-in 0.16s ease-out; }
+  /* The paste moment: settled text turns the capsule ink, "Pasted" for 900 ms (pill.rs). */
+  .pill.active[data-state="done"]:not(.card) { min-width: 96px; height: 20px; margin-bottom: 6px; border-radius: 10px; background: var(--ink); color: var(--on-ink); box-shadow: 0 0 0 1px rgba(16, 32, 47, 0.25), 0 1px 4px rgba(0, 0, 0, 0.28); }
+  .pill.active[data-state="done"]:not(.card) .label { font-weight: 600; }
+  .pill.active[data-state="done"]:not(.card) .chip { color: var(--on-ink); }
+
+  /* A meeting is recording: a molten dot because audio is live, and its running time. */
+  .pill.meeting { width: auto; max-width: 140px; height: 20px; margin-bottom: 6px; padding: 0 10px; border-radius: 10px; box-shadow: var(--lift); }
+  /* Hovered: it opens Meetings on a click, so it lifts toward the text colour (Foundry hover, 14%). */
+  .pill.meeting.hover { background: color-mix(in oklab, var(--glass) 86%, var(--text)); }
+  .pill.meeting.hover .mtime { color: var(--text); }
+  .pill.meeting :is(.dot, .label, .mtime) { display: block; }
+  .dot { width: 5px; height: 5px; flex: none; border-radius: 50%; background: var(--molten); }
+  .mtime { white-space: nowrap; color: var(--text-2); }
+  .mtime::before { content: "·"; margin-right: 6px; opacity: 0.5; font-family: -apple-system, system-ui, sans-serif; }
+
+  /* Nowhere to paste: why, the transcript (two lines at most), Copy as the one quiet button, the
+     paste-last keys, ✕ inside its 6 s ink ring. Sizes match pill.rs (CARD_W, CARD_H + 16 a line). */
+  .pill.active.card { flex-direction: column; align-items: stretch; justify-content: flex-start; width: 264px; max-width: none; height: auto; padding: 9px 10px 11px 12px; gap: 0; border-radius: 10px; transform-origin: 50% 100%; animation: card-in 0.16s ease-out; }
   .pill.active.card :is(.label, .secs, .chip) { display: none; }
   .pill.active.card .ctext { display: -webkit-box; }
-  .pill.active.card .crow, .pill.active.card .close { display: flex; }
-  .ctext { -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; white-space: normal; line-height: 15px; padding-right: 18px; color: rgba(255, 255, 255, 0.94); }
-  .crow { align-items: center; gap: 6px; height: 22px; }
-  .ring { width: 12px; height: 12px; flex: none; }
-  .ring circle { fill: none; stroke-width: 1.5; }
+  .pill.active.card :is(.ctop, .crow) { display: flex; }
+  .ctop { align-items: center; justify-content: space-between; gap: 8px; height: 20px; }
+  .ccap { line-height: 14px; color: var(--text-2); font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .ctext { margin-top: 4px; font: 400 12px/16px var(--words); -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; white-space: normal; color: var(--text); }
+  .crow { align-items: center; gap: 10px; height: 22px; margin-top: 8px; }
+  /* Translucent white, not an opaque raised tone: about #2A2E33 over dark wallpapers, and still a
+     step lighter than the glass over a light one. */
+  .copy { height: 22px; padding: 0 9px; border: 0; border-radius: 6px; background: rgba(255, 255, 255, 0.12); color: var(--text); font: inherit; }
+  .copy:hover { background: rgba(255, 255, 255, 0.18); }
+  .copy:active { background: rgba(255, 255, 255, 0.24); }
+  .ckey { display: flex; align-items: center; gap: 2px; white-space: nowrap; color: var(--text-2); font-weight: 400; }
+  .ckey:empty { display: none; }
+  .ckey kbd { margin-left: 2px; min-width: 15px; height: 15px; box-sizing: border-box; padding: 0 3px; display: inline-flex; align-items: center; justify-content: center; font: 400 9.5px/1 var(--keys); color: var(--text); background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.16); border-radius: 4px; }
+  .ckey kbd:first-of-type { margin-left: 6px; }
+  .close { position: relative; width: 20px; height: 20px; flex: none; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--text-2); display: grid; place-items: center; }
+  .close:hover { color: var(--text); background: rgba(255, 255, 255, 0.1); }
+  .close svg { position: absolute; inset: 0; width: 20px; height: 20px; fill: none; }
+  .ring circle { stroke-width: 1.2; }
   .ring .track { stroke: rgba(255, 255, 255, 0.18); }
-  .ring .left { stroke: rgba(255, 255, 255, 0.7); stroke-dasharray: 28.27; transform: rotate(-90deg); transform-origin: 6px 6px; animation: ring 6s linear forwards; }
+  .ring .left { stroke: var(--ink); stroke-dasharray: 53.41; transform: rotate(-90deg); transform-origin: 10px 10px; animation: ring 6s linear forwards; }
+  .close path { stroke: currentColor; stroke-width: 1.3; stroke-linecap: round; }
   .pill.hover .ring .left { animation-play-state: paused; }
-  .ckey { white-space: nowrap; color: rgba(255, 255, 255, 0.62); }
-  .copy { margin-left: auto; height: 20px; padding: 0 9px; border: 0; border-radius: 6px; background: rgba(255, 255, 255, 0.16); color: rgba(255, 255, 255, 0.94); font: inherit; }
-  .copy:hover { background: rgba(255, 255, 255, 0.24); }
-  .pill.active.card .close { position: absolute; top: 6px; right: 6px; opacity: 0.7; }
-  .pill.active.card .close:hover { opacity: 1; background: rgba(255, 255, 255, 0.16); }
   @keyframes card-in { from { transform: scale(0.94); opacity: 0; } }
-  @keyframes ring { to { stroke-dashoffset: 28.27; } }
+  @keyframes ring { to { stroke-dashoffset: 53.41; } }
 
   @media (prefers-reduced-motion: reduce) {
     .pill.active.card { animation: none; }
-    .btn, .wave i, .pill { transition: none; }
+    .btn, .pill { transition: none; }
     .pill.drag { transform: none; }
   }
 </style>
@@ -124,15 +176,16 @@
 <body>
   <div class="pill" id="pill" data-state="idle" role="group" aria-label="Start dictation">
     <button class="btn x" type="button" data-act="cancel" aria-label="Cancel dictation" title="Cancel"><svg viewBox="0 0 8 8"><path d="M1 1l6 6M7 1L1 7"/></svg></button>
-    <span class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
-    <span class="meta"><span class="lock" role="img" aria-label="Locked, hands-free"><svg viewBox="0 0 10 10"><rect x="1.5" y="4.5" width="7" height="4.5" rx="1"/><path d="M3 4.5V3a2 2 0 0 1 4 0v1.5"/></svg></span><span class="time" id="time"></span></span>
+    <span class="live"><svg class="meter" viewBox="7 0 28 16" aria-hidden="true"><line class="tick" x1="9.85" y1="8.96" x2="7.99" y2="7.29"/><line class="tick" x1="14.9" y1="5.3" x2="13.88" y2="3.01"/><line class="tick" x1="21" y1="4" x2="21" y2="1.5"/><line class="tick" x1="27.1" y1="5.3" x2="28.12" y2="3.01"/><line class="tick" x1="32.15" y1="8.96" x2="34.01" y2="7.29"/><line class="needle" id="needle" x1="21" y1="19" x2="21" y2="1.5"/></svg><span class="lock" role="img" aria-label="Locked, hands-free"><svg viewBox="0 0 10 10"><rect x="1.5" y="4.5" width="7" height="4.5" rx="1"/><path d="M3 4.5V3a2 2 0 0 1 4 0v1.5"/></svg></span><span class="time num" id="time"></span></span>
+    <span class="dot" aria-hidden="true"></span>
     <span class="label" id="label" role="status" aria-live="polite"></span>
-    <span class="secs" id="secs" aria-hidden="true"></span>
+    <span class="secs num" id="secs" aria-hidden="true"></span>
+    <span class="mtime num" id="mtime" aria-hidden="true"></span>
     <span class="chip" id="chip" hidden></span>
     <button class="btn ok" type="button" data-act="finish" aria-label="Finish dictation" title="Finish"><svg viewBox="0 0 8 8"><path d="M1 4.2l2 2L7 1.8"/></svg></button>
+    <span class="ctop"><span class="ccap" id="ccap"></span><button class="close" type="button" data-act="close" aria-label="Close" title="Close"><svg class="ring" viewBox="0 0 20 20" aria-hidden="true"><circle class="track" cx="10" cy="10" r="8.5"/><circle class="left" id="ringLeft" cx="10" cy="10" r="8.5"/></svg><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7.2 7.2l5.6 5.6M12.8 7.2l-5.6 5.6"/></svg></button></span>
     <span class="ctext" id="ctext"></span>
-    <span class="crow"><svg class="ring" viewBox="0 0 12 12" aria-hidden="true"><circle class="track" cx="6" cy="6" r="4.5"/><circle class="left" id="ringLeft" cx="6" cy="6" r="4.5"/></svg><span class="ckey" id="ckey"></span><button class="copy" id="copy" type="button" data-act="copy">Copy</button></span>
-    <button class="btn close" type="button" data-act="close" aria-label="Close" title="Close"><svg viewBox="0 0 8 8"><path d="M1 1l6 6M7 1L1 7"/></svg></button>
+    <span class="crow"><button class="copy" id="copy" type="button" data-act="copy">Copy</button><span class="ckey" id="ckey"></span></span>
   </div>
 <script type="module" src="overlay.js"></script>
 </body>
