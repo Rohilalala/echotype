@@ -4,7 +4,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const RATE: u32 = 16_000;
 /// Refuse to transcribe more than this (a 25 MB Opus file can hold many hours).
@@ -419,6 +419,10 @@ pub fn windows_db(pcm: &[f32], rate: u32) -> Vec<f32> {
 }
 
 /// A running capture. The cpal stream lives on its own thread (it is !Send on macOS).
+/// A just-opened microphone that delivers nothing for this long is reopened (see Recorder::start).
+const STALL: Duration = Duration::from_millis(700);
+const MAX_REOPENS: u32 = 2;
+
 pub struct Recorder {
     stop: mpsc::Sender<()>,
     handle: JoinHandle<(Vec<f32>, u32)>,
@@ -433,7 +437,7 @@ impl Recorder {
         let handle = std::thread::spawn(move || {
             let buf = Arc::new(Mutex::new(Vec::<f32>::with_capacity(48_000 * 30)));
             let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let (stream, rate) = match open_stream(device, buf.clone(), lost.clone()) {
+            let (mut stream, mut rate) = match open_stream(device.clone(), buf.clone(), lost.clone()) {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = ready_tx.send(Err(e));
@@ -441,12 +445,47 @@ impl Recorder {
                 }
             };
             let _ = ready_tx.send(Ok(()));
-            let window = (rate as usize / WINDOWS_PER_SEC).max(1);
+            let (mut seen, mut live_at, mut reopens, mut ever_live) = (0usize, Instant::now(), 0, false);
             while let Err(mpsc::RecvTimeoutError::Timeout) = stop_rx.recv_timeout(Duration::from_millis(50)) {
-                let db = {
+                let window = (rate as usize / WINDOWS_PER_SEC).max(1);
+                // New audio that isn't pure digital silence: the device is delivering.
+                let (fresh, db) = {
                     let b = buf.lock().unwrap_or_else(|e| e.into_inner());
-                    dbfs(&b[b.len().saturating_sub(window)..])
+                    let tail = &b[b.len().saturating_sub(window)..];
+                    (b.len() > seen && tail.iter().any(|&x| x != 0.0), dbfs(tail))
                 };
+                if fresh {
+                    seen = buf.lock().unwrap_or_else(|e| e.into_inner()).len();
+                    live_at = Instant::now();
+                    ever_live = true;
+                } else if ever_live {
+                    // Delivering, just quiet: a pause, measured as usual.
+                } else if reopens < MAX_REOPENS && live_at.elapsed() >= STALL {
+                    // Nothing for STALL: an idle Bluetooth mic (AirPods) switches into headset mode
+                    // when it is opened and changes its format under the stream, which then delivers
+                    // nothing (or zeros) until reopened. Reopen it as it is now; keep what was heard.
+                    reopens += 1;
+                    live_at = Instant::now();
+                    drop(std::mem::replace(&mut stream, match open_stream(device.clone(), buf.clone(), lost.clone()) {
+                        Ok((s, r)) => {
+                            let mut b = buf.lock().unwrap_or_else(|e| e.into_inner());
+                            if r != rate && !b.is_empty() {
+                                *b = resample(&b, rate, r);
+                            }
+                            seen = b.len();
+                            rate = r;
+                            eprintln!("echotype: the microphone delivered nothing, reopened it ({r} Hz)");
+                            s
+                        }
+                        Err(e) => {
+                            eprintln!("echotype: could not reopen the microphone: {e}");
+                            continue;
+                        }
+                    }));
+                    continue;
+                } else if reopens < MAX_REOPENS {
+                    continue; // still waking up: not silence, so no "Is your mic muted?" yet
+                }
                 on_window(db, lost.load(std::sync::atomic::Ordering::SeqCst));
             }
             drop(stream);
