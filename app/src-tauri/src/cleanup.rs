@@ -504,6 +504,47 @@ mod tests {
         crate::llm::stop();
     }
 
+    /// Dictation latency the way the app sees it, for the memory-pressure runs: models loaded once,
+    /// two warm dictations, then ECHOTYPE_TEST_IDLE_S seconds idle (an outside memhog.py applies
+    /// pressure meanwhile; the cleaner's resident MB is printed every 5 s), then the first dictation
+    /// after idle. ECHOTYPE_TEST_WAV=<speech> ECHOTYPE_TEST_MEMORY=save|ready
+    /// `cargo test --release -- --ignored --nocapture latency_after_idle`
+    #[test]
+    #[ignore]
+    fn latency_after_idle() {
+        let Ok(wav) = std::env::var("ECHOTYPE_TEST_WAV") else { return eprintln!("skipped: no ECHOTYPE_TEST_WAV") };
+        let pcm = crate::audio::decode(std::fs::read(wav).unwrap(), Some("wav")).unwrap();
+        let mut s = echotype();
+        s.advanced = true;
+        s.stt.local_model = stt::local_model(&Settings::default());
+        s.cleaner_memory = std::env::var("ECHOTYPE_TEST_MEMORY").unwrap_or("save".into());
+        let idle: u64 = std::env::var("ECHOTYPE_TEST_IDLE_S").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+        stt::warm_up(&s);
+        llm::apply(&s);
+        let run = |label: &str| {
+            let t = Instant::now();
+            let o = run(&s, &pcm, true, || {}).unwrap();
+            eprintln!("{label}: stt {} ms, cleanup {} ms, total {} ms{}", o.stt_ms, o.cleanup_ms, t.elapsed().as_millis(), o.warning.map(|w| format!(" ({w})")).unwrap_or_default());
+        };
+        run("warm 1");
+        run("warm 2");
+        let server_rss = || {
+            let out = std::process::Command::new("pgrep").args(["-P", &std::process::id().to_string(), "llama-server"]).output().unwrap();
+            let pid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let rss = std::process::Command::new("ps").args(["-o", "rss=", "-p", &pid]).output().unwrap();
+            String::from_utf8_lossy(&rss.stdout).trim().parse::<u64>().unwrap_or(0) / 1024
+        };
+        eprintln!("IDLE {idle} s, cleaner resident {} MB", server_rss());
+        for _ in 0..idle / 5 {
+            std::thread::sleep(Duration::from_secs(5));
+            eprintln!("  cleaner resident {} MB, free {} MB", server_rss(), stt::ram_mb().1);
+        }
+        run("first after idle");
+        run("warm again");
+        llm::stop();
+        stt::unload();
+    }
+
     #[test]
     fn spoken_new_line_and_paragraph_become_breaks() {
         assert_eq!(spoken_breaks("a new line b"), "a\nb");
