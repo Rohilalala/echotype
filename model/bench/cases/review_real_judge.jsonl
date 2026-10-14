@@ -298,3 +298,23 @@
 {"id": "fleurs_fr/70025853428893411", "verdict": "ok", "cls": null, "note": ""}
 {"id": "fleurs_fr/5966379070489957427", "verdict": "ok", "cls": null, "note": ""}
 {"id": "fleurs_fr/8958768754376202232", "verdict": "minor", "cls": null, "note": ""}
+{"id": "peoples_speech/Peters_Township_Council_-_Regular_Meeting_-_December_19_2016_Peters_Township_Cou-8146e02cf90f", "verdict": "minor", "cls": null, "note": ""}
+{"id": "peoples_speech/Richmond_Water_Sewer_Cmsn._3-16-15_Richmond_Water_Sewer_Cmsn_DOT__3-16-15_Richmo-a860bb42ea5d", "verdict": "minor", "cls": null, "note": ""}
+{"id": "peoples_speech/Fishfrom1945_2_Fishfrom1945_2_Fishfrom1945_2_DOT_flac_00115.flac", "verdict": "critical", "cls": "dropped", "note": "'swordfish with a rod and line certainly' dropped"}
+{"id": "peoples_speech/Passive_Houses_Presentation_Passive_Houses_Presentation_Passive_Houses_Presentat-c07fe078a1aa", "verdict": "minor", "cls": null, "note": ""}
+{"id": "peoples_speech/Peters_Township_Council_-_Regular_Meeting_-_December_19_2016_Peters_Township_Cou-c3fcde3ad67d", "verdict": "minor", "cls": null, "note": ""}
+{"id": "peoples_speech/Let_s_Talk_Healthy_Pets_-_The_Body_Shape_Diet_-_Part_2_Let_s_Talk_Healthy_Pets_--94ba8ab7932e", "verdict": "ok", "cls": null, "note": ""}
+{"id": "peoples_speech/Passive_Houses_Presentation_Passive_Houses_Presentation_Passive_Houses_Presentat-809cb58a41c2", "verdict": "minor", "cls": null, "note": ""}
+{"id": "peoples_speech/Passive_Houses_Presentation_Passive_Houses_Presentation_Passive_Houses_Presentat-95871e8da12b", "verdict": "minor", "cls": null, "note": ""}
+{"id": "peoples_speech/Let_s_Talk_Healthy_Pets_-_The_Body_Shape_Diet_-_Part_2_Let_s_Talk_Healthy_Pets_--6fd28620260d", "verdict": "minor", "cls": null, "note": ""}
+{"id": "peoples_speech/Peters_Township_Council_-_Regular_Meeting_-_December_19_2016_Peters_Township_Cou-d6c945da4541", "verdict": "ok", "cls": null, "note": ""}
+{"id": "peoples_speech/ZBA040416CL19_ZBA040416CL19_ZBA_040416-CL19_DOT_flac_00012.flac", "verdict": "minor", "cls": null, "note": ""}
+{"id": "peoples_speech/Fishfrom1945_2_Fishfrom1945_2_Fishfrom1945_2_DOT_flac_00103.flac", "verdict": "ok", "cls": null, "note": ""}
+{"id": "peoples_speech/ZBA040416CL19_ZBA040416CL19_ZBA_040416-CL19_DOT_flac_00000.flac", "verdict": "minor", "cls": null, "note": ""}
+{"id": "peoples_speech/ZBA040416CL19_ZBA040416CL19_ZBA_040416-CL19_DOT_flac_00261.flac", "verdict": "ok", "cls": null, "note": ""}
+{"id": "peoples_speech/Fishfrom1945_2_Fishfrom1945_2_Fishfrom1945_2_DOT_flac_00136.flac", "verdict": "minor", "cls": null, "note": ""}
+{"id": "peoples_speech/ZBA040416CL19_ZBA040416CL19_ZBA_040416-CL19_DOT_flac_00652.flac", "verdict": "critical", "cls": "meaning", "note": "statement became the instruction 'Dress separately'"}
+{"id": "peoples_speech/gov.uscourts.illappct.1-16-2943_gov_DOT_uscourts_DOT_illappct_DOT_1-16-2943_gov_-575aeb0db1fd", "verdict": "ok", "cls": null, "note": ""}
+{"id": "peoples_speech/gov.uscourts.illappct.1-16-2943_gov_DOT_uscourts_DOT_illappct_DOT_1-16-2943_gov_-5bc03baa551c", "verdict": "critical", "cls": "negation", "note": "'I don't think we know that the defendant changed his clothes' split into an assertion that he did"}
+{"id": "peoples_speech/gov.uscourts.illappct.1-16-2943_gov_DOT_uscourts_DOT_illappct_DOT_1-16-2943_gov_-1dac9b8e45b8", "verdict": "minor", "cls": null, "note": ""}
+{"id": "peoples_speech/Let_s_Talk_Healthy_Pets_-_The_Body_Shape_Diet_-_Part_2_Let_s_Talk_Healthy_Pets_--2bdd3d4e4582", "verdict": "ok", "cls": null, "note": ""}
