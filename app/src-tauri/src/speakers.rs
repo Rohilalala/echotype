@@ -142,6 +142,10 @@ mod engine {
                 return Err("Could not load the speaker models".into());
             }
             let result = sys::SherpaOnnxOfflineSpeakerDiarizationProcess(sd, pcm.as_ptr(), pcm.len() as i32);
+            if result.is_null() {
+                sys::SherpaOnnxDestroyOfflineSpeakerDiarization(sd);
+                return Err("Speaker detection failed".into());
+            }
             let n = sys::SherpaOnnxOfflineSpeakerDiarizationResultGetNumSegments(result).max(0) as usize;
             let segs = sys::SherpaOnnxOfflineSpeakerDiarizationResultSortByStartTime(result);
             let turns = if segs.is_null() { vec![] } else { std::slice::from_raw_parts(segs, n).iter().map(|s| Turn { start: s.start, end: s.end, speaker: s.speaker }).collect() };

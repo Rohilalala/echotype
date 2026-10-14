@@ -314,7 +314,7 @@ impl Session {
     /// Takes captured audio. `at`: when its last sample arrived, on the meeting clock; a stream
     /// that started late or went quiet (ScreenCaptureKit sends nothing while nothing plays) is
     /// padded with silence so both stay on one clock. Returns whether the transcript changed.
-    pub fn push(&mut self, src: Source, pcm: &[f32], at: Option<Duration>) -> Result<bool, String> {
+    pub fn push(&mut self, src: Source, pcm: &[f32], at: Option<Duration>) -> bool {
         let t = self.track(src);
         let behind = at.map_or(0.0, |a| a.as_secs_f32() - (t.total + pcm.len()) as f32 / RATE as f32);
         if behind > 0.5 {
@@ -324,10 +324,10 @@ impl Session {
         Self::append(t, pcm);
         let mut changed = false;
         while let Some((cut, pause)) = next_cut(&self.track(src).pending, false) {
-            self.chunk(src, cut, pause)?;
+            self.chunk(src, cut, pause);
             changed = true;
         }
-        Ok(changed)
+        changed
     }
 
     fn append(t: &mut Track, pcm: &[f32]) {
@@ -344,7 +344,9 @@ impl Session {
         if src == Source::Mic { &mut self.mic } else { &mut self.system }
     }
 
-    fn chunk(&mut self, src: Source, cut: usize, pause: bool) -> Result<(), String> {
+    /// Transcribes the next `cut` samples. A failed transcription (a provider timeout, say) costs
+    /// only that chunk's words, with a notice; the meeting and its audio carry on.
+    fn chunk(&mut self, src: Source, cut: usize, pause: bool) {
         let t = if src == Source::Mic { &self.mic } else { &self.system };
         let t0 = t.at as f32 / RATE as f32;
         let end = t0 + cut as f32 / RATE as f32;
@@ -353,9 +355,18 @@ impl Session {
         let from = t.owned_from;
         let words = if has_voice(&audio) {
             let started = Instant::now();
-            let w = (self.transcribe)(&audio)?;
+            let heard = (self.transcribe)(&audio);
             self.stt_ms += started.elapsed().as_millis();
-            owned(w, t0, from, to)
+            match heard {
+                Ok(w) => owned(w, t0, from, to),
+                Err(e) => {
+                    let mut m = lock(&self.meeting);
+                    if !m.notices.iter().any(|n| n.ends_with(&e)) {
+                        m.notices.push(format!("{}–{} was not transcribed (the audio is saved): {e}", clock(from), clock(to)));
+                    }
+                    vec![]
+                }
+            }
         } else {
             vec![]
         };
@@ -370,7 +381,6 @@ impl Session {
         t.at += keep_from;
         t.owned_from = to;
         self.rebuild();
-        Ok(())
     }
 
     /// Live speaker labels: one fingerprint per run of words without a long pause.
@@ -418,7 +428,7 @@ impl Session {
     pub fn finish(&mut self, diarize: Option<&mut dyn FnMut(Vec<f32>) -> Result<Vec<Turn>, String>>, system_audio: Option<Vec<f32>>) -> Result<(), String> {
         for src in [Source::Mic, Source::System] {
             while let Some((cut, _)) = next_cut(&self.track(src).pending, true) {
-                self.chunk(src, cut, true)?;
+                self.chunk(src, cut, true);
             }
         }
         let audio = system_audio.or_else(|| self.dir.as_ref().map(|d| read_wav(&d.join("audio-system.wav"))));
@@ -466,12 +476,23 @@ fn name<'a>(m: &'a Meeting, id: &'a str) -> &'a str {
     m.speakers.get(id).map_or(id, String::as_str)
 }
 
+/// About 12k tokens, roughly 80 minutes of talk; the rest of a longer meeting is not summarised.
+// ponytail: one call with a cap; summarise in parts and merge if long meetings need full notes.
+pub const SUMMARY_MAX_CHARS: usize = 48_000;
+
 /// The notes, or None when nobody said anything (the model is then never asked: with nothing to
 /// go on it would only make something up). `llm(system, transcript)`.
 pub fn summarize(m: &Meeting, llm: impl FnOnce(&str, &str) -> Result<String, String>) -> Result<Option<String>, String> {
-    let text = transcript_lines(m);
+    let mut text = transcript_lines(m);
     if !m.segments.iter().any(|s| crate::cleanup::has_speech(&s.text)) {
         return Ok(None);
+    }
+    if text.len() > SUMMARY_MAX_CHARS {
+        let mut cut = SUMMARY_MAX_CHARS;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(text[..cut].rfind('\n').unwrap_or(cut));
     }
     let notes = llm(SUMMARY_PROMPT, &text)?;
     Ok((!notes.trim().is_empty()).then(|| notes.trim().to_string()))
@@ -506,7 +527,7 @@ pub fn meetings_dir() -> PathBuf {
 }
 
 fn save(dir: &Path, m: &Meeting) {
-    let tmp = dir.join("meeting.json.tmp");
+    let tmp = dir.join(format!("meeting.json.{:?}.tmp", std::thread::current().id()).replace(['(', ')'], ""));
     let res = serde_json::to_vec_pretty(m).map_err(|e| e.to_string()).and_then(|b| std::fs::write(&tmp, b).map_err(|e| e.to_string())).and_then(|_| std::fs::rename(&tmp, dir.join("meeting.json")).map_err(|e| e.to_string()));
     if let Err(e) = res {
         eprintln!("echotype: could not save meeting notes: {e}");
@@ -553,9 +574,9 @@ pub fn rename(m: &mut Meeting, speaker: &str, new: &str) -> Result<(), String> {
         return Err("Names can be 1 to 60 characters".into());
     }
     let old = std::mem::replace(m.speakers.get_mut(speaker).ok_or("No such speaker in this meeting")?, new.to_string());
-    // "You" is also an ordinary word, so the summary keeps it.
-    if let Some(s) = m.summary.as_mut().filter(|_| speaker != ME) {
-        *s = s.replace(&old, new);
+    // "You" and "Others" are also ordinary words, so the summary keeps them.
+    if let Some(s) = m.summary.as_mut().filter(|_| speaker != ME && speaker != OTHERS) {
+        *s = crate::cleanup::apply_replacements(s, &[settings::Replacement { from: old, to: new.to_string() }]);
     }
     Ok(())
 }
@@ -672,18 +693,33 @@ fn emit(app: &AppHandle, id: &str, state: &str) {
 }
 
 /// Tray and pill menu: start, or stop the running meeting.
+/// Runs off the main thread: starting waits on ScreenCaptureKit and the permission check.
 pub fn toggle(app: &AppHandle) {
-    let res = if recording() { stop(app) } else { start(app, None).map(|_| ()) };
-    if let Err(e) = res {
-        crate::emit_state(app, crate::DictationState { state: "error", error: Some(e), ..Default::default() });
-    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let res = if recording() { stop(&app) } else { start(&app, None).map(|_| ()) };
+        if let Err(e) = res {
+            crate::emit_state(&app, crate::DictationState { state: "error", error: Some(e), ..Default::default() });
+        }
+    });
 }
 
+/// Set while a start is opening the streams, so LIVE is not held across that (the tray reads it).
+static STARTING: AtomicBool = AtomicBool::new(false);
+
 pub fn start(app: &AppHandle, title: Option<String>) -> Result<Meeting, String> {
-    let mut live = lock(&LIVE);
-    if let Some(l) = live.as_ref() {
+    if let Some(l) = lock(&LIVE).as_ref() {
         return Err(if l.capture.is_some() { "A meeting is already being transcribed" } else { "Still writing up the last meeting. Try again in a moment." }.into());
     }
+    if STARTING.swap(true, Ordering::SeqCst) {
+        return Err("A meeting is already starting".into());
+    }
+    let res = open(app, title);
+    STARTING.store(false, Ordering::SeqCst);
+    res
+}
+
+fn open(app: &AppHandle, title: Option<String>) -> Result<Meeting, String> {
     let s = crate::current_settings(app);
     let transcribe = transcriber(&s)?;
     let started_ms = now_ms();
@@ -708,8 +744,7 @@ pub fn start(app: &AppHandle, title: Option<String>) -> Result<Meeting, String> 
     m.notices.extend(notice);
     *lock(&session.meeting) = m.clone();
     let stopped = Arc::new(AtomicBool::new(false));
-    *live = Some(Live { id: id.clone(), started_ms, started, capture: Some(capture), stopped: stopped.clone(), meeting: session.meeting.clone() });
-    drop(live);
+    *lock(&LIVE) = Some(Live { id: id.clone(), started_ms, started, capture: Some(capture), stopped: stopped.clone(), meeting: session.meeting.clone() });
     let app2 = app.clone();
     std::thread::spawn(move || run(app2, session, rx, stopped, system));
     tick(app);
@@ -744,7 +779,8 @@ fn refresh_tray(app: &AppHandle, elapsed: Option<Duration>) {
         let _ = tray.set_title(title.as_deref());
         let _ = tray.set_tooltip(Some(title.as_deref().unwrap_or("Echotype")));
     }
-    if let Some(item) = lock(&TRAY_ITEM).as_ref() {
+    let item = lock(&TRAY_ITEM).clone(); // set_text waits on the main thread: never hold the lock across it
+    if let Some(item) = item {
         let _ = item.set_text(menu_label());
     }
 }
@@ -765,16 +801,34 @@ fn tick(app: &AppHandle) {
 
 /// The worker: owns the session, so audio, transcription and saving happen in order.
 fn run(app: AppHandle, mut session: Session, rx: mpsc::Receiver<Piece>, stopped: Arc<AtomicBool>, system: bool) {
-    let id = lock(&session.meeting).id.clone();
-    let note = |session: &Session, n: String| lock(&session.meeting).notices.push(n);
-    if system {
-        match embedder(|_, _, _| {}) {
-            Ok(e) => session.embed = Some(e),
-            Err(e) => note(&session, format!("Other voices are labelled Others: the speaker models are not available ({e})")),
+    /// However the worker ends, even by a panic, LIVE is cleared so a new meeting can start (the
+    /// saved state then reads "interrupted") and the capture threads are told to stop.
+    struct Done;
+    impl Drop for Done {
+        fn drop(&mut self) {
+            lock(&LIVE).take();
         }
     }
-    let mut failed = None;
+    let _done = Done;
+    let id = lock(&session.meeting).id.clone();
+    let note = |session: &Session, n: String| lock(&session.meeting).notices.push(n);
+    // The first meeting downloads the speaker models; that must not hold up live transcription.
+    let (models_tx, models) = mpsc::channel();
+    if system {
+        std::thread::spawn(move || models_tx.send(embedder(|_, _, _| {})));
+    }
+    let mut waiting = system;
+    let take_models = |session: &mut Session, r: Result<Embedder, String>| {
+        match r {
+            Ok(e) => session.embed = Some(e),
+            Err(e) => note(session, format!("Other voices are labelled Others: the speaker models are not available ({e})")),
+        }
+    };
     loop {
+        if let Ok(r) = models.try_recv() {
+            waiting = false;
+            take_models(&mut session, r);
+        }
         let piece = match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(p) => p,
             Err(mpsc::RecvTimeoutError::Timeout) if stopped.load(Ordering::SeqCst) => match rx.try_recv() {
@@ -784,25 +838,29 @@ fn run(app: AppHandle, mut session: Session, rx: mpsc::Receiver<Piece>, stopped:
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
-        if failed.is_some() {
-            continue; // keep draining so capture never blocks; the audio is on disk
-        }
-        match session.push(piece.0, &piece.1, Some(piece.2)) {
-            Ok(true) => emit(&app, &id, "recording"),
-            Ok(false) => {}
-            Err(e) => failed = Some(e),
+        if session.push(piece.0, &piece.1, Some(piece.2)) {
+            emit(&app, &id, "recording");
         }
     }
     lock(&session.meeting).state = "processing".into();
     emit(&app, &id, "processing");
+    if waiting {
+        match models.recv_timeout(Duration::from_secs(120)) {
+            Ok(r) => take_models(&mut session, r),
+            Err(_) => note(&session, "Speakers were not told apart: the speaker models are still downloading".into()),
+        }
+    }
     let mut diarize = |pcm: Vec<f32>| speakers::diarize(pcm, None);
-    let res = failed.map_or_else(|| session.finish(system.then_some(&mut diarize as _), None), Err);
-    if let Err(e) = res {
-        note(&session, format!("Transcription stopped early: {e}. The audio is saved in the meeting folder."));
+    let can_diarize = session.embed.is_some();
+    if let Err(e) = session.finish(can_diarize.then_some(&mut diarize as _), None) {
+        note(&session, format!("Speakers were not re-checked at the end: {e}"));
     }
     let s = crate::current_settings(&app);
     let snapshot = lock(&session.meeting).clone();
     if s.cleanup.enabled && !crate::cleanup::keyless(&s) {
+        if transcript_lines(&snapshot).len() > SUMMARY_MAX_CHARS {
+            note(&session, "The meeting is long, so the summary covers its first part only".into());
+        }
         match summarize(&snapshot, |sys, text| crate::cleanup::chat(&s, sys, text, Duration::from_secs(180))) {
             Ok(summary) => lock(&session.meeting).summary = summary,
             Err(e) => note(&session, format!("No summary: {e}")),
@@ -817,7 +875,7 @@ fn run(app: AppHandle, mut session: Session, rx: mpsc::Receiver<Piece>, stopped:
             save(d, &m);
         }
     }
-    *lock(&LIVE) = None;
+    drop(_done);
     emit(&app, &id, "done");
 }
 
@@ -945,7 +1003,7 @@ fn cli_run(s: &Settings, file: &str, n: Option<i32>) -> Result<String, String> {
     let mut session = Session::new(m, None, transcriber(s)?, Some(embed))?;
     let t = Instant::now();
     for piece in pcm.chunks(RATE) {
-        session.push(Source::System, piece, None)?;
+        session.push(Source::System, piece, None);
     }
     let mut diarize_ms = 0;
     let mut diarize = |p: Vec<f32>| {
@@ -1031,7 +1089,7 @@ mod tests {
         let pcm = tone(61.0, -20.0); // no pauses: two hard cuts, then the flush
         let mut changed = 0;
         for p in pcm.chunks(RATE / 4) {
-            changed += s.push(Source::System, p, None).unwrap() as usize;
+            changed += s.push(Source::System, p, None) as usize;
         }
         assert_eq!(changed, 2, "two chunks transcribed while the meeting ran");
         s.finish(None, None).unwrap();
@@ -1042,12 +1100,30 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_chunk_costs_its_words_only_and_says_so() {
+        let mut calls = 0;
+        let flaky: Transcribe = Box::new(move |_: &[f32]| {
+            calls += 1;
+            if calls == 1 { Err("Speech-to-text failed (429): slow down".into()) } else { Ok(vec![w(0.2, 0.8, "later")]) }
+        });
+        let mut s = Session::new(Meeting::default(), None, flaky, None).unwrap();
+        for p in tone(55.0, -20.0).chunks(RATE) {
+            s.push(Source::Mic, p, None);
+        }
+        s.finish(None, None).unwrap();
+        let m = lock(&s.meeting).clone();
+        assert_eq!(m.notices, ["00:00–00:24 was not transcribed (the audio is saved): Speech-to-text failed (429): slow down"]);
+        assert_eq!(s.mic.words.len(), 2, "the chunks after the failure were transcribed");
+        assert!(s.mic.pending.is_empty());
+    }
+
+    #[test]
     fn a_late_or_paused_stream_is_padded_onto_the_meeting_clock() {
         let none: Transcribe = Box::new(|_| Ok(vec![]));
         let mut s = Session::new(Meeting::default(), None, none, None).unwrap();
-        s.push(Source::System, &[0.1; RATE], Some(Duration::from_secs(3))).unwrap();
+        s.push(Source::System, &[0.1; RATE], Some(Duration::from_secs(3)));
         assert_eq!(s.system.total, 3 * RATE, "started 2 s late");
-        s.push(Source::System, &[0.1; RATE / 4], Some(Duration::from_millis(3400))).unwrap();
+        s.push(Source::System, &[0.1; RATE / 4], Some(Duration::from_millis(3400)));
         assert_eq!(s.system.total, 3 * RATE + RATE / 4, "small jitter is not padded");
     }
 
@@ -1128,13 +1204,13 @@ mod tests {
     fn a_rename_reaches_every_line_and_the_summary_but_never_rewrites_you() {
         let mut m = sample();
         m.speakers.insert("s2".into(), "Speaker 2".into());
-        m.summary = Some("- Speaker 2: send the deck. You agreed.".into());
+        m.summary = Some("- Speaker 2: send the deck. Speaker 20 agreed. You agreed.".into());
         rename(&mut m, "s2", "  Arjun ").unwrap();
         assert_eq!(m.speakers["s2"], "Arjun");
-        assert_eq!(m.summary.as_deref(), Some("- Arjun: send the deck. You agreed."));
+        assert_eq!(m.summary.as_deref(), Some("- Arjun: send the deck. Speaker 20 agreed. You agreed."), "whole names only");
         rename(&mut m, "you", "Aditya").unwrap();
         assert!(plain(&m).contains("Aditya: Shall we ship Friday?"));
-        assert_eq!(m.summary.as_deref(), Some("- Arjun: send the deck. You agreed."));
+        assert_eq!(m.summary.as_deref(), Some("- Arjun: send the deck. Speaker 20 agreed. You agreed."));
         assert!(rename(&mut m, "s9", "X").is_err() && rename(&mut m, "s1", " ").is_err());
     }
 
@@ -1160,6 +1236,13 @@ mod tests {
         let seen = seen.into_inner();
         assert!(seen.contains("Never add facts") && seen.contains("never guess") && seen.contains("None recorded."));
         assert!(seen.ends_with("You: Shall we ship Friday?\nPriya: Yes, I'll send the deck."));
+        let mut long = sample();
+        long.segments = vec![Segment { start: 0.0, end: 1.0, speaker: "you".into(), text: "word ".repeat(9_000) }; 3];
+        summarize(&long, |_, text| {
+            assert!(text.len() <= SUMMARY_MAX_CHARS && text.ends_with("word "), "cut at a line: {}", text.len());
+            Ok(String::new())
+        })
+        .unwrap();
         for empty in [vec![], vec![Segment { start: 0.0, end: 1.0, speaker: "you".into(), text: " ... ".into() }]] {
             m.segments = empty;
             assert_eq!(summarize(&m, |_, _| panic!("asked the model about nothing")).unwrap(), None);

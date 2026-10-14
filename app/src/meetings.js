@@ -4,7 +4,8 @@ let $, h, invoke, copyText;
 let meetings = [], status = { live: null, screen_recording: true, download_mb: 0 };
 let open = null; // the meeting being viewed
 let editing = null; // speaker id being renamed
-let confirmDelete = false, startError = '', timer;
+let confirmDelete = false, startError = '', timer, starting = false, draftTitle = '';
+let exportsOf = null; // { id, md, txt }, fetched with the meeting so Copy runs inside the click
 
 const clock = s => {
   s = Math.max(0, Math.floor(s));
@@ -25,15 +26,24 @@ export function init(helpers) {
   ({ $, h, invoke, copyText } = helpers);
   helpers.listen('meeting', async ({ payload }) => {
     await refresh();
-    if (open?.id === payload.id) open = await invoke('meeting_get', { id: payload.id }).catch(() => open);
-    render();
+    if (open?.id === payload.id) await load(payload.id).catch(() => {});
+    if (editing === null) render(); // a live update must not wipe a rename being typed
   });
 }
 
 export async function show() {
   await refresh();
-  if (open) open = await invoke('meeting_get', { id: open.id }).catch(() => null);
+  if (open) await load(open.id).catch(() => { open = null; });
   render();
+}
+
+async function load(id) {
+  open = await invoke('meeting_get', { id });
+  exportsOf = null;
+  if (open.state !== 'recording' && open.segments.length) {
+    const [md, txt] = await Promise.all([invoke('meeting_export', { id, format: 'md' }), invoke('meeting_export', { id, format: 'txt' })]);
+    exportsOf = { id, md, txt };
+  }
 }
 
 async function refresh() {
@@ -64,7 +74,7 @@ function startCard() {
           h('button', { className: 'btn', type: 'button', onclick: () => openMeeting(live().id) }, 'View transcript'),
           h('button', { className: 'btn primary', type: 'button', onclick: stop }, 'Stop'))));
   }
-  const title = h('input', { type: 'text', id: 'meetingTitle', placeholder: 'Title (optional)', 'aria-label': 'Meeting title', spellcheck: false });
+  const title = h('input', { type: 'text', id: 'meetingTitle', value: draftTitle, placeholder: 'Title (optional)', 'aria-label': 'Meeting title', spellcheck: false, oninput: () => (draftTitle = title.value) });
   title.addEventListener('keydown', e => { if (e.key === 'Enter') start(title.value); });
   return h('div', { className: 'group' },
     h('div', { className: 'row' }, title, h('button', { className: 'btn primary', type: 'button', onclick: () => start(title.value) }, 'Start meeting notes')),
@@ -93,21 +103,24 @@ function viewList() {
 }
 
 async function start(title) {
-  startError = '';
-  try { const m = await invoke('meeting_start', { title: title || null }); await refresh(); open = m; }
+  if (starting) return; // a double click must not start (and fail) twice
+  starting = true; startError = '';
+  try { const m = await invoke('meeting_start', { title: title || null }); await refresh(); open = m; exportsOf = null; draftTitle = ''; }
   catch (e) { startError = String(e); }
+  starting = false;
   render();
 }
 
 async function stop() {
   try { await invoke('meeting_stop'); } catch (e) { startError = String(e); }
   await refresh();
+  if (open) await load(open.id).catch(() => {}); // now "processing": no Stop, no Delete
   render();
 }
 
 async function openMeeting(id) {
-  editing = null; confirmDelete = false;
-  try { open = await invoke('meeting_get', { id }); } catch (e) { startError = String(e); open = null; await refresh(); }
+  editing = null; confirmDelete = false; startError = '';
+  try { await load(id); } catch (e) { startError = String(e); open = null; await refresh(); }
   render();
   $('#main').scrollTop = 0;
 }
@@ -122,7 +135,7 @@ function speakerChip(m, id) {
       if (editing !== id) return;
       editing = null;
       if (save && input.value.trim() && input.value.trim() !== name(m, id)) {
-        try { open = await invoke('meeting_rename_speaker', { id: m.id, speaker: id, name: input.value }); }
+        try { await invoke('meeting_rename_speaker', { id: m.id, speaker: id, name: input.value }); await load(m.id); } // exports carry the new name
         catch (e) { startError = String(e); }
       }
       render();
@@ -153,12 +166,14 @@ function viewMeeting(m) {
   const isLive = live()?.id === m.id;
   const ids = Object.keys(m.speakers).filter(id => m.segments.some(s => s.speaker === id));
   const btn = (label, fn) => { const b = h('button', { className: 'btn', type: 'button' }, label); b.onclick = () => fn(b); return b; };
-  const exportText = async fmt => invoke('meeting_export', { id: m.id, format: fmt });
+  const failed = e => { startError = String(e); render(); };
+  const saved = b => { b.textContent = 'Saved to Downloads'; setTimeout(() => (b.textContent = b.dataset.label), 1500); };
+  const save = fmt => b => { b.dataset.label = b.textContent; invoke('meeting_save', { id: m.id, format: fmt }).then(() => saved(b), failed); };
   const meta = isLive
     ? [h('span', { className: 'rec-line' }, h('i', { className: 'rec-dot' }), 'Recording · ', h('span', { 'data-elapsed': '' }, clock(elapsed())))]
     : [`${when(m.started_ms)} · ${clock(m.duration_s)}`, STATE[m.state] && h('span', { className: 'tag' }, STATE[m.state])];
   return [
-    h('button', { className: 'btn quiet back', type: 'button', onclick: () => { open = null; show(); } }, '‹ Meetings'),
+    h('button', { className: 'btn quiet back', type: 'button', onclick: () => { open = null; startError = ''; show(); } }, '‹ Meetings'),
     h('div', { className: 'page-head' }, h('h1', { className: 'text' }, m.title),
       isLive ? h('button', { className: 'btn primary', type: 'button', onclick: stop }, 'Stop')
         : confirmDelete ? h('span', { className: 'confirm' }, 'Delete this meeting and its audio?',
@@ -173,11 +188,11 @@ function viewMeeting(m) {
     startError && h('p', { className: 'note warn', role: 'alert' }, startError),
     m.state === 'processing' && h('p', { className: 'note working' }, 'Telling speakers apart and writing the summary'),
     m.summary && summary(m.summary),
-    !isLive && m.segments.length > 0 && h('div', { className: 'export' },
-      btn('Copy Markdown', async b => copyText(await exportText('md'), b)),
-      btn('Copy text', async b => copyText(await exportText('txt'), b)),
-      btn('Save .md', b => invoke('meeting_save', { id: m.id, format: 'md' }).then(() => (b.textContent = 'Saved to Downloads'), e => (startError = String(e), render()))),
-      btn('Save .txt', b => invoke('meeting_save', { id: m.id, format: 'txt' }).then(() => (b.textContent = 'Saved to Downloads'), e => (startError = String(e), render())))),
+    exportsOf?.id === m.id && h('div', { className: 'export' },
+      btn('Copy Markdown', b => copyText(exportsOf.md, b)),
+      btn('Copy text', b => copyText(exportsOf.txt, b)),
+      btn('Save .md', save('md')),
+      btn('Save .txt', save('txt'))),
     ids.length > 0 && h('div', { className: 'speakers' }, h('span', { className: 'speakers-label' }, 'Speakers'), ids.map(id => speakerChip(m, id))),
     h('div', { className: 'transcript text', 'aria-live': isLive ? 'polite' : null },
       m.segments.length ? m.segments.map(s => h('div', { className: 'line' },

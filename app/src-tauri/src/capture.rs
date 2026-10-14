@@ -42,11 +42,18 @@ impl Capture {
     }
 
     /// Stops both streams; every captured sample has been sent when this returns.
-    pub fn stop(self) {
+    pub fn stop(mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        for t in self.threads {
+        for t in self.threads.drain(..) {
             let _ = t.join();
         }
+    }
+}
+
+/// Dropped without `stop` (the worker died): the threads still stop, unjoined.
+impl Drop for Capture {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
     }
 }
 
