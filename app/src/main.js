@@ -132,6 +132,7 @@ function changed(p) {
   if (p === 'greetings' || p === 'display_name') renderGreeting();
   if (p === 'sound_pack') invoke('preview_sounds', { pack: S.sound_pack }).catch(() => {}); // hear it as you pick it
   if (p === 'look') applyLook();
+  if (p === 'advanced' || p === 'cleaner_memory') { renderAdvanced(); renderStt(); fillRemote('cleanup'); renderLangNote(); renderHero(); }
   renderChips();
 }
 
@@ -295,6 +296,7 @@ const ACTIONS = {
   accessibility: ['Allow pasting', () => invoke('open_permission_settings', { kind: 'accessibility' })],
   model: ['Choose a model', () => go('speech')],
   cleanup: ['Open Cleanup', () => go('cleanup')],
+  automatic: ['Switch to automatic', () => { S.advanced = false; syncBound(); save(); changed('advanced'); }],
   settings: ['Open Settings', () => go('settings')],
 };
 const actionBtn = kind => ACTIONS[kind] && h('button', { className: 'btn', type: 'button', onclick: ACTIONS[kind][1] }, ACTIONS[kind][0]);
@@ -312,7 +314,7 @@ function blocker() {
   if (S.stt.provider === 'cloud') {
     if (cloud.status === 'out' || cloud.status === 'code') return { text: 'Sign in to Echotype Cloud to transcribe.', label: 'Sign in', act: () => go('speech') };
   } else if (S.stt.provider === 'local') {
-    const m = models.find(x => x.id === S.stt.local_model);
+    const m = sttModel();
     if (m && progress[m.id] != null) return { text: `Downloading ${m.label}: ${Math.round(progress[m.id] * 100)}%. You can dictate when it finishes.`, label: 'Speech model', act: () => go('speech') };
     if (!m?.downloaded) return { text: 'No speech model is downloaded yet.', label: 'Choose a model', act: () => go('speech') };
   } else if (p?.needs_key && !sttKeySaved) return { text: `Add your ${p.label} API key to transcribe.`, label: 'Add key', act: () => go('speech') };
@@ -346,7 +348,7 @@ function renderHero() {
     else if (st === 'error') fill(sub, h('span', {}, `${dictation.error || 'Dictation stopped.'}`), ...keptText(), dictation.retry && retryBtn(), actionBtn(dictation.action));
     else if (st === 'hint') fill(sub, h('span', { className: 'notice-inline' }, dictation.message), actionBtn(dictation.action));
     else if (st === 'done' && dictation.copied) fill(sub, h('span', {}, dictation.warning || 'Press ⌘V to paste it.'), chip, ...keptText(), actionBtn(dictation.action));
-    else if (st === 'done' && dictation.warning) fill(sub, h('span', {}, dictation.warning), chip, cleanupFix);
+    else if (st === 'done' && dictation.warning) fill(sub, h('span', {}, dictation.warning), chip, actionBtn(dictation.action) || cleanupFix);
     else fill(sub, h('span', {}, 'Text appears wherever your cursor is.'), chip);
   }
 }
@@ -355,7 +357,7 @@ function renderHero() {
 const STYLE_LABEL = { default: 'Default style', casual: 'Casual', formal: 'Formal', verbatim: 'Verbatim' };
 function renderChips() {
   const local = S.stt.provider === 'local';
-  $('#chipModel').textContent = local ? models.find(m => m.id === S.stt.local_model)?.label ?? 'No model' : preset(S.stt.provider)?.label ?? S.stt.provider;
+  $('#chipModel').textContent = local ? sttModel()?.label ?? 'No model' : preset(S.stt.provider)?.label ?? S.stt.provider;
   const lang = LANGS.find(([v]) => v === S.language)?.[1] ?? S.language;
   $('#chipLang').textContent = S.translate_to_english ? `${lang} to English` : lang;
   $('#chipStyle').textContent = noCleanup() ? 'No cleanup' : STYLE_LABEL[S.cleanup.style] ?? S.cleanup.style;
@@ -370,11 +372,14 @@ let cleanupKeySaved = true;
 const noCleanup = () => !S.cleanup.enabled || (preset(S.cleanup.provider)?.needs_key && !cleanupKeySaved);
 function renderRaw() {
   if (!S) return;
+  $('#cloudMoved').hidden = !S.cloud_moved;
   $('#rawBanner').hidden = !noCleanup() || S.dismissed.includes('no_cleanup_banner');
   $('#cleanupSetup').hidden = !noCleanup();
   $('#cleanupSetupTitle').textContent = S.cleanup.enabled ? 'Finish setting up cleanup' : 'Turn on cleanup';
 }
 $('#rawDismiss').append(svg(CROSS));
+$('#cloudMovedOk').append(svg(CROSS));
+$('#cloudMovedOk').addEventListener('click', () => { S.cloud_moved = false; save(); renderRaw(); });
 $('#rawSetup').addEventListener('click', () => go('cleanup'));
 $('#rawDismiss').addEventListener('click', () => dismiss('no_cleanup_banner'));
 function dismiss(what) {
@@ -477,6 +482,7 @@ function fillRemote(kind) {
     ? `Any OpenAI-compatible ${kind === 'stt' ? '/audio/transcriptions' : '/chat/completions'} endpoint.`
     : cfg.provider === 'echotype' ? `Built in: runs on this Mac, nothing to start. ${sys?.echotype_model_installed ? `Installed, ${fmtMB(sys.echotype_model_mb)}.` : `Not installed (${fmtMB(sys?.echotype_model_mb ?? 940)}).`}`
     : `Set by the ${p?.label ?? ''} preset.`;
+  if (kind === 'cleanup') renderCleaner();
   const model = $(`#${kind}Model`);
   model.value = cfg.model;
   model.placeholder = p?.[kind === 'stt' ? 'default_stt_model' : 'default_cleanup_model'] || 'model name';
@@ -540,6 +546,9 @@ const MORE = '<circle cx="3.5" cy="8" r=".9"/><circle cx="8" cy="8" r=".9"/><cir
 // One model, in one of the D8 states: not downloaded (round ↓), downloading (ring), failed (reason +
 // Retry), downloaded (Use, delete in the overflow menu), in use (✓). ponytail: no cancel while
 // downloading, the core has no command for it yet.
+// The speech model in use: the manual pick with advanced settings on, else Automatic's (core: stt::local_model).
+const sttModel = () => models.find(m => S.advanced ? m.id === S.stt.local_model : m.automatic);
+
 function modelRow(m) {
   const inUse = S.stt.provider === 'local' && S.stt.local_model === m.id;
   const p = progress[m.id], err = modelErr[m.id];
@@ -582,13 +591,36 @@ function modelRow(m) {
       m.note && h('span', { className: 'row-desc' }, m.note),
       h('span', { className: 'model-meta' },
         h('span', {}, fmtMB(m.size_mb)),
-        h('span', {}, `${fmtMB(m.ram_mb)} memory`),
+        h('span', {}, `about ${fmtMB(m.ram_mb)} RAM`),
         !m.fits && h('span', { className: 'badge warn' }, 'Needs more memory')),
+      m.warning && h('span', { className: 'row-desc warn' }, m.warning),
       err && h('span', { className: 'row-desc error', role: 'alert' }, err)),
     h('span', { className: 'actions' }, actions));
 }
 
+// Advanced settings off: one plain row, "Automatic (recommended)", with what it uses and its download.
+function renderAuto() {
+  const box = $('#sttAuto');
+  box.hidden = S.advanced;
+  if (S.advanced) return;
+  const rec = models.find(m => m.recommended), cur = sttModel();
+  const p = rec && progress[rec.id], err = rec && modelErr[rec.id];
+  const desc = !rec ? 'No model fits this Mac.'
+    : rec.downloaded ? `Uses ${rec.label}, picked for this Mac.`
+    : cur?.downloaded ? `Uses ${cur.label} until ${rec.label}, the pick for this Mac, is downloaded (${fmtMB(rec.size_mb)}).`
+    : `${rec.label} suits this Mac. Download it to dictate (${fmtMB(rec.size_mb)}).`;
+  const action = !rec || rec.downloaded ? h('span', { className: 'in-use' }, svg(CHECK), 'In use')
+    : p != null ? h('span', { className: 'pct', 'data-pct': rec.id }, `${Math.round(p * 100)}%`)
+    : h('button', { className: 'btn', type: 'button', onclick: () => download(rec.id) }, err ? 'Retry' : 'Download');
+  box.replaceChildren(h('div', { className: 'row' },
+    h('span', { className: 'row-text' }, h('span', { className: 'row-title' }, 'Automatic (recommended)'), h('span', { className: 'row-desc' }, desc),
+      err && h('span', { className: 'row-desc error', role: 'alert' }, err)),
+    h('span', { className: 'actions' }, action)));
+}
+
 function renderModels() {
+  renderAuto();
+  $('#memline').hidden = $('#modelList').hidden = !S.advanced;
   $('#memline').replaceChildren('Free memory now ', h('b', {}, `${sys.available_ram_gb.toFixed(1)} GB`), ` of ${Math.round(sys.total_ram_gb)} GB. A model fits when it leaves 2 GB for everything else.`);
   $('#modelList').replaceChildren(...models.map(m => modelRow(m)));
   renderObModel();
@@ -631,11 +663,41 @@ function renderCleanup() {
 }
 $('#cleanupProvider').addEventListener('change', e => setProvider('cleanup', e.target.value));
 
+// The built-in model: "Automatic (recommended)", or with advanced settings a pick of every
+// Echotype cleaner with its RAM and the low-memory warning.
+function renderCleaner() {
+  const builtIn = S.cleanup.provider === 'echotype', list = sys?.cleaners ?? [];
+  $('#cleanerRow').hidden = !builtIn;
+  $('#cleanupModel').closest('.row').hidden = builtIn;
+  if (!builtIn) return;
+  const pick = $('#cleanerPick'), auto = list.find(c => c.automatic);
+  const label = c => `${c.label}, about ${fmtMB(c.ram_mb)} RAM${c.installed ? '' : ' (not installed)'}`;
+  pick.disabled = !S.advanced;
+  pick.replaceChildren(...(S.advanced ? list.map(c => h('option', { value: c.id }, label(c))) : [h('option', { value: '' }, 'Automatic (recommended)')]));
+  const cur = S.advanced ? list.find(c => c.id === S.cleanup.model) ?? auto : auto;
+  pick.value = S.advanced ? cur?.id ?? '' : '';
+  $('#cleanerDesc').textContent = S.advanced ? cur?.warning ?? '' : auto ? `Uses ${auto.label}, picked for this Mac.` : '';
+  $('#cleanerDesc').classList.toggle('warn', S.advanced && !!cur?.warning);
+}
+$('#cleanerPick').addEventListener('change', e => { S.cleanup.model = e.target.value; save(); renderCleaner(); });
+
+// Settings → Advanced: the built-in cleaner's memory, idle unload and context, shown only when on.
+const MEM_DESC = {
+  save: "macOS can free the model's memory when it needs it. The next dictation after that can take up to a second longer.",
+  ready: 'Always fast. Keeps about 1 GB in memory while Echotype runs.',
+};
+function renderAdvanced() {
+  $('#advBody').hidden = !S.advanced;
+  $('#memDesc').textContent = MEM_DESC[S.cleaner_memory] ?? '';
+  $('#ctxPick').value = String(S.cleaner_context);
+}
+$('#ctxPick').addEventListener('change', e => { S.cleaner_context = Number(e.target.value); save(); });
+
 // ---------- Echotype Cloud ----------
 // status: loading | out (email step) | code (code step) | in (signed in) | error (unreachable, no account yet).
 // The API key never reaches this window; Rust keeps it in the keychain.
 let cloud = { status: 'loading' }, cloudEmail = '';
-const usesCloud = () => S.stt.provider === 'cloud' || (S.cleanup.enabled && S.cleanup.provider === 'cloud');
+const usesCloud = () => !!sys?.cloud && (S.stt.provider === 'cloud' || (S.cleanup.enabled && S.cleanup.provider === 'cloud'));
 const SIGNED_OUT = 'signed out';
 
 function cloudFailed(e) {
@@ -745,6 +807,7 @@ function renderCloud() {
   // Cleanup through the cloud uses the same account: no URL, model or key to set.
   const viaCloud = S.cleanup.provider === 'cloud';
   for (const id of ['#cleanupUrl', '#cleanupModel']) $(id).closest('.row').hidden = viaCloud;
+  renderCleaner(); // the built-in model swaps the Model field for its own picker
   if (viaCloud) $('[data-key="cleanup"]').hidden = true;
   const row = $('#cleanupCloud');
   row.hidden = !viaCloud;
@@ -766,7 +829,7 @@ $('#language').append(...LANGS.map(([v, l]) => h('option', { value: v }, l)));
 
 function renderLangNote() {
   const note = $('#translateNote');
-  const m = models.find(x => x.id === S.stt.local_model);
+  const m = sttModel();
   note.hidden = !(S.translate_to_english && S.stt.provider === 'local' && m && !m.translates);
   if (note.hidden) return;
   const alt = models.find(x => x.translates && x.downloaded);
@@ -1043,7 +1106,7 @@ function showOnboarding(on) {
 // Start the recommended model downloading as soon as onboarding opens.
 function obStartModel() {
   if (S.stt.provider !== 'local') return;
-  const chosen = models.find(m => m.id === S.stt.local_model);
+  const chosen = S.advanced ? models.find(m => m.id === S.stt.local_model) : models.find(m => m.recommended);
   if (chosen?.downloaded) return;
   const pick = chosen && chosen.fits ? chosen : models.find(m => m.recommended);
   if (!pick) return;
@@ -1052,7 +1115,7 @@ function obStartModel() {
 }
 function renderObModel() {
   if ($('#onboard').hidden) return;
-  const m = models.find(x => x.id === S.stt.local_model), p = m && progress[m.id];
+  const m = S.advanced ? sttModel() : models.find(x => x.recommended), p = m && progress[m.id];
   const text = S.stt.provider !== 'local' ? `Using ${preset(S.stt.provider)?.label ?? S.stt.provider} for speech.`
     : !m ? 'None of the local models fit in the memory free right now. You can use an API instead.'
     : m.downloaded ? `${m.label} is ready.`
@@ -1184,6 +1247,8 @@ try {
   throw e;
 }
 isMac = /mac|darwin/i.test(sys.os);
+// No Echotype Cloud in this build: no sign-in, plan or provider anywhere (presets already leave it out).
+if (!sys.cloud) { $('#setupCloud').remove(); $('#obCloud').remove(); }
 // macOS gets the translucent sidebar (windowEffects in tauri.conf.json); elsewhere it stays opaque (D19).
 document.documentElement.dataset.os = isMac ? 'mac' : 'other';
 if (isMac && !preview) document.documentElement.dataset.vibrant = '';
@@ -1241,6 +1306,7 @@ function renderAll() {
   renderCloud();
   renderLangNote();
   renderDict();
+  renderAdvanced();
 }
 
 bindAll();

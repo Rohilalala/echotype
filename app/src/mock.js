@@ -20,6 +20,7 @@ const settings = {
   paste_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+V',
   copy_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+C',
   autostart: !q.has('upgrade'), sounds: true, sound_pack: 'classic', pill_fade: true, pill_size: 1.5, ball_size: 1,
+  advanced: q.has('advanced'), cleaner_memory: 'ready', cleaner_idle_unload: false, cleaner_idle_minutes: 10, cleaner_context: 1024, greetings: true, cloud_moved: q.has('moved'),
   look: q.get('look') === 'v2' ? 'v2' : 'classic',
   pill_idle: !q.has('pilloff'), pill_hidden_until: q.has('pillhidden') ? now + 42 * 60000 : 0, pill_in_recordings: false,
   pill_positions: {}, pill_screen: null, pill_follow_cursor: true, show_in: q.has('menubar') ? 'menubar' : 'pill',
@@ -38,16 +39,23 @@ const presets = [
 ];
 // The same catalog, sizes and notes as stt.rs MODELS.
 const models = [
-  { id: 'large-v3-turbo-q5_0', label: 'Large v3 Turbo (Q5)', size_mb: 547, ram_mb: 800, downloaded: !q.has('onboarding'), note: 'Best default: near-large accuracy, fast, 99 languages. Cannot translate.' },
-  { id: 'large-v3-turbo', label: 'Large v3 Turbo', size_mb: 1624, ram_mb: 1700, downloaded: false, note: 'Full-precision turbo. Slightly more accurate, twice the size. Cannot translate.' },
-  { id: 'medium', label: 'Medium', size_mb: 1533, ram_mb: 1800, downloaded: false, note: 'Multilingual and translates to English (Hinglish → English).' },
-  { id: 'small', label: 'Small', size_mb: 488, ram_mb: 852, downloaded: false, note: 'Multilingual, translates; lighter and less accurate than medium.' },
-  { id: 'base.en', label: 'Base (English)', size_mb: 148, ram_mb: 388, downloaded: true, note: 'English only. For low-memory machines.' },
-  { id: 'tiny.en', label: 'Tiny (English)', size_mb: 78, ram_mb: 273, downloaded: false, note: 'English only. Fastest, least accurate.' },
+  { id: 'large-v3-turbo-q5_0', label: 'Large v3 Turbo (Q5)', size_mb: 547, ram_mb: 761, downloaded: !q.has('onboarding'), note: 'Best default: near-large accuracy, fast, 99 languages. Cannot translate.' },
+  { id: 'large-v3-turbo', label: 'Large v3 Turbo', size_mb: 1624, ram_mb: 1840, downloaded: false, note: 'Full-precision turbo. Slightly more accurate, twice the size. Cannot translate.' },
+  { id: 'medium', label: 'Medium', size_mb: 1533, ram_mb: 1869, downloaded: false, note: 'Multilingual and translates to English (Hinglish → English).' },
+  { id: 'small', label: 'Small', size_mb: 488, ram_mb: 717, downloaded: false, note: 'Multilingual, translates; lighter and less accurate than medium.' },
+  { id: 'base.en', label: 'Base (English)', size_mb: 148, ram_mb: 316, downloaded: true, note: 'English only. For low-memory machines.' },
+  { id: 'tiny.en', label: 'Tiny (English)', size_mb: 78, ram_mb: 224, downloaded: false, note: 'English only. Fastest, least accurate.' },
 ];
-const sys = { total_ram_gb: 24, available_ram_gb: 5.1, os: 'macos', arch: 'aarch64', can_autostart: q.get('appdir') !== '0' };
+// ?ram=8 previews an 8 GB Mac (Automatic's light setup and its warnings); ?cloud shows Echotype Cloud.
+const low = q.get('ram') === '8';
+const sys = { total_ram_gb: low ? 8 : 24, available_ram_gb: low ? 3.2 : 5.1, os: 'macos', arch: 'aarch64', can_autostart: q.get('appdir') !== '0', low_ram: low, cloud: q.has('cloud'),
+  echotype_model_installed: true, echotype_model_mb: 940,
+  cleaners: [{ id: 'echotype-clean', label: 'Echotype 1.5B', size_mb: 940, ram_mb: 1113, installed: true, automatic: true, warning: null }] };
 for (const m of models) Object.assign(m, { english_only: m.id.endsWith('.en'), translates: ['medium', 'small'].includes(m.id), fits: m.ram_mb + 2048 <= sys.available_ram_gb * 1024 });
-models.find(m => m.fits).recommended = true;
+const rec = models.find(m => m.id === (low ? 'small' : 'large-v3-turbo-q5_0'));
+rec.recommended = true;
+(rec.downloaded ? rec : models.find(m => m.downloaded)).automatic = true;
+for (const m of models) m.warning = low && m.ram_mb > rec.ram_mb ? `Uses about ${(m.ram_mb / 1024).toFixed(1)} GB while dictating. On an 8 GB Mac this can slow other apps.` : null;
 
 const ago = min => Math.floor((now - min * 60000) / 1000);
 let history = [
@@ -66,6 +74,7 @@ const sampleAccount = plan => plan === 'pro'
   : { email: 'you@example.com', plan: 'free', words_used: 1240, words_limit: 2000, resets_at: nextMonday(), audio_seconds_used: 610, audio_seconds_limit: 7200 };
 let cloudAccount = ['free', 'pro'].includes(q.get('cloud')) ? sampleAccount(q.get('cloud')) : null;
 if (q.has('cloud')) settings.stt.provider = 'cloud';
+if (q.has('builtin')) Object.assign(settings.cleanup, { enabled: true, provider: 'echotype', model: 'echotype-clean' });
 let busy = false;
 
 const commands = {
@@ -76,7 +85,7 @@ const commands = {
     setTimeout(() => emit('settings-changed', structuredClone(settings)), 0);
     return null;
   },
-  get_presets: () => presets,
+  get_presets: () => presets.filter(p => sys.cloud || p.id !== 'cloud'),
   set_secret: ({ name }) => { secrets.add(name); return null; },
   has_secret: ({ name }) => secrets.has(name),
   delete_secret: ({ name }) => { secrets.delete(name); return null; },
