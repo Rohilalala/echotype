@@ -138,7 +138,7 @@ b, strong { font-weight: var(--fw-semi); }
 svg { fill: none; stroke: currentColor; stroke-width: 1.33; stroke-linecap: round; stroke-linejoin: round; }
 /* Transcript text, and the numbers people read: times, speeds, counts, sizes. */
 .spoken, .transcript .said, .result p.text, .hero-sub .kept, .ob-result { font-family: var(--rec); font-variation-settings: var(--rec-axes); }
-.num, .fig-value, .stats-strip b, .week-day b, .mark time, .memline b, .pct, .model-meta > span:not(.badge), .result-meta, .transcript time, .meeting-meta, [data-elapsed], .hm-ticks b, .vu text, .pd-live .num {
+.num, .fig-value, .stats-strip b, .week-day b, .mark time, .memline b, .pct, .model-meta > span:not(.badge), .result-meta, .transcript time, [data-elapsed], .hm-ticks b, .vu text, .pd-live .num {
   font-family: var(--num); font-variation-settings: var(--num-axes); font-variant-numeric: tabular-nums;
 }
 
