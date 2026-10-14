@@ -334,6 +334,17 @@ impl LevelStats {
         Some((pct(10).max(FLOOR_MIN_DB), pct(95)))
     }
 
+    /// Time from the first to the last window that sounds like speech (a third of the way from
+    /// the floor to the speech level, and above the muted line), so the silence before and after
+    /// talking does not lower words per minute. None for a clip with nothing in it.
+    pub fn speaking_ms(&self) -> Option<u64> {
+        let (floor, speech) = self.floor_and_speech()?;
+        let gate = (floor + (speech - floor) / 3.0).max(MUTED_DB);
+        let first = self.clip.iter().position(|&d| d >= gate)?;
+        let last = self.clip.iter().rposition(|&d| d >= gate)?;
+        Some((last - first + 1) as u64 * 1000 / WINDOWS_PER_SEC as u64)
+    }
+
     /// Label for clips of 1 s or longer. Thresholds measured on TTS whispers (whisper-mode.md):
     // ponytail: re-check -40/-50 dBFS and 12/10 dB SNR on owner-recorded whispers (ECHOTYPE_WHISPER_FIXTURES test).
     pub fn quality(&self) -> Option<Quality> {
@@ -567,6 +578,15 @@ mod tests {
     fn bluetooth_name_fallback() {
         assert!(bluetooth_by_name("Aditya's AirPods Pro") && bluetooth_by_name("Jabra Bluetooth Headset"));
         assert!(!bluetooth_by_name("MacBook Pro Microphone") && !bluetooth_by_name("Shure MV7"));
+    }
+
+    #[test]
+    fn speaking_time_leaves_out_the_silence_around_it() {
+        // 4 s clip, voice from 0.5 s to 3.5 s.
+        let (st, _) = stats(&clip(-60.0, Some(-20.0), 4.0));
+        let ms = st.speaking_ms().unwrap();
+        assert!((2_900..=3_100).contains(&ms), "{ms}");
+        assert_eq!(LevelStats::default().speaking_ms(), None);
     }
 
     #[test]

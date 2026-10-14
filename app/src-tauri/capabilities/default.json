@@ -26,6 +26,8 @@
     "allow-list-input-devices",
     "allow-get-history",
     "allow-clear-history",
+    "allow-get-stats",
+    "allow-clear-stats",
     "allow-transcribe-file",
     "allow-get-system-info",
     "allow-local-api-status",

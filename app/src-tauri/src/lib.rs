@@ -6,6 +6,7 @@ mod hotkey;
 mod pill;
 mod platform;
 mod settings;
+mod stats;
 mod stt;
 
 use audio::{LevelStats, Quality};
@@ -304,7 +305,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                         continue;
                     }
                     let warning = l.lost.load(Ordering::SeqCst).then(|| "Microphone disconnected. Transcribed what was captured.".to_string());
-                    let clip = Clip { quality: st.quality(), muted_seen: st.muted_seen(), warning };
+                    let clip = Clip { quality: st.quality(), muted_seen: st.muted_seen(), warning, speaking_ms: st.speaking_ms() };
                     drop(st);
                     process(&app, pcm, busy.clone(), clip, true);
                 }
@@ -364,6 +365,8 @@ struct Clip {
     quality: Option<Quality>,
     muted_seen: bool,
     warning: Option<String>,
+    /// Recording time minus the silence around the speech, for words per minute.
+    speaking_ms: Option<u64>,
 }
 
 /// Clears the busy flag when dropped, so even a panicking worker can't leave dictation stuck.
@@ -390,6 +393,7 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
     }
     busy.store(true, Ordering::SeqCst);
     let app = app.clone();
+    let speaking_ms = clip.speaking_ms.unwrap_or(pcm.len() as u64 * 1000 / audio::RATE as u64); // a retry has no level stats
     std::thread::spawn(move || {
         let guard = Busy(busy);
         let s = current_settings(&app);
@@ -409,6 +413,7 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
                 hint(if clip.muted_seen { "No audio. Check your mic" } else { "Didn't catch that" }, clip.muted_seen.then_some("microphone"))
             }
             Ok(out) => {
+                record_stats(&app, &s, stats::Source::Dictation, &out.text, speaking_ms);
                 record_history(&s, &out);
                 *lock(&state(&app).last_output) = Some(out.text.clone());
                 let paste = paste && s.onboarded && !main_window_focused(&app);
@@ -471,6 +476,24 @@ fn paste_last(app: &AppHandle, paste: bool) {
             Err((e, false)) => DictationState { state: "error", error: Some(e), ..Default::default() },
         });
     });
+}
+
+/// Counts one result in the local usage stats (words and speed, never text) when they are on.
+/// Before record_history, so the one-time history import can't count it twice.
+pub(crate) fn record_stats(app: &AppHandle, s: &Settings, source: stats::Source, text: &str, speaking_ms: u64) {
+    if !s.usage_stats {
+        return;
+    }
+    let words = stats::words(text);
+    if words == 0 {
+        return;
+    }
+    match stats::record(source, words, speaking_ms) {
+        Ok(()) => {
+            let _ = app.emit_to("main", "stats-updated", ());
+        }
+        Err(e) => eprintln!("echotype: could not write stats: {e}"),
+    }
 }
 
 fn record_history(s: &Settings, out: &cleanup::Output) {
@@ -809,6 +832,7 @@ async fn transcribe_file(app: AppHandle, path: String) -> R<cleanup::Output> {
     let s = current_settings(&app);
     tauri::async_runtime::spawn_blocking(move || {
         let out = transcribe_path(&s, &path)?;
+        record_stats(&app, &s, stats::Source::File, &out.text, 0);
         record_history(&s, &out);
         Ok(out)
     })
@@ -821,6 +845,19 @@ fn transcribe_path(s: &Settings, path: &str) -> R<cleanup::Output> {
     let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str());
     let pcm = audio::decode(bytes, ext)?;
     cleanup::run(s, &pcm, false, || {})
+}
+
+/// The Stats page: totals, speeds, streaks and a grid of `range` weeks (default a year).
+#[tauri::command]
+async fn get_stats(range: Option<u32>) -> R<stats::View> {
+    blocking(move || Ok(stats::view(range.unwrap_or(stats::DEFAULT_WEEKS)))).await
+}
+
+#[tauri::command]
+async fn clear_stats(app: AppHandle) -> R<()> {
+    blocking(stats::clear).await?;
+    let _ = app.emit_to("main", "stats-updated", ());
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -1109,6 +1146,16 @@ pub fn run() {
                     eprintln!("echotype: {e}");
                 }
             });
+            if s.usage_stats {
+                let h = app.handle().clone();
+                std::thread::spawn(move || match stats::backfill_once() {
+                    Ok(true) => {
+                        let _ = h.emit_to("main", "stats-updated", ());
+                    }
+                    Ok(false) => {}
+                    Err(e) => eprintln!("echotype: could not import history into stats: {e}"),
+                });
+            }
             if !s.onboarded {
                 show_main(app.handle());
             }
@@ -1141,6 +1188,8 @@ pub fn run() {
             list_input_devices,
             get_history,
             clear_history,
+            get_stats,
+            clear_stats,
             transcribe_file,
             get_system_info,
             local_api_status,

@@ -41,6 +41,10 @@ pub struct Settings {
     pub replacements: Vec<Replacement>,
     pub restore_clipboard: bool,
     pub history_enabled: bool,
+    /// Count words and speaking speed on this computer (stats.rs). Counts only; on for upgraders too.
+    pub usage_stats: bool,
+    /// Shown on the Stats page ("Aditya's stats"). Stays on this computer.
+    pub display_name: String,
     pub onboarded: bool,
     /// macOS extra talk key next to the shortcut: "accelerator" (none) | "fn" | "right_option" |
     /// "right_command" | "right_control". Hold or press it like the shortcut, per `mode`.
@@ -117,6 +121,8 @@ impl Default for Settings {
             replacements: vec![],
             restore_clipboard: true,
             history_enabled: true,
+            usage_stats: true,
+            display_name: String::new(),
             onboarded: false,
             talk_key: "accelerator".into(),
             paste_last_hotkey: String::new(),
@@ -220,7 +226,7 @@ pub fn merge(current: &Settings, base: &Settings, incoming: &Settings) -> Settin
 
 /// Write to a uniquely named temp file, fsync, then rename over `path`: a crash leaves the
 /// old file or the new one, never a torn one, and concurrent writers never share a temp file.
-fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
+pub(crate) fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
     static N: AtomicU64 = AtomicU64::new(0);
     let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
     let res = std::fs::File::create(&tmp)
