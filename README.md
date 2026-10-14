@@ -24,7 +24,7 @@
 - **Dictate into any app.** Hold <kbd>⌥ Space</kbd>, talk, release. Echotype transcribes, cleans up and pastes, then puts your clipboard back.
 - **Reads like you typed it.** Filler words go, "four, no wait, five" becomes "5", spoken lists become lists, "new line" starts a new line.
 - **Speak Hinglish, get English.** Talk in Hindi, English or both at once; Echotype writes English.
-- **A pill that stays out of the way.** A thin bar at the bottom of the screen. While you talk its bars move with your voice. Drag it anywhere; it follows the screen you are using, or stays where you put it. Prefer nothing on screen? Use the menu bar icon instead. When nothing can take text, it shows your words in a small card with **Copy** rather than pasting into nowhere.
+- **A pill that stays out of the way.** A small ball at the bottom of the screen that stays faint until your pointer comes near. When you talk it bursts into a dotted orb that moves with your voice, thinks while it transcribes, and falls back into the ball. Drag it anywhere; it follows the screen you are using, or stays where you put it. Prefer nothing on screen? Use the menu bar icon instead. When nothing can take text, it shows your words in a small card with **Copy** rather than pasting into nowhere.
 - **Meeting notes.** Echotype hears your microphone and the computer's audio, writes down who said what and, with a cleanup model set up, sums up decisions and action items. It all runs on your Mac.
 - **Drop in a voice note.** Drag a WhatsApp `.opus`, `.m4a`, `.mp3` or `.wav` onto the window for a clean transcript.
 - **Any model, both stages.** Local whisper.cpp on your machine, or any OpenAI-compatible endpoint: OpenAI, Groq, OpenRouter, Ollama, LM Studio, or your own server.
@@ -97,11 +97,13 @@ Every shortcut can be changed in Settings, and paste last and copy last can be t
 
 ### The pill (macOS)
 
-A thin bar waits at the bottom of the screen your cursor is on. Click it to dictate hands-free and click again (or ✓) to finish, ✕ cancels. Right-click it for the microphone, language, paste last, history, meeting notes, hide for 1 hour and settings. Turn it off under Settings → Pill, or hide it for an hour from the menu bar; it still shows while you dictate.
+The orb is [thinking-orbs](https://github.com/Jakubantalik/thinking-orbs) by Jakub Antalik (MIT).
+
+A small ball waits at the bottom of the screen your cursor is on, faint until your pointer comes near it. Click it to dictate hands-free and click again (or ✓) to finish, ✕ cancels. Right-click it for the microphone, language, paste last, history, meeting notes, hide for 1 hour and settings. Turn it off under Settings → Pill, or hide it for an hour from the menu bar; it still shows while you dictate.
 
 Drag the pill anywhere, on any display. Each display remembers where you left it, and a double-click puts it back at the bottom centre. It never goes off-screen or under the menu bar. The pill moves to the screen you are using; turn off **Move to the screen I'm using** to keep it on the screen you last dragged it to.
 
-When nothing focused can take text (the desktop, a list, or Accessibility is off for Echotype), Echotype does not send ⌘V into nowhere. The pill opens into a small card with your words, **Copy** and your paste-last shortcut, and closes by itself after 6 seconds; resting the pointer on it holds it open, ✕ or Esc closes it. The text is still your last transcript and in History.
+When nothing focused can take text (the desktop, a list, or Accessibility is off for Echotype), Echotype does not send ⌘V into nowhere. The orb's dots spread out into a small card with your words, **Copy** and your paste-last shortcut, and closes by itself after 6 seconds; resting the pointer on it holds it open, ✕ or Esc closes it. The text is still your last transcript and in History.
 
 Prefer nothing on screen? Set **Show Echotype in** to **Menu bar** under Settings → Pill. The pill then never shows, not even while you dictate. The menu bar icon becomes the indicator instead: a live waveform while it listens, dots while it transcribes, a brief check when it pastes and a warning sign if something went wrong. Click the icon to dictate hands-free and click again to finish. Right-click it for the microphone, language, paste last, history and settings; its first line says what went wrong, if anything did.
 

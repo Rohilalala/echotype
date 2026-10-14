@@ -25,11 +25,14 @@ const CARD_LINE: usize = 26;
 const MARGIN: f64 = 10.0;
 const LINE_H: f64 = 22.0;
 const MAX_W: f64 = 240.0;
-/// The idle bar is 32x4 to look at and 48x14 to hit.
-const IDLE_HIT: (f64, f64) = (48.0, 14.0);
-/// Recording capsule widths; overlay.html sets the same.
-const REC_W: f64 = 100.0;
-const REC_LOCKED_W: f64 = 112.0;
+/// The idle ball is 10 pt across to look at and 24x22 to hit.
+const IDLE_HIT: (f64, f64) = (24.0, 22.0);
+/// The thinking orb (recording, transcribing, cleaning); overlay.js draws it this size.
+const ORB: f64 = 36.0;
+/// While recording, ✕ and ✓ sit either side of the orb, so its hit area is this wide.
+const REC_W: f64 = 96.0;
+/// The idle ball brightens while the cursor is this close to it (points, centre to cursor).
+const NEAR: f64 = 80.0;
 /// Hover must rest this long before the idle bar opens into its hint (D1), so passing over it
 /// on the way to the Dock does nothing.
 const DWELL: Duration = Duration::from_millis(200);
@@ -304,7 +307,8 @@ impl Pill {
             None => IDLE_HIT,
             // ✕ and ✓ (16 pt each) stay either side of the words.
             Some(a) if a.recording && self.muted => (text_w("Is your mic muted?".len()) + 36.0, LINE_H),
-            Some(a) if a.recording => (if a.locked { REC_LOCKED_W } else { REC_W }, 20.0),
+            Some(a) if a.recording => (REC_W, ORB),
+            Some(Active { notice: None, .. }) => (ORB, ORB),
             Some(a) if a.card => (CARD_W, 42.0 + 15.0 * if a.chars > CARD_LINE { 2.0 } else { 1.0 }),
             Some(a) => (text_w(a.chars), LINE_H),
         }
@@ -519,6 +523,8 @@ struct View {
     hint: String,
     /// Picked up and moving: the capsule lifts.
     drag: bool,
+    /// The cursor is within NEAR of the capsule: the idle ball shows at full strength.
+    near: bool,
 }
 
 struct Screen {
@@ -677,6 +683,7 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
             }
             let mut want = visible(&c, active);
             let mut near = false;
+            let mut close = false;
             let mut held = false;
             let mut dropped: Option<(String, [f64; 2])> = None;
             inside = false;
@@ -745,7 +752,9 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
                 if let Some(c) = cursor {
                     // While held the overlay keeps the mouse, so the mouse-up (and a double-click) reach it.
                     inside = held || r.contains(c);
-                    near = (c.0 - (r.x + r.w / 2.0)).abs() < 200.0 && (c.1 - (r.y + r.h / 2.0)).abs() < 200.0;
+                    let (dx, dy) = (c.0 - (r.x + r.w / 2.0), c.1 - (r.y + r.h / 2.0));
+                    near = dx.abs() < 200.0 && dy.abs() < 200.0;
+                    close = dx.hypot(dy) <= NEAR;
                 }
             }
             if !want
@@ -775,7 +784,7 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
                 shown = want;
             }
             // Picked up, the idle bar is a bar again: the hint is for hovering, not carrying.
-            let view = View { active, hover: inside, expand: expanded && !held, hint, drag: held && lock(&state(&app).drag).is_some_and(|d| d.moved) };
+            let view = View { active, hover: inside, expand: expanded && !held, hint, drag: held && lock(&state(&app).drag).is_some_and(|d| d.moved), near: close || held };
             if emitted.as_ref() != Some(&view) {
                 let _ = app.emit_to("overlay", "pill", &view);
                 emitted = Some(view);
@@ -1272,16 +1281,16 @@ mod tests {
         assert_eq!(p.capsule(false, 32), IDLE_HIT);
         p.on_state(&st("recording"), ms(300));
         assert_eq!(p.tick(ms(600), true), (true, false), "only the idle bar expands (D11)");
-        assert_eq!(p.capsule(false, 32), (REC_W, 20.0));
+        assert_eq!(p.capsule(false, 32), (REC_W, ORB), "the orb with ✕ and ✓ beside it");
         p.set_level(true, 0.0);
-        assert!(p.capsule(false, 32).0 > REC_LOCKED_W);
+        assert_eq!(p.capsule(false, 32).1, LINE_H, "muted: a line of text instead");
         p.on_state(&DictationState { state: "recording", locked: true, ..Default::default() }, ms(700));
-        assert!(p.capsule(false, 32).0 > REC_LOCKED_W, "locking keeps the muted line");
+        assert_eq!(p.capsule(false, 32).1, LINE_H, "locking keeps the muted line");
         p.set_level(false, 0.0);
-        assert_eq!(p.capsule(false, 32), (REC_LOCKED_W, 20.0));
+        assert_eq!(p.capsule(false, 32), (REC_W, ORB));
         p.on_state(&st("transcribing"), ms(800));
         p.set_level(true, 0.0);
-        assert_eq!(p.capsule(false, 32).1, LINE_H, "muted only applies to a live recording");
+        assert_eq!(p.capsule(false, 32), (ORB, ORB), "thinking is the orb alone; muted only applies to a live recording");
     }
 
     #[test]
@@ -1294,15 +1303,16 @@ mod tests {
         let at = place(Rect { x: 1512.0, y: -675.0, w: 2560.0, h: 1575.0 }, 0.0);
         assert_eq!(at, (2662.0, 1575.0 - 675.0 - 10.0 - 79.0));
         let r = capsule_rect(at, IDLE_HIT);
-        assert_eq!((r.x, r.w), (2768.0, 48.0));
+        assert_eq!((r.x, r.w), (2780.0, 24.0));
         // Every line capsule's bottom sits MARGIN above the visible frame; the card grows up from it.
         let line_bottom = |size: (f64, f64)| { let r = capsule_rect(at, size); r.y + r.h };
         assert_eq!(line_bottom((MAX_W, LINE_H)), 1575.0 - 675.0 - 10.0);
         assert_eq!(line_bottom((CARD_W, 72.0)), 1575.0 - 675.0 - 10.0);
-        assert_eq!(capsule_rect(at, IDLE_HIT).y + 7.0, capsule_rect(at, (REC_W, 20.0)).y + 10.0, "every capsule centred on one line");
+        assert_eq!(capsule_rect(at, IDLE_HIT).y + 11.0, capsule_rect(at, (MAX_W, LINE_H)).y + 11.0, "every line centred on one line");
+        assert_eq!(line_bottom((ORB, ORB)), 1575.0 - 675.0 - 10.0, "the orb grows up from it too");
         assert!(capsule_rect(at, (CARD_W, 72.0)).y >= at.1, "the card fits in the window");
         // The cursor on the capsule centre, as Tauri reports it: points x PRIMARY scale (2), not 1.
-        let centre = (r.x + 24.0, r.y + 7.0);
+        let centre = (r.x + 12.0, r.y + 11.0);
         let phys = (centre.0 * 2.0, centre.1 * 2.0);
         assert!(r.contains(cursor_pt(phys, 2.0)) && ext.contains(cursor_pt(phys, 2.0)));
         assert!(!r.contains(cursor_pt(phys, 1.0)), "using the 1x monitor's own scale misses the capsule");

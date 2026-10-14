@@ -20,49 +20,54 @@
     user-select: none;
     cursor: default;
   }
-  /* Sizes match pill.rs (its hit areas): idle 32x4 (hit 48x14), recording 100 or 112 x 20,
-     any line of text 22 tall and at most 240 wide. Black 75%; the idle bar adds a 1 px white
-     hairline so it reads on dark wallpapers, the active states a soft shadow. */
+  /* The body (ball, orb disc, capsule, card) is drawn on #body by overlay.js, which follows this
+     element's box, so .pill itself is transparent and only lays out. Sizes match pill.rs (its hit
+     areas): idle ball 10 (hit 24x22), orb 36 (recording 96 wide with ✕ and ✓), any line of text
+     22 tall and at most 240 wide. */
+  #body { position: fixed; left: 0; top: 0; width: 260px; height: 84px; pointer-events: none; }
   .pill {
     display: flex;
     align-items: center;
     justify-content: center;
     gap: 6px;
-    width: 32px;
-    height: 4px;
+    width: 10px;
+    height: 10px;
     max-width: 240px;
     padding: 0;
     box-sizing: border-box;
-    margin-bottom: 14px;
+    margin-bottom: 11px;
     position: relative;
     border-radius: 11px;
-    background: rgba(0, 0, 0, 0.75);
     color: rgba(255, 255, 255, 0.94);
-    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18), 0 1px 4px rgba(0, 0, 0, 0.12);
     overflow: hidden;
-    transition: transform 0.12s ease, box-shadow 0.12s ease;
+    transition: transform 0.12s ease;
   }
-  .pill > * { display: none; }
-  /* Picked up: a little larger with a lift shadow, so it reads as held while it moves. */
-  .pill.drag { transform: scale(1.15); box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18), 0 3px 9px rgba(0, 0, 0, 0.3); }
+  .pill > * { display: none; animation: show 0.16s ease-out 0.14s backwards; }
+  @keyframes show { from { opacity: 0; } }
+  /* Picked up: a little larger, so it reads as held while it moves. */
+  .pill.drag { transform: scale(1.15); }
   /* A line of text can be 240 wide in a 260 window: it lifts less, so it is never cut off. */
   .pill.drag.active:not([data-state="recording"]) { transform: scale(1.06); }
   /* Idle, hovered for 200 ms: the hint. */
-  .pill.expand { width: auto; height: 22px; margin-bottom: 5px; padding: 0 10px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.16); }
+  .pill.expand { width: auto; height: 22px; margin-bottom: 5px; padding: 0 10px; }
   .pill.expand .label { display: block; }
   /* Any dictation state: a line of text plus at most one chip. */
-  .pill.active { width: auto; height: 22px; margin-bottom: 5px; padding: 0 10px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.16); }
+  .pill.active { width: auto; height: 22px; margin-bottom: 5px; padding: 0 10px; }
   .pill.active .label, .pill.active .secs { display: block; }
   .secs { white-space: nowrap; flex: none; color: rgba(255, 255, 255, 0.62); font-variant-numeric: tabular-nums; }
   .pill.active .chip:not([hidden]) { display: block; }
-  /* Listening: ✕, waveform, timer (a lock glyph in front once hands-free), ✓. */
-  .pill.active[data-state="recording"] { width: 100px; height: 20px; margin-bottom: 6px; padding: 0 2px; gap: 0; justify-content: space-between; border-radius: 10px; }
-  .pill.active[data-state="recording"].locked { width: 112px; }
-  .pill.active[data-state="recording"] .label, .pill.active[data-state="recording"] .chip { display: none; }
-  .pill.active[data-state="recording"] :is(.btn, .wave, .meta) { display: flex; }
-  .pill.active[data-state="recording"].muted { width: auto; height: 22px; margin-bottom: 5px; gap: 4px; padding: 0 10px; }
-  .pill.active[data-state="recording"].muted .wave, .pill.active[data-state="recording"].muted .meta { display: none; }
-  .pill.active[data-state="recording"].muted .label { display: block; }
+  /* The orb (overlay.js draws it): listening, then thinking. While listening, hovering (or
+     hands-free) opens ✕ and ✓ either side of it. The line stays for screen readers only. */
+  .pill.active.orb { width: 36px; height: 36px; padding: 0 4px; gap: 0; justify-content: space-between; }
+  .pill.active.orb[data-state="recording"]:is(.hover, .locked) { width: 96px; }
+  .pill.active.orb :is(.label, .secs, .chip) { display: block; position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .pill.active.orb[data-state="recording"]:is(.hover, .locked) .btn:is(.x, .ok) { display: flex; }
+  /* Pasted: back to the ball at once; the line is still announced. */
+  .pill.active.collapse { width: 10px; height: 10px; margin-bottom: 11px; padding: 0; }
+  .pill.active.collapse :is(.label, .secs, .chip) { display: block; position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  /* Muted: the question in words, between ✕ and ✓. */
+  .pill.active[data-state="recording"].muted { gap: 4px; padding: 0 2px; }
+  .pill.active[data-state="recording"].muted .btn:is(.x, .ok) { display: flex; }
 
   .btn {
     width: 16px; height: 16px; flex: none; padding: 0; border: 0; border-radius: 8px;
@@ -76,13 +81,6 @@
   /* D5: hands-free has no key to let go of, so ✓ stays in sight. */
   .pill.locked .btn.ok { opacity: 1; background: rgba(255, 255, 255, 0.16); }
 
-  .wave { align-items: center; gap: 1.5px; height: 12px; flex: none; }
-  .wave i { width: 1.5px; height: 100%; border-radius: 1px; background: currentColor; transform: scaleY(0.12); transition: transform 0.08s linear; }
-  .meta { align-items: center; gap: 3px; flex: none; }
-  .time { font-size: 10px; font-variant-numeric: tabular-nums; color: rgba(255, 255, 255, 0.62); letter-spacing: 0.01em; }
-  .lock { width: 9px; height: 9px; display: none; }
-  .lock svg { width: 9px; height: 9px; fill: none; stroke: rgba(255, 255, 255, 0.8); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; display: block; }
-  .pill.locked .lock { display: block; }
 
   /* The primary line keeps its words; the chip gives way first. */
   .label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 0 auto; max-width: 100%; letter-spacing: 0; }
@@ -95,7 +93,9 @@
   /* Nowhere to paste: the transcript (two lines at most), a 6 s countdown ring, the paste-last
      shortcut and Copy, which is the one thing to do here, so it is the only filled control.
      Sizes match pill.rs (CARD_W, 42 + 15 per line). */
-  .pill.active.card { flex-direction: column; align-items: stretch; width: 240px; height: auto; padding: 8px 10px 6px; gap: 6px; border-radius: 10px; transform-origin: 50% 100%; animation: card-in 0.16s ease-out; }
+  .pill.active.card { flex-direction: column; align-items: stretch; width: 240px; height: auto; padding: 8px 10px 6px; gap: 6px; border-radius: 10px; transform-origin: 50% 100%; }
+  /* The orb's dots fly out to the card's edge first (overlay.js); then its words arrive. */
+  .pill.active.card > * { animation-delay: 0.36s; }
   .pill.active.card :is(.label, .secs, .chip) { display: none; }
   .pill.active.card .ctext { display: -webkit-box; }
   .pill.active.card .crow, .pill.active.card .close { display: flex; }
@@ -111,21 +111,19 @@
   .copy:hover { background: rgba(255, 255, 255, 0.24); }
   .pill.active.card .close { position: absolute; top: 6px; right: 6px; opacity: 0.7; }
   .pill.active.card .close:hover { opacity: 1; background: rgba(255, 255, 255, 0.16); }
-  @keyframes card-in { from { transform: scale(0.94); opacity: 0; } }
   @keyframes ring { to { stroke-dashoffset: 28.27; } }
 
   @media (prefers-reduced-motion: reduce) {
-    .pill.active.card { animation: none; }
-    .btn, .wave i, .pill { transition: none; }
+    .pill > * { animation: none; }
+    .btn, .pill { transition: none; }
     .pill.drag { transform: none; }
   }
 </style>
 </head>
 <body>
+  <canvas id="body" aria-hidden="true"></canvas>
   <div class="pill" id="pill" data-state="idle" role="group" aria-label="Start dictation">
     <button class="btn x" type="button" data-act="cancel" aria-label="Cancel dictation" title="Cancel"><svg viewBox="0 0 8 8"><path d="M1 1l6 6M7 1L1 7"/></svg></button>
-    <span class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
-    <span class="meta"><span class="lock" role="img" aria-label="Locked, hands-free"><svg viewBox="0 0 10 10"><rect x="1.5" y="4.5" width="7" height="4.5" rx="1"/><path d="M3 4.5V3a2 2 0 0 1 4 0v1.5"/></svg></span><span class="time" id="time"></span></span>
     <span class="label" id="label" role="status" aria-live="polite"></span>
     <span class="secs" id="secs" aria-hidden="true"></span>
     <span class="chip" id="chip" hidden></span>
