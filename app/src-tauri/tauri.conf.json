@@ -35,9 +35,12 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": ["sounds/*.wav"],
+    "resources": [
+      "sounds/*.wav"
+    ],
     "macOS": {
-      "entitlements": "Entitlements.plist"
+      "entitlements": "Entitlements.plist",
+      "signingIdentity": "-"
     }
   }
 }
