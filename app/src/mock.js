@@ -100,7 +100,7 @@ const commands = {
     const talk = settings.talk_key !== 'accelerator', globe = q.get('globe') !== '0', im = q.get('im') !== '0', relaunch = q.has('relaunch');
     const active = talk && (settings.talk_key !== 'fn' || globe) && im && !relaunch;
     return { talk_key_active: active, talk_key_error: talk && !active ? 'not active' : null, input_monitoring: im, globe_does_nothing: globe,
-      needs_relaunch: talk && im && relaunch, shortcut_errors: q.has('shortcutfail') ? ["Could not register hotkey 'Alt+Space': already in use"] : [], key_label: '⌥ Space' };
+      needs_relaunch: talk && im && relaunch, unregistered_shortcuts: q.has('shortcutfail') && settings.hotkey === 'Alt+Space' ? ['hotkey'] : [], key_label: '⌥ Space' };
   },
   relaunch: () => null,
   get_history: ({ limit }) => {

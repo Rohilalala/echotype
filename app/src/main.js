@@ -42,7 +42,7 @@ function cast(el, text, step) {
 const CROSS = '<path d="M4 4l8 8M12 4l-8 8"/>';
 
 let S, presets, models = [], sys, isMac = true;
-let status = {}; // shortcut_status: talk key, Input Monitoring, Globe key, launch-time shortcut errors
+let status = {}; // shortcut_status: talk key, Input Monitoring, Globe key, shortcuts another app holds
 let devices = [];
 const progress = {}, modelErr = {};
 let recent = [], dropResults = [], apiStatus = null, tokenShown = false;
@@ -285,8 +285,10 @@ function renderTalk() {
     el.classList.toggle('warn', S.talk_key !== 'accelerator' && !status.talk_key_active);
   }
   $('#obTalk').value = S.talk_key;
-  const errs = status.shortcut_errors || [];
-  if (errs.length && $('#hotkeyError').hidden) { $('#hotkeyError').textContent = 'Shortcut unavailable'; $('#hotkeyError').title = errs.join('\n'); $('#hotkeyError').hidden = false; }
+  for (const field of status.unregistered_shortcuts || []) {
+    const err = errEl(field);
+    if (err.hidden) { err.textContent = `${hotkeyText(S[field])} isn't working: another app may be using it. Pick another.`; err.hidden = false; }
+  }
 }
 $('#obTalk').addEventListener('change', e => { S.talk_key = e.target.value; syncBound(); save().then(refreshStatus); });
 
@@ -309,6 +311,7 @@ let muted = false;
 let perms = null, sttKeySaved = true;
 function blocker() {
   if (perms && !perms.accessibility) return { text: "Echotype can't paste yet: Accessibility access is off.", label: 'Allow Accessibility', act: () => invoke('open_permission_settings', { kind: 'accessibility' }) };
+  if (status.unregistered_shortcuts?.includes('hotkey') && !status.talk_key_active) return { text: `${hotkeyText(S.hotkey)} isn't working: another app may be using it.`, label: 'Change shortcut', act: () => go('settings') };
   if (perms?.microphone === 'denied') return { text: 'Microphone access is blocked for Echotype.', label: 'Allow microphone', act: () => invoke('open_permission_settings', { kind: 'microphone' }) };
   const p = preset(S.stt.provider);
   if (S.stt.provider === 'cloud') {

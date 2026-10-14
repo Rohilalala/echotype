@@ -71,8 +71,6 @@ struct AppState {
     last_output: Mutex<Option<String>>,
     /// Model downloads in flight: id → fraction done, so a press can say "Model downloading 42%".
     downloads: Mutex<HashMap<String, f64>>,
-    /// Shortcuts that failed to register at launch, shown in Settings.
-    shortcut_errors: Mutex<Vec<String>>,
     /// The mic is open, so paste-last must not replace the recording pill with its notice.
     recording: AtomicBool,
 }
@@ -627,6 +625,13 @@ fn shortcuts(s: &Settings) -> [String; 3] {
     [s.hotkey.clone(), s.paste_last_hotkey.clone(), s.copy_last_hotkey.clone()]
 }
 
+/// The settings fields whose shortcut is set but not registered right now: taken by another app
+/// at launch, and fixed by picking another key. Asked live, so a fixed one stops being reported.
+fn unregistered_shortcuts(s: &Settings, registered: impl Fn(&str) -> bool) -> Vec<&'static str> {
+    let fields = ["hotkey", "paste_last_hotkey", "copy_last_hotkey"];
+    shortcuts(s).iter().zip(fields).filter(|(k, _)| !k.is_empty() && !registered(k)).map(|(_, f)| f).collect()
+}
+
 fn same_shortcut(a: &str, b: &str) -> bool {
     !a.is_empty() && match (parse_hotkey(a), parse_hotkey(b)) {
         (Ok(x), Ok(y)) => x.id() == y.id(),
@@ -1056,7 +1061,7 @@ fn shortcut_status_now(app: &AppHandle) -> R<serde_json::Value> {
         "globe_does_nothing": globe,
         // Granted but macOS still refuses the tap: only a new process picks the grant up.
         "needs_relaunch": input_monitoring && hotkey::keycode(&s.talk_key).is_some() && (s.talk_key != "fn" || globe) && !talk_tap_active() && talk_key_error.is_some(),
-        "shortcut_errors": lock(&state(&app).shortcut_errors).clone(),
+        "unregistered_shortcuts": unregistered_shortcuts(&s, |k| parse_hotkey(k).is_ok_and(|sc| app.global_shortcut().is_registered(sc))),
         "key_label": key_label(&s, cfg!(target_os = "macos")),
     }))
 }
@@ -1226,7 +1231,6 @@ pub fn run() {
                 last_failed: Mutex::new(None),
                 last_output: Mutex::new(None),
                 downloads: Mutex::new(HashMap::new()),
-                shortcut_errors: Mutex::new(vec![]),
                 recording: AtomicBool::new(false),
             });
             create_tray(app)?;
@@ -1241,7 +1245,6 @@ pub fn run() {
             for key in shortcuts(&s).iter().filter(|k| !k.is_empty()) {
                 if let Err(e) = swap_hotkey(app.handle(), "", key) {
                     eprintln!("echotype: {e}");
-                    lock(&state(app.handle()).shortcut_errors).push(e);
                 }
             }
             apply_talk_key(app.handle(), &s);
@@ -1430,7 +1433,7 @@ fn cli_report(result: R<cleanup::Output>, total_ms: u128) -> (String, String, i3
 
 #[cfg(test)]
 mod tests {
-    use super::{Settings, accel_label, chip, cli_report, commit, parse_hotkey};
+    use super::{Settings, accel_label, chip, cli_report, commit, parse_hotkey, unregistered_shortcuts};
     use crate::audio::Quality;
     use std::cell::RefCell;
 
@@ -1467,6 +1470,16 @@ mod tests {
         assert_eq!(chip(Some(Quality::Quiet), true), Some("quiet"));
         assert_eq!(chip(None, true), Some("no_cleanup"));
         assert_eq!(chip(None, false), None);
+    }
+
+    // Regression: a shortcut taken at launch stayed "unavailable" after the user picked one that worked.
+    #[test]
+    fn unregistered_shortcuts_are_asked_live_and_ignore_unset_ones() {
+        let mut s = Settings { hotkey: "Alt+Space".into(), paste_last_hotkey: "CommandOrControl+Control+V".into(), copy_last_hotkey: String::new(), ..Settings::default() };
+        assert_eq!(unregistered_shortcuts(&s, |k| k != "Alt+Space"), ["hotkey"]);
+        s.hotkey = "Alt+KeyD".into();
+        assert!(unregistered_shortcuts(&s, |k| k != "Alt+Space").is_empty());
+        assert_eq!(unregistered_shortcuts(&s, |_| false), ["hotkey", "paste_last_hotkey"]);
     }
 
     #[test]
