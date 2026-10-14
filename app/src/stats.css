@@ -1,0 +1,93 @@
+/*
+  Stats page and the Home strip (stats.js). Same tokens and quiet grayscale as styles.css.
+  The year grid is the page's one use of the accent: its shades are mixed from --accent over
+  the pane, so a theme that changes --accent (or sets --heat-0..4) recolours it.
+  Focal point: the "Right now" speed figure. Motion: none beyond hover.
+*/
+:root {
+  --heat-0: color-mix(in srgb, var(--fg) 8%, var(--pane));
+  --heat-1: color-mix(in srgb, var(--accent) 28%, var(--pane));
+  --heat-2: color-mix(in srgb, var(--accent) 52%, var(--pane));
+  --heat-3: color-mix(in srgb, var(--accent) 76%, var(--pane));
+  --heat-4: var(--accent);
+}
+
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* Home: one quiet line of today's numbers that opens the Stats page. */
+.stats-strip {
+  all: unset;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 28px;
+  margin: 12px 0 0;
+  padding: 10px 14px;
+  border-radius: var(--r-card);
+  font-variant-numeric: tabular-nums;
+  transition: background var(--dur) ease;
+}
+.stats-strip:hover { background: var(--hover); }
+.stats-strip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.stats-strip > span { display: flex; flex-direction: column; gap: 1px; white-space: nowrap; }
+.stats-strip b { font-size: 14px; font-weight: var(--fw-semi); }
+.stats-strip small { font-size: 12px; color: var(--fg-3); }
+
+/* Figures: a card of three numbers, hairline columns, the first one larger. */
+.figs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.fig { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; min-width: 0; }
+.fig + .fig { border-left: 1px solid var(--line); }
+.fig-label { font-size: 12px; color: var(--fg-2); }
+.fig-value { font-size: 22px; line-height: 36px; font-weight: var(--fw-med); letter-spacing: -0.01em; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.fig.big .fig-value { font-size: 30px; line-height: 36px; }
+.fig-value small { font-size: 13px; font-weight: var(--fw); color: var(--fg-2); margin-left: 4px; letter-spacing: 0; }
+.fig-sub { font-size: 12px; color: var(--fg-3); min-height: 17px; }
+.stats-note { margin: 8px 2px 0; font-size: 12px; color: var(--fg-3); max-width: 62ch; }
+.stats-empty { margin: 4px 0 0; padding: 12px 14px; border-radius: var(--r-card); background: var(--soft); color: var(--fg-2); }
+
+/* This week: seven bars under the word totals. */
+.week { list-style: none; margin: 0; padding: 12px 14px 10px; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; border-top: 1px solid var(--line); }
+.week-day { display: flex; flex-direction: column; align-items: center; gap: 3px; font-size: 11.5px; color: var(--fg-3); }
+.week-bar { display: flex; align-items: flex-end; width: 100%; max-width: 30px; height: 36px; }
+.week-bar i { display: block; width: 100%; border-radius: 3px; background: color-mix(in srgb, var(--fg) 22%, var(--pane)); }
+.week-day b { color: var(--fg-2); font-weight: var(--fw-med); font-variant-numeric: tabular-nums; min-height: 16px; }
+.week-day.today, .week-day.today b { color: var(--fg); }
+.week-day.today .week-bar i { background: color-mix(in srgb, var(--fg) 50%, var(--pane)); }
+
+/* The year grid: a column per week, Monday on top. */
+.heat-card { position: relative; padding: 12px 14px; }
+.heat-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px 12px; margin-bottom: 8px; font-size: 12px; color: var(--fg-2); }
+.heat { display: grid; gap: 2px; font-size: 10.5px; line-height: 1; color: var(--fg-3); border-radius: 4px; }
+.heat:focus-visible { outline-offset: 6px; }
+.heat-month { white-space: nowrap; padding-bottom: 4px; }
+.heat-wd { padding-right: 6px; align-self: center; line-height: 0; } /* no height of its own: the cells set the row */
+.heat-cell { display: block; aspect-ratio: 1; border-radius: 2px; background: var(--heat-0); }
+.heat-cell[data-l="1"] { background: var(--heat-1); }
+.heat-cell[data-l="2"] { background: var(--heat-2); }
+.heat-cell[data-l="3"] { background: var(--heat-3); }
+.heat-cell[data-l="4"] { background: var(--heat-4); }
+.heat-cell.on { outline: 1.5px solid var(--fg); outline-offset: 1px; }
+.legend { display: inline-flex; align-items: center; gap: 3px; color: var(--fg-3); }
+.legend .heat-cell { width: 10px; }
+.legend .heat-cell:first-of-type { margin-left: 3px; }
+.legend .heat-cell:last-of-type { margin-right: 3px; }
+.heat-tip { position: absolute; z-index: 3; pointer-events: none; padding: 5px 8px; border-radius: var(--r-ctl); background: var(--solid); color: var(--solid-ink); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; box-shadow: var(--shadow-menu); }
+
+/* Highlights: plain facts, no card. */
+.facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 20px 2px 0; }
+.facts dt { font-size: 12px; color: var(--fg-2); margin-bottom: 2px; }
+.facts dd { margin: 0; font-size: 15px; font-weight: var(--fw-med); display: flex; flex-direction: column; gap: 1px; }
+.facts dd span { font-size: 12px; font-weight: var(--fw); color: var(--fg-3); }
+
+/* Milestones: quiet outlined marks with the day each was reached. */
+.marks { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.mark { display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--r-ctl); font-size: 12.5px; }
+.mark time { color: var(--fg-3); font-variant-numeric: tabular-nums; }
+
+#statsOff { margin: 0 0 16px; }
+#statsBody > :first-child > .group-title:first-child { margin-top: 4px; }
+
+@media (max-width: 620px) {
+  .fig { padding: 10px; }
+  .fig.big .fig-value { font-size: 24px; }
+  .facts { grid-template-columns: 1fr 1fr; }
+}

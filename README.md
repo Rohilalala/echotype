@@ -28,6 +28,7 @@
 - **Any model, both stages.** Local whisper.cpp on your machine, or any OpenAI-compatible endpoint: OpenAI, Groq, OpenRouter, Ollama, LM Studio, or your own server.
 - **Knows your machine.** Echotype checks free memory before it loads or recommends a model.
 - **A local API for your scripts and agents.** `POST http://127.0.0.1:7811/v1/audio/transcriptions` runs the same pipeline.
+- **See how much you talk.** The Stats page shows your words per minute, words per day and a year grid of the days you dictated. They are counts only, never your text, and stay on your computer; switch them off or clear them on the same page.
 
 With local models, nothing leaves your computer. API keys live in the system keychain.
 

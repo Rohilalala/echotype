@@ -134,10 +134,13 @@ async fn transcribe(State(st): State<ApiState>, req: Request) -> Response {
     if let Some(p) = prompt.filter(|p| !p.is_empty()) {
         settings.dictionary.push(p);
     }
+    let app = st.app.clone();
     let job = tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;
         let pcm = crate::audio::decode(file, ext.as_deref()).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-        crate::cleanup::run(&settings, &pcm, false, || {}).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
+        let out = crate::cleanup::run(&settings, &pcm, false, || {}).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        crate::record_stats(&app, &settings, crate::stats::Source::Api, &out.text, 0);
+        Ok(out)
     });
     match job.await {
         Ok(Ok(out)) => reply(out, format.as_deref()),

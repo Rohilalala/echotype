@@ -141,6 +141,7 @@ function go(page) {
   if (page === 'settings') { refreshPerms(); refreshApi(); refreshStatus(); }
   if (page === 'speech' || page === 'cleanup') refreshCloud();
   history.replaceState(null, '', '#' + page);
+  document.dispatchEvent(new CustomEvent('echotype:page', { detail: page })); // stats.js refreshes on its page
   window.__TAURI__.event.emit?.('main-page', page); // Home shows the live state, so the pill steps aside there (D14)
 }
 $('#nav').addEventListener('click', e => { const b = e.target.closest('button'); if (b) go(b.dataset.page); });
@@ -1164,6 +1165,8 @@ refreshCloud();
 renderMics();
 refreshPerms();
 refreshStatus();
+try { (await import('./stats.js')).init({ invoke, listen, h, go, settings: () => S, keys: () => `${verb()} ${hotkeyText(S.hotkey)}` }); }
+catch (e) { console.error('Stats did not load', e); } // the rest of the window still works
 const start = location.hash.slice(1);
 go($(`main > section[data-page="${start}"]`) ? start : 'home');
 if (!S.onboarded) { showOnboarding(true); obStartModel(); obShow(+new URLSearchParams(location.search).get('step') || 1); }

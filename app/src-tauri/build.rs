@@ -14,6 +14,8 @@ const COMMANDS: &[&str] = &[
     "list_input_devices",
     "get_history",
     "clear_history",
+    "get_stats",
+    "clear_stats",
     "transcribe_file",
     "get_system_info",
     "local_api_status",

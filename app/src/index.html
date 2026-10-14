@@ -7,6 +7,7 @@
   <title>Echotype</title>
   <link rel="icon" href="icon.svg" />
   <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="stats.css" />
   <link rel="stylesheet" href="look-v2.css" />
   <script type="module" src="main.js"></script>
 </head>
@@ -19,6 +20,7 @@
       <button data-page="language"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.75"/><ellipse cx="8" cy="8" rx="2.4" ry="5.75"/><path d="M2.4 8h11.2"/></svg>Language</button>
       <button data-page="dictionary"><svg viewBox="0 0 16 16"><path d="M3 12V4a1.5 1.5 0 0 1 1.5-1.5H13v9H4.5A1.5 1.5 0 0 0 3 13a1.5 1.5 0 0 0 1.5 1.5H13"/></svg>Dictionary</button>
       <button data-page="history"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.75"/><path d="M8 4.8v3.4l2.2 1.4"/></svg>History</button>
+      <button data-page="stats"><svg viewBox="0 0 16 16"><path d="M2.5 13.5h11"/><path d="M3 10.5l3-3.25 2.5 2L13 4.5"/></svg>Stats</button>
       <button data-page="settings" class="nav-foot"><svg viewBox="0 0 16 16"><path d="M2.5 5h6M11.5 5h2M2.5 11h2M7.5 11h6"/><circle cx="10" cy="5" r="1.5"/><circle cx="6" cy="11" r="1.5"/></svg>Settings</button>
     </nav>
   </aside>
@@ -64,6 +66,8 @@
         <button class="btn" id="rawSetup" type="button">Set up cleanup</button>
         <button class="icon-btn" id="rawDismiss" type="button" aria-label="Dismiss"></button>
       </div>
+
+      <button class="stats-strip" id="statsStrip" type="button" hidden></button>
 
       <h2 class="group-title" id="recentTitle">Recent</h2>
       <div class="list" id="recent"></div>
@@ -189,6 +193,31 @@
       </div>
       <p class="lede">Everything you dictated, newest first. Expand an entry to see what the speech model heard.</p>
       <div id="historyList" class="history"></div>
+    </section>
+
+    <!-- Stats (stats.js): counts kept on this computer, never text -->
+    <section data-page="stats" hidden>
+      <h1 id="statsTitle" tabindex="-1">Your stats</h1>
+      <p class="lede">Counted on this Mac from what you dictate. Nothing is sent anywhere, and no text is kept here.</p>
+      <div class="notice" id="statsOff" hidden>
+        <span class="notice-text">Usage stats are off, so nothing new is counted. What was counted stays until you clear it.</span>
+        <span class="actions"><button class="btn" id="statsOn" type="button">Turn on</button></span>
+      </div>
+      <div id="statsBody"></div>
+
+      <h2 class="group-title">Stats settings</h2>
+      <div class="group">
+        <label class="row"><span class="row-text"><span class="row-title">Count usage stats</span><span class="row-desc">Words, speed and streaks, counted on this Mac. Off stops counting.</span></span>
+          <input type="checkbox" class="switch" data-bind="usage_stats" /></label>
+        <label class="row"><span class="row-text"><span class="row-title">Your name</span><span class="row-desc">Shown at the top of this page. Stays on this Mac.</span></span>
+          <input type="text" data-bind="display_name" maxlength="40" placeholder="Your name" spellcheck="false" autocomplete="off" /></label>
+        <div class="row"><span class="row-text"><span class="row-title">Clear stats</span><span class="row-desc">Deletes every count, speed and streak. History stays as it is.</span></span>
+          <button class="btn quiet danger" id="clearStats" type="button">Clear stats</button>
+          <span class="confirm" id="clearStatsConfirm" hidden>Delete all stats?
+            <button class="btn quiet" id="clearStatsCancel" type="button">Cancel</button>
+            <button class="btn danger" id="clearStatsYes" type="button">Clear stats</button>
+          </span></div>
+      </div>
     </section>
 
     <!-- Settings -->
