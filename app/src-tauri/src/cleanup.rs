@@ -162,6 +162,34 @@ pub fn has_speech(text: &str) -> bool {
     text.chars().any(char::is_alphanumeric)
 }
 
+/// The numbers in a text ("12", "3.5", "10:30" counts as 10 and 30), as written.
+/// Thousands commas are joined ("1,500" and "1500" are one number) and all-zero parts ("5.00") skipped.
+fn numbers(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let joined: String = chars.iter().enumerate().filter(|&(i, c)| !(*c == ',' && i > 0 && chars[i - 1].is_ascii_digit() && chars.get(i + 1).is_some_and(char::is_ascii_digit))).map(|(_, c)| *c).collect();
+    joined.split(|c: char| !c.is_ascii_digit()).map(|n| n.trim_start_matches('0')).filter(|n| !n.is_empty()).map(String::from).collect()
+}
+
+/// A cleanup that loses a number the speaker said changed what they meant (the 1.5B model turns
+/// "12 blueberries, 3 chocolates" into a list and drops the amounts as if they were counters).
+/// Dropping one is fine only after a spoken correction ("12, no actually 3").
+// ponytail: a word-list heuristic for corrections; replace when the model stops dropping amounts.
+pub fn lost_a_number(raw: &str, cleaned: &str) -> bool {
+    const CORRECTIONS: [&str; 10] = ["no actually", "actually", "no wait", "wait", "i mean", "scratch that", "sorry", "make that", "rather", "nahi"];
+    let low = raw.to_lowercase();
+    if CORRECTIONS.iter().any(|c| low.contains(c)) {
+        return false;
+    }
+    let mut left = numbers(cleaned);
+    numbers(raw).iter().any(|n| match left.iter().position(|m| m == n) {
+        Some(i) => {
+            left.swap_remove(i);
+            false
+        }
+        None => true,
+    })
+}
+
 /// Nothing but filler ("um", "uh, you know", "Hmm."): what the Echotype model rightly answers with
 /// nothing. "No", "yes", "nope" and "ok" are answers, not filler.
 pub fn only_filler(text: &str) -> bool {
@@ -241,6 +269,9 @@ fn after_stt(s: &Settings, raw: String, stt_ms: u64, mut warning: Option<String>
         on_cleaning();
         let t = Instant::now();
         match llm(s, &text) {
+            Ok(c) if !c.is_empty() && lost_a_number(&text, &c) => {
+                warning = Some("Cleanup left out a number you said, so Echotype pasted your words as spoken.".into());
+            }
             Ok(c) if !c.is_empty() => text = c,
             // The Echotype model was trained to answer filler-only input with nothing: no speech.
             // It also drops some one-word answers ("No.", "Yes.", "Nope."), so real words are kept.
@@ -377,6 +408,21 @@ mod tests {
             let o = after_stt(&s, word.into(), 1, None, false, true, || {}, |_, _| Ok(String::new()));
             assert_eq!(o.text, word);
         }
+    }
+
+    #[test]
+    fn a_cleanup_that_drops_an_amount_is_not_used() {
+        let raw = "Create a list of 12 blueberries, 3 chocolates and 15 mobile phones.";
+        assert!(lost_a_number(raw, "Create a list of:\n1. Blueberries\n2. Chocolates\n3. Mobile phones"));
+        assert!(!lost_a_number(raw, "Create a list of:\n- 12 blueberries\n- 3 chocolates\n- 15 mobile phones"));
+        assert!(!lost_a_number("I need 12 blueberries, no actually just 3", "I need 3 blueberries."), "a correction may drop one");
+        assert!(!lost_a_number("meet at 10:30 on the 5th", "Meet at 10:30 on the 5th."));
+        assert!(!lost_a_number("it costs 1,500 dollars or $5.00 each", "It costs $1500, or $5 each."), "formatting is not loss");
+        let mut s = Settings::default();
+        s.cleanup.enabled = true;
+        let o = after_stt(&s, raw.into(), 1, None, false, true, || {}, |_, _| Ok("1. Blueberries".into()));
+        assert_eq!(o.text, raw, "the words as spoken");
+        assert!(o.warning.is_some_and(|w| w.contains("number")));
     }
 
     #[test]
