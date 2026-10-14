@@ -170,7 +170,8 @@ function frame(now) {
   }
   // Recording and thinking orbs are centred on the body; while listening ✕ and ✓ widen it.
   const cx = box.x + box.w / 2, cy = box.y + box.h / 2;
-  const T = targets(orb ? 'orb' : ball ? 'ball' : 'edge', cx, cy);
+  const kind = orb ? 'orb' : ball ? 'ball' : 'edge';
+  const T = targets(kind, cx, cy);
   if (orb !== prevOrb) {
     // Bursting out of the ball: a kick outward so the dots explode rather than slide.
     if (orb && prevOrb === false && !still) for (const q of P) { const dx = q.x - cx, dy = q.y - cy, d = Math.hypot(dx, dy) || 1; q.vx += (dx / d) * 120; q.vy += (dy / d) * 120; }
@@ -179,7 +180,7 @@ function frame(now) {
   const s = dt / 1000;
   let moving = false;
   for (let i = 0; i < N; i++) {
-    const q = P[i], [tx, ty, tr, ta, tw] = T[i];
+    const q = P[i], [tx, ty, tr, tap, tw] = T[i];
     if (still) { q.x = tx; q.y = ty; q.vx = q.vy = 0; }
     else {
       // Slightly under-damped: a touch of overshoot, then still.
@@ -189,6 +190,9 @@ function frame(now) {
       q.x += q.vx * s;
       q.y += q.vy * s;
     }
+    // An edge is only drawn by its dots on the way there: once one lands it fades into the outline.
+    const landed = kind === 'edge' && Math.hypot(q.x - tx, q.y - ty) < 1.5 && Math.abs(q.vx) + Math.abs(q.vy) < 12;
+    const ta = landed ? 0 : tap;
     q.r = follow(q.r, tr, dt, 90);
     q.a = follow(q.a, ta, dt, 110);
     q.w = follow(q.w, tw, dt, 120);
