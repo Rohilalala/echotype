@@ -20,6 +20,7 @@ const settings = {
   copy_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+C',
   autostart: !q.has('upgrade'), sounds: true,
   pill_idle: !q.has('pilloff'), pill_hidden_until: q.has('pillhidden') ? now + 42 * 60000 : 0, pill_in_recordings: false,
+  pill_positions: {}, pill_screen: null, pill_follow_cursor: true, show_in: q.has('menubar') ? 'menubar' : 'pill',
   dismissed: q.has('upgrade') || q.has('onboarding') ? [] : ['upgrade_offer'],
 };
 if (q.has('bt')) settings.input_device = 'AirPods Pro';
@@ -127,6 +128,8 @@ const commands = {
   pill_cancel: () => null,
   pill_open: () => null,
   pill_menu: () => null,
+  pill_drag: () => null,
+  pill_reset: () => null,
   check_permissions: () => ({ microphone: 'granted', accessibility: !q.has('noaccess') }),
   open_permission_settings: () => null,
   cloud_start_login: async ({ email }) => {
