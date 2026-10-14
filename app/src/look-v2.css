@@ -127,6 +127,7 @@
 /* The sheet: inset on every side and rounded all round, separated from the desk by tone. */
 :root[data-look="v2"] main {
   margin: 8px 8px 8px 0;
+  padding-right: 24px; /* 8 px narrower than Classic's pane, so content keeps Classic's width */
   border: 0;
   border-radius: var(--r-float);
   box-shadow: 0 0 0 1px var(--line);

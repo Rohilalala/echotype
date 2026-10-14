@@ -129,6 +129,7 @@ function changed(p) {
   if (p === 'pill_idle' || p === 'show_in') renderPill();
   if (p === 'pill_size' || p === 'ball_size') sizePreview();
   if (p === 'sounds') $('#soundPackRow').hidden = !S.sounds;
+  if (p === 'greetings' || p === 'display_name') renderGreeting();
   if (p === 'sound_pack') invoke('preview_sounds', { pack: S.sound_pack }).catch(() => {}); // hear it as you pick it
   if (p === 'look') applyLook();
   renderChips();
@@ -139,6 +140,7 @@ function go(page) {
   for (const s of $$('main > section')) s.hidden = s.dataset.page !== page;
   for (const b of $$('nav button')) b.toggleAttribute('aria-current', false), b.dataset.page === page && b.setAttribute('aria-current', 'page');
   $('#main').scrollTop = 0;
+  if (page === 'home') renderGreeting();
   if (page === 'history') renderHistory();
   if (page === 'meetings') meetingsPage.show();
   if (page === 'settings') { refreshPerms(); refreshApi(); refreshStatus(); }
@@ -1196,8 +1198,36 @@ function applyLook() {
   else delete document.documentElement.dataset.look;
 }
 
+// Large windows: the whole window a step larger (the webview's page zoom, like the pill's), so
+// it doesn't sit tiny on a big screen. From the window's own width, which zoom doesn't change.
+const zoomFor = w => (w >= 2000 ? 1.3 : w >= 1600 ? 1.2 : w >= 1300 ? 1.1 : 1);
+let zoomed = 1;
+function fitZoom() {
+  const z = zoomFor(window.outerWidth);
+  if (z === zoomed) return;
+  zoomed = z;
+  window.__TAURI__.webview?.getCurrentWebview?.().setZoom(z).catch(() => {});
+}
+addEventListener('resize', fitZoom);
+fitZoom();
+
+// Home's hello: by time of day, with the name from Stats when there is one, and one line from
+// a small set, picked when the window opens. Settings → Advanced can turn it off (`greetings`).
+const PROMPTS = ["What's on the speak list today?", "Let's get going.", 'Ready when you are.', 'What are we writing today?', 'Talk it out, Echotype types it.', 'Say the first sentence.'];
+const prompt = PROMPTS[Math.floor(Math.random() * PROMPTS.length)];
+function renderGreeting() {
+  const el = $('#greeting'), on = S.greetings !== false;
+  el.hidden = !on;
+  if (!on) return;
+  const h = new Date().getHours();
+  const hello = h >= 5 && h < 12 ? 'Good morning' : h >= 12 && h < 17 ? 'Good afternoon' : h >= 17 && h < 22 ? 'Good evening' : 'Working late';
+  const name = (S.display_name || '').trim().split(/\s+/)[0];
+  el.textContent = `${hello}${name ? `, ${name}` : ''}. ${prompt}`;
+}
+
 function renderAll() {
   applyLook();
+  renderGreeting();
   renderHotkey();
   renderPill();
   renderRaw();

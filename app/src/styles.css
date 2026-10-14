@@ -170,6 +170,12 @@ main {
 .pane-drag { position: fixed; top: 0; left: var(--side-w); right: 0; height: 32px; z-index: 4; }
 :root[data-os="other"] .pane-drag { display: none; } /* a native title bar drags there */
 main > section { max-width: 600px; margin: 0 auto; }
+/* Home sits in the middle of the pane (a little above centre), however tall the window. */
+main > section[data-page="home"]:not([hidden]) { display: flex; flex-direction: column; justify-content: center; min-height: 100%; padding-bottom: 6vh; }
+main > section[data-page="home"] .hero { margin-top: 0; }
+.greeting { margin: 0 0 14px; font-size: 15px; color: var(--fg-2); animation: greet-in 0.6s ease-out both; }
+@keyframes greet-in { from { opacity: 0; transform: translateY(6px); } }
+@media (prefers-reduced-motion: reduce) { .greeting { animation: none; } }
 h1 { font-size: 20px; line-height: 26px; font-weight: var(--fw-semi); letter-spacing: -0.01em; margin: 0 0 4px; }
 .lede { color: var(--fg-2); margin: 0 0 20px; max-width: 62ch; }
 .lede.small { margin: -2px 0 10px; font-size: 12px; }

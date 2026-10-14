@@ -175,7 +175,8 @@ function targets(kind, cx, cy) {
 }
 
 function frame(now) {
-  const dt = Math.min(64, now - last);
+  // rAF's timestamp can be a little earlier than the performance.now() kick() started from.
+  const dt = Math.max(0, Math.min(64, now - last));
   last = now;
   const b = pill.getBoundingClientRect();
   const orb = pill.classList.contains('orb'), card = pill.classList.contains('card');
@@ -225,7 +226,7 @@ function frame(now) {
   g.clearRect(0, 0, W, H);
   g.globalAlpha = alpha;
   g.beginPath();
-  g.roundRect(box.x, box.y, box.w, box.h, box.r);
+  g.roundRect(box.x, box.y, Math.max(0, box.w), Math.max(0, box.h), Math.max(0, box.r));
   g.shadowColor = 'rgba(0,0,0,0.16)';
   g.shadowBlur = idle ? 4 : 8;
   g.shadowOffsetY = idle ? 1 : 2;
