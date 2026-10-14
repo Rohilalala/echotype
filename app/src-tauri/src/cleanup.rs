@@ -50,13 +50,19 @@ pub fn parse_reply(v: &Value) -> Option<String> {
 
 pub fn cleanup(s: &Settings, text: &str) -> Result<String, String> {
     let c = &s.cleanup;
+    chat(s, &system_prompt(&s.dictionary, &c.style, &c.custom_instructions), text, Duration::from_secs(30))
+}
+
+/// One chat completion with the configured cleanup provider: `system` as the system prompt and
+/// `text` inside <transcript> tags. Also used for meeting summaries.
+pub fn chat(s: &Settings, system: &str, text: &str, timeout: Duration) -> Result<String, String> {
+    let c = &s.cleanup;
     let base = settings::base_url(&c.provider, &c.base_url)?;
     let model = if c.model.trim().is_empty() { settings::preset(&c.provider).map(|p| p.default_cleanup_model).unwrap_or_default() } else { c.model.trim() };
-    let system = system_prompt(&s.dictionary, &c.style, &c.custom_instructions);
     let key = settings::provider_key("llm", &c.provider);
-    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
+    let client = reqwest::blocking::Client::builder().timeout(timeout).build().map_err(|e| e.to_string())?;
     let send = |off: bool| {
-        let mut req = client.post(format!("{base}/chat/completions")).json(&request_body(model, &system, text, off));
+        let mut req = client.post(format!("{base}/chat/completions")).json(&request_body(model, system, text, off));
         if let Some(k) = &key {
             req = req.bearer_auth(k);
         }
