@@ -61,6 +61,8 @@ pub struct Settings {
     pub pill_hidden_until: u64,
     /// Let screenshots and screen sharing see the pill. Off = content protection (best effort).
     pub pill_in_recordings: bool,
+    /// Settings window look: "classic" (the default) or "v2" (Ink).
+    pub look: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -127,6 +129,7 @@ impl Default for Settings {
             pill_idle: true,
             pill_hidden_until: 0,
             pill_in_recordings: false,
+            look: "classic".into(),
         }
     }
 }
@@ -434,6 +437,7 @@ mod tests {
         assert_eq!(s.talk_key, "accelerator");
         assert!(s.sounds && s.dismissed.is_empty());
         assert!(s.pill_idle && s.pill_hidden_until == 0 && !s.pill_in_recordings, "the idle pill is on for upgraders, hidden from capture");
+        assert_eq!(s.look, "classic", "upgraders keep the classic look");
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
     }
