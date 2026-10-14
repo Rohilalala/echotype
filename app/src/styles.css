@@ -35,11 +35,6 @@
   --r-float: 18px;
   --dur: 150ms;
   --side-w: 216px;
-  /* Words and numerals: the UI font here; Foundry sets them in Recursive (foundry.css). */
-  --rec: var(--font);
-  --rec-axes: normal;
-  --num: var(--font);
-  --num-axes: normal;
 
   --side: #f9f9f9;
   --pane: #ffffff;
@@ -69,7 +64,6 @@
   --ok: #0f7a3d;
   --warn: #a14a00;
   --bad: #c22a25;
-  --molten: var(--fg); /* the live input meter and needle */
 
   color-scheme: light;
 }
@@ -136,11 +130,6 @@ b, strong { font-weight: var(--fw-semi); }
 .text, input, textarea, pre, code { -webkit-user-select: text; user-select: text; }
 ::selection { background: var(--accent-weak); }
 svg { fill: none; stroke: currentColor; stroke-width: 1.33; stroke-linecap: round; stroke-linejoin: round; }
-/* Transcript text, and the numbers people read: times, speeds, counts, sizes. */
-.spoken, .transcript .said, .result p.text, .hero-sub .kept, .ob-result { font-family: var(--rec); font-variation-settings: var(--rec-axes); }
-.num, .fig-value, .stats-strip b, .week-day b, .mark time, .memline b, .pct, .model-meta > span:not(.badge), .result-meta, .transcript time, [data-elapsed], .hm-ticks b, .vu text, .pd-live .num {
-  font-family: var(--num); font-variation-settings: var(--num-axes); font-variant-numeric: tabular-nums;
-}
 
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
@@ -249,8 +238,6 @@ button { font: inherit; color: inherit; }
 .btn:hover { background: var(--hover); border-color: var(--outline-hover); }
 .btn:active { background: var(--selected); }
 .btn:disabled { opacity: 0.45; pointer-events: none; }
-.btn[aria-disabled="true"] { opacity: 0.45; } /* still focusable, e.g. Home's dictation button while transcribing */
-.btn.sm { height: 24px; padding: 0 9px; font-size: 12px; }
 .btn.primary { background: var(--solid); border-color: transparent; color: var(--solid-ink); font-weight: var(--fw-med); }
 .btn.primary:hover { background: var(--solid-hover); }
 .btn.quiet { border-color: transparent; color: var(--fg-2); padding: 0 8px; }
@@ -368,56 +355,59 @@ kbd {
 .menu-item:hover, .menu-item:focus-visible { background: var(--hover); outline: none; }
 .menu-item.danger { color: var(--bad); }
 
-/* Home: a front panel. The headline says what to press; under it whether Echotype is ready and
-   what it will use, the input meter, the drop region, then what you said recently. */
-.hero-line { margin: 6px 0 0; min-height: 40px; font-size: 28px; line-height: 1.25; letter-spacing: -0.01em; font-weight: var(--fw-semi); display: flex; align-items: center; gap: 0.28em; flex-wrap: wrap; }
-.hero-line kbd { font-size: 0.6em; min-width: 2em; height: 2em; padding: 0 0.5em; border-radius: 6px; vertical-align: 0.1em; }
-.ready-line { display: flex; flex-wrap: wrap; align-items: center; margin: 8px 0 0; min-height: 20px; color: var(--fg-2); }
-.ready-line > b { font-weight: var(--fw-semi); color: var(--ok); }
-body[data-blocked] .ready-line > b { color: var(--warn); }
-body[data-state="error"] .ready-line > b { color: var(--bad); }
-/* While listening or working the headline already says so; the word stays for screen readers. */
-body:is([data-state="recording"], [data-state="transcribing"], [data-state="cleaning"]) .ready-line > b { position: absolute; clip-path: inset(50%); }
-/* The dot is the state: ready, live (molten), working, blocked or failed. */
-.dot { flex: none; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: var(--ok); }
-body[data-state="recording"] .dot { background: var(--molten); }
-body:is([data-state="transcribing"], [data-state="cleaning"]) .dot { background: var(--fg-3); }
-body[data-state="error"] .dot { background: var(--bad); }
-body[data-blocked] .dot { background: var(--warn); }
-/* What dictation will use right now; each opens its page (D15). */
-.chip-bar { display: contents; }
-.chip-btn { all: unset; display: inline-flex; align-items: center; min-height: 24px; color: var(--fg-2); border-radius: 4px; white-space: nowrap; } /* 24px: the WCAG 2.2 target */
-.chip-btn::before { content: "·"; margin: 0 6px; color: var(--fg-3); }
-body:is([data-state="recording"], [data-state="transcribing"], [data-state="cleaning"]) .chip-btn:first-child::before { content: none; }
-.chip-btn:hover { color: var(--fg); }
-.chip-btn:hover span { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
-.chip-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.hero-sub { color: var(--fg-2); margin: 6px 0 0; min-height: 28px; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
+/* Home: one centred headline over one composer card. */
+.hero { text-align: center; margin: 9vh 0 22px; }
+.hero-state { display: flex; justify-content: center; align-items: center; gap: 7px; margin: 0 0 10px; color: var(--fg-3); font-size: 12px; min-height: 18px; }
+/* The dot marks a live state only: listening, working, blocked or failed. */
+.dot { width: 6px; height: 6px; border-radius: 50%; display: none; }
+body[data-state="recording"] .dot { display: inline-block; background: var(--fg); }
+body[data-state="transcribing"] .dot, body[data-state="cleaning"] .dot { display: inline-block; background: var(--fg-3); }
+body[data-state="error"] .dot { display: inline-block; background: var(--bad); }
+body[data-blocked] .dot { display: inline-block; background: var(--warn); }
+/* Idle and ready needs no label; it keeps its height so nothing shifts when a state arrives. */
+body[data-state="idle"]:not([data-blocked]) .hero-state { visibility: hidden; }
+/* While listening or working the headline already says so; the line stays for screen readers. */
+body[data-state="recording"] .hero-state, body[data-state="transcribing"] .hero-state, body[data-state="cleaning"] .hero-state { clip-path: inset(50%); }
+.hero-line { min-height: 36px; font-size: 28px; line-height: 1.25; letter-spacing: -0.01em; font-weight: 500; margin: 0; display: flex; justify-content: center; align-items: center; gap: 0.28em; flex-wrap: wrap; }
+.hero-line kbd { font-size: 0.66em; }
+.hero-sub { color: var(--fg-2); margin: 10px auto 0; max-width: 600px; min-height: 28px; display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
 body[data-state="error"] .hero-sub span:first-child { color: var(--bad); }
-.hero-sub .kept { flex-basis: 100%; color: var(--fg); white-space: pre-line; max-height: 8.5em; overflow: auto; padding: 10px 12px; background: var(--soft); border-radius: var(--r-ctl); }
+.hero-sub .kept { flex-basis: 100%; color: var(--fg); white-space: pre-line; max-height: 8.5em; overflow: auto; text-align: left; padding: 10px 12px; background: var(--soft); border-radius: var(--r-card); }
 
-/* The input meter: a horizontal scale with tick marks; molten only while it is live. */
-.hmeter { margin-top: 20px; }
-.hm-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-.hm-top > span { font-size: 12px; font-weight: var(--fw-med); }
-.hm-top small { font-size: 11px; font-weight: var(--fw); color: var(--fg-3); margin-left: 4px; }
-.hm-track { position: relative; height: 8px; border-radius: 2px; background: var(--seg-track); overflow: hidden; }
-.hm-fill { position: absolute; inset: 0; background: var(--fg-3); transform: scaleX(0); transform-origin: left; }
-.hm-peak { position: absolute; top: 0; bottom: 0; left: -1px; width: 1px; background: var(--fg-3); }
-.hmeter[data-live="true"] :is(.hm-fill, .hm-peak) { background: var(--molten); }
-.hm-ticks { position: relative; height: 22px; margin-top: 3px; }
-.hm-ticks i { position: absolute; top: 0; width: 1px; height: 6px; background: var(--fg-3); }
-.hm-ticks i.minor { height: 4px; background: var(--outline); }
-.hm-ticks b { position: absolute; top: 9px; font-size: 10px; line-height: 1; font-weight: var(--fw); color: var(--fg-3); white-space: nowrap; transform: translateX(-50%); }
-.hm-ticks b:first-of-type { transform: none; }
-.hm-ticks b:last-child { transform: translateX(-100%); }
+.composer {
+  background: var(--elev);
+  border: 1px solid var(--composer-line);
+  border-radius: var(--r-float);
+  box-shadow: var(--shadow-float); /* it floats: the one surface you drop onto */
+  transition: border-color var(--dur) ease, background var(--dur) ease;
+}
+.composer-body { min-height: 74px; padding: 14px 16px 6px; display: flex; align-items: center; }
+.drop-idle { display: flex; align-items: center; gap: 12px; color: var(--fg-3); }
+.drop-idle svg { width: 20px; height: 20px; flex: none; }
+.drop-idle strong { display: block; color: var(--fg); font-weight: var(--fw-med); }
+.drop-idle span span { font-size: 12px; }
+.drop-live { display: none; flex: 1; justify-content: center; }
+body[data-state="recording"] .drop-idle { display: none; }
+body[data-state="recording"] .drop-live { display: flex; }
+.drop.over { border-color: var(--accent); background: color-mix(in srgb, var(--elev), var(--accent) 5%); }
+.drop.over .drop-idle svg { color: var(--accent); }
+.composer-foot { display: flex; align-items: flex-end; gap: 8px; padding: 6px 8px 8px 8px; }
+.chip-bar { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 2px; }
+.chip-btn { all: unset; display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 8px; border-radius: var(--r-ctl); color: var(--fg-2); font-size: 12.5px; white-space: nowrap; transition: background var(--dur) ease, color var(--dur) ease; }
+.chip-btn svg { width: 14px; height: 14px; flex: none; }
+.chip-btn:hover { background: var(--hover); color: var(--fg); }
+.chip-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.mic { all: unset; flex: none; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; background: var(--solid); color: var(--solid-ink); transition: background var(--dur) ease, opacity var(--dur) ease; }
+.mic:hover { background: var(--solid-hover); }
+.mic:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mic[aria-disabled="true"] { opacity: 0.35; }
+.mic svg { width: 16px; height: 16px; stroke-width: 1.5; grid-area: 1 / 1; }
+.mic .i-done, body[data-state="recording"] .mic .i-mic { display: none; }
+body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 
-/* The drop region: plain and dashed, it only says what it takes. */
-.drop { display: flex; align-items: center; gap: 12px; margin-top: 16px; padding: 14px 16px; border: 1px dashed var(--outline); border-radius: var(--r-ctl); color: var(--fg-2); transition: border-color var(--dur) ease, background var(--dur) ease; }
-.drop svg { flex: none; width: 18px; height: 18px; }
-.drop strong { color: var(--fg); font-weight: var(--fw-med); }
-.drop.over { border-style: solid; border-color: var(--accent); background: var(--accent-weak); }
-.drop.over svg { color: var(--accent); }
+/* The live waveform: monochrome bars, scaled from the centre by the level events. */
+.meter { display: inline-flex; align-items: center; gap: 3px; height: 32px; }
+.meter i { width: 3px; height: 100%; border-radius: 2px; background: var(--fg); transform: scaleY(0.1); transition: transform 0.09s linear; }
 
 .drop-results { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
 .result { background: var(--pane); border: 1px solid var(--line-strong); border-radius: var(--r-card); padding: 12px 10px 12px 14px; }
@@ -432,43 +422,41 @@ body[data-state="error"] .hero-sub span:first-child { color: var(--bad); }
 .working::after { content: ""; display: inline-block; width: 10px; height: 10px; margin-left: 8px; border: 1.5px solid var(--line-strong); border-top-color: var(--fg-2); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -1px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* Borderless lists (Recent, models): hairline dividers, soft hover. */
+/* Borderless lists (Recent, models): hairline dividers, soft hover, meta on the right. */
 .list .row { padding: 8px 10px; border-radius: var(--r-ctl); }
 .list .row + .row::before { left: 10px; right: 10px; top: -0.5px; }
 .list .row:hover { background: var(--hover); }
 .list .row:hover::before, .list .row:hover + .row::before { opacity: 0; }
-/* Recent: the time, the words, and Copy on hover or focus. */
-.entry { display: grid; grid-template-columns: 72px minmax(0, 1fr) auto; gap: 12px; min-height: 38px; }
-.entry .text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.entry .when { color: var(--fg-3); font-size: 12px; white-space: nowrap; }
-.entry .btn { height: 24px; opacity: 0; }
-.entry:hover .btn, .entry:focus-within .btn { opacity: 1; }
+.entry { min-height: 38px; gap: 12px; }
+.entry .text { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.entry .when, .history summary .when { color: var(--fg-3); font-size: 12px; white-space: nowrap; flex: none; font-variant-numeric: tabular-nums; }
+.entry .btn, .history summary .btn { height: 24px; opacity: 0; position: absolute; right: 6px; top: 50%; margin-top: -12px; }
+/* Hover or focus swaps the time for Copy, so the time can sit at the right edge. */
+.entry:hover .btn, .entry:focus-within .btn, .history summary:hover .btn, .history summary:focus-within .btn { opacity: 1; }
+.entry:hover .when, .entry:focus-within .when, .history summary:hover .when, .history summary:focus-within .when { visibility: hidden; }
+.history summary { position: relative; }
 .empty { padding: 12px 10px; margin: 0; color: var(--fg-3); }
 .empty .btn { margin-left: 6px; }
 
-/* History as galley proofs: as said (removed words struck) beside as pasted; open for timings. */
+/* History: thread rows; an open entry shows what was heard in a soft card. */
 .history { display: flex; flex-direction: column; }
-.galley-head { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); padding: 0 10px 6px 28px; font-size: 11px; color: var(--fg-3); }
-.galley-head span + span { padding-left: 15px; }
-.proof { border-top: 1px solid var(--line); }
-.proof:last-child { border-bottom: 1px solid var(--line); }
-.proof summary { position: relative; list-style: none; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); row-gap: 4px; padding: 10px 10px 14px 28px; transition: background var(--dur) ease; }
-.proof summary::-webkit-details-marker { display: none; }
-.proof summary::before { content: ""; position: absolute; left: 11px; top: 19px; width: 5px; height: 5px; border: solid var(--fg-3); border-width: 0 1.5px 1.5px 0; transform: rotate(-45deg); transition: transform var(--dur) ease; }
-.proof[open] summary::before { transform: rotate(45deg); }
-.proof summary:hover { background: var(--hover); }
-.proof summary:focus-visible { outline-offset: -2px; }
-.pf-meta { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; min-height: 24px; font-size: 11px; color: var(--fg-3); }
-.pf-meta .btn { margin-left: auto; height: 24px; opacity: 0; }
-.proof summary:hover .btn, .proof summary:focus-within .btn { opacity: 1; }
-.pf-raw, .pf-clean { font-size: 14px; line-height: 21px; white-space: pre-line; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
-.proof[open] :is(.pf-raw, .pf-clean) { display: block; }
-.pf-raw { color: var(--fg-2); padding-right: 14px; }
-.pf-raw del { color: var(--bad); text-decoration-thickness: 1.5px; }
-.pf-clean { padding-left: 14px; border-left: 1px solid var(--line); }
-.pf-clean.pf-only { grid-column: 1 / -1; padding-left: 0; border-left: 0; }
-.history .detail { padding: 0 10px 14px 28px; display: flex; flex-direction: column; gap: 8px; }
-.history .timing { color: var(--fg-3); font-size: 12px; display: flex; gap: 14px; }
+.history details { position: relative; }
+.history details + details::before { content: ""; position: absolute; left: 10px; right: 10px; top: 0; height: 1px; background: var(--line); }
+.history details:hover::before, .history details:hover + details::before, .history details[open]::before, .history details[open] + details::before { opacity: 0; }
+.history summary { list-style: none; display: flex; gap: 10px; align-items: center; min-height: 40px; padding: 8px 10px; border-radius: var(--r-ctl); transition: background var(--dur) ease; }
+.history summary::-webkit-details-marker { display: none; }
+/* A small chevron says the row opens. */
+.history summary::before { content: ""; flex: none; width: 5px; height: 5px; margin: 0 2px 0 1px; border: solid var(--fg-3); border-width: 0 1.5px 1.5px 0; transform: rotate(-45deg); transition: transform var(--dur) ease; }
+.history details[open] summary::before { transform: rotate(45deg); margin-top: 6px; }
+.history summary:hover, .history details[open] summary { background: var(--hover); }
+.history summary:focus-visible { outline-offset: -2px; }
+.history summary .text { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.history details[open] summary .text { white-space: pre-line; }
+.history details[open] summary { align-items: flex-start; }
+.history .detail { padding: 8px 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+.history .raw { color: var(--fg-2); font-size: 12.5px; margin: 0; padding: 10px 12px; background: var(--soft); border-radius: var(--r-card); }
+.history .raw b { font-weight: var(--fw-med); color: var(--fg); }
+.history .timing { color: var(--fg-3); font-size: 12px; font-variant-numeric: tabular-nums; display: flex; gap: 14px; }
 .confirm { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--fg-2); }
 
 /* Speech models: directory rows with an icon tile and one round action. */
@@ -561,7 +549,7 @@ body[data-state="error"] .hero-sub span:first-child { color: var(--bad); }
 .info { display: inline-grid; place-items: center; width: 14px; height: 14px; margin-left: 4px; border-radius: 50%; border: 1px solid var(--outline); color: var(--fg-2); font: var(--fw-semi) 9px/1 var(--font); vertical-align: 1px; }
 .info::before { content: "i"; }
 .row.tip { background: var(--soft); }
-.row.tip:not([hidden]) + .row::before, .row + .row.tip::before { opacity: 0; }
+.row.tip + .row::before, .row + .row.tip::before { opacity: 0; }
 
 /* Notices: the one-time upgrade offer, the Home "No cleanup" banner and persistent status lines. */
 .notice, .banner { display: flex; align-items: center; gap: 10px; padding: 10px 10px 10px 14px; margin: 16px 0 0; border-radius: var(--r-card); background: var(--soft); font-size: 12.5px; }
@@ -584,51 +572,38 @@ body[data-state="error"] .hero-sub span:first-child { color: var(--bad); }
 #cloudAccount input { width: 200px; }
 #cloudAccount input.code { width: 96px; font-variant-numeric: tabular-nums; }
 
-/* First run, a sound check: one column, one primary button per step. The needle answers the
-   microphone and the first sentence is cast into type (the one authored moment). */
-.onboard { position: fixed; inset: 0; z-index: 10; background: var(--pane); display: grid; align-items: start; justify-items: center; padding: max(40px, 9vh) 24px 24px; overflow-y: auto; }
-.ob-card { width: min(540px, 100%); display: flex; flex-direction: column; }
-.ob-top { display: flex; align-items: center; gap: 12px; margin: 0 0 24px; }
-.ob-steps { display: flex; gap: 4px; }
-.ob-steps i { width: 22px; height: 3px; border-radius: 2px; background: var(--seg-track); }
-.ob-steps i.on { background: var(--solid); }
-.ob-count { flex: 1; font-size: 11px; color: var(--fg-3); }
-.ob-step { display: flex; flex-direction: column; }
-.ob-step h2 { font-size: 28px; line-height: 34px; letter-spacing: -0.01em; font-weight: var(--fw-semi); margin: 0 0 8px; outline: none; text-wrap: balance; }
-.ob-step > .lede { max-width: 36em; margin-bottom: 16px; text-wrap: pretty; }
-.ob-try { display: flex; align-items: center; gap: 0.28em; flex-wrap: wrap; }
-.ob-try kbd { font-size: 0.6em; min-width: 2em; height: 2em; padding: 0 0.5em; border-radius: 6px; }
-.vu { display: block; width: 100%; max-width: 280px; height: auto; overflow: hidden; } /* the pivot sits below the baseline */
-.vu line, .vu path { stroke-width: 1; }
-.vu .major { stroke: var(--fg-3); }
-.vu .minor { stroke: var(--outline); }
-.vu .base { stroke: var(--line); }
-.vu text { fill: var(--fg-3); stroke: none; font-size: 10px; text-anchor: middle; }
-.vu .needle { stroke: var(--fg-3); stroke-width: 1.5; transform-box: view-box; transform-origin: 140px 154px; transform: rotate(-48deg); }
-body[data-state="recording"] .vu .needle { stroke: var(--molten); }
-.ob-meter-note { min-height: 18px; margin: 6px 0 12px; font-size: 12px; color: var(--fg-2); }
-.ob-mic { display: flex; align-items: center; gap: 10px; margin-top: 12px; font-size: 12px; color: var(--fg-2); }
-.ob-mic select { width: min(300px, 70%); }
-.ob-result { margin: 12px 0 0; min-height: 64px; font-size: 22px; line-height: 30px; white-space: pre-line; overflow-wrap: anywhere; }
-.ob-result:empty::before { content: attr(data-empty); color: var(--fg-3); font: var(--fw) 13px/30px var(--font); }
-.ob-model { margin: 0; font-size: 12px; color: var(--fg-2); min-height: 1.4em; }
-.ob-foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); }
-/* The pill, as it sits on the desktop: idle hairline, then listening with its needle and time.
-   It always wears the dark tokens (DESIGN.md), whatever the window's theme. */
-.pill-demo { display: flex; align-items: center; justify-content: center; gap: 32px; height: 84px; margin: 0 0 16px; border-radius: var(--r-card); background: var(--soft); }
-.pill-demo > span { zoom: 1.5; } /* true proportions, shown larger */
-.pd-idle { width: 32px; height: 4px; border-radius: 2px; background: rgba(0, 0, 0, 0.75); box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18); }
-.pd-live { display: inline-flex; align-items: center; gap: 6px; height: 20px; padding: 0 9px 0 11px; border-radius: 10px; background: rgba(0, 0, 0, 0.75); box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18), 0 6px 18px rgba(0, 0, 0, 0.26); color: rgba(255, 255, 255, 0.8); font-size: 11px; }
-.pd-live svg { width: 42px; height: 16px; stroke-width: 0.75; stroke: rgba(255, 255, 255, 0.34); }
-.pd-live .pd-needle { stroke: #c9925a; stroke-width: 1; transform-box: view-box; transform-origin: 21px 19px; transform: rotate(14deg); }
-
-/* Type cooling: dictated words land casual and settle to linear (Recursive's CASL axis). */
-.w { animation: cool 400ms cubic-bezier(0, 0, 0.58, 1) both; }
-@keyframes cool {
-  0% { opacity: 0; font-variation-settings: "CASL" 1, "MONO" 0, "slnt" 0, "CRSV" 0; }
-  15% { opacity: 1; }
-  100% { opacity: 1; font-variation-settings: "CASL" 0, "MONO" 0, "slnt" 0, "CRSV" 0; }
+/* First run: a full-window centred column, light headings, one solid pill per step. */
+.onboard {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  background: var(--pane);
+  display: grid;
+  align-items: start;
+  justify-items: center;
+  padding: max(44px, 14vh) 24px 24px;
+  overflow-y: auto;
 }
+.ob-card { width: min(520px, 100%); display: flex; flex-direction: column; max-height: 100%; }
+.ob-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 28px; }
+.ob-steps { list-style: none; display: flex; gap: 16px; padding: 0; margin: 0; color: var(--fg-3); font-size: 12px; }
+.ob-steps li { display: flex; align-items: center; gap: 6px; }
+.ob-steps li::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--switch-off); }
+.ob-steps li.on { color: var(--fg); }
+.ob-steps li.on::before { background: var(--fg); }
+.ob-steps li.done { color: var(--fg-2); }
+.ob-steps li.done::before { background: var(--fg-2); }
+.ob-step { display: flex; flex-direction: column; min-height: 0; }
+.ob-step h2 { font-size: 32px; line-height: 1.2; letter-spacing: -0.02em; font-weight: 400; margin: 0 0 10px; outline: none; text-wrap: balance; }
+.ob-step > .lede { font-size: 15px; line-height: 24px; text-wrap: pretty; }
+.ob-step .group.scroll { overflow-y: auto; max-height: 300px; }
+.ob-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 24px; }
+.ob-foot .btn.primary { height: 36px; padding: 0 18px; border-radius: 18px; }
+.ob-step h2.ob-try { font-size: 28px; display: flex; align-items: center; gap: 0.28em; flex-wrap: wrap; }
+.ob-try kbd { font-size: 0.66em; }
+.ob-result { background: var(--soft); border-radius: var(--r-card); padding: 12px 14px; margin: 0; min-height: 64px; font-size: 14px; white-space: pre-line; }
+.ob-result:empty::before { content: attr(data-empty); color: var(--fg-3); }
+.ob-model { margin: 10px 2px 0; font-size: 12px; color: var(--fg-2); font-variant-numeric: tabular-nums; min-height: 1.4em; }
 
 /* A narrow window (the browser preview; the app's minimum is 720px): icon-only sidebar. */
 @media (max-width: 620px) {
@@ -637,11 +612,8 @@ body[data-state="recording"] .vu .needle { stroke: var(--molten); }
   .preview-note { display: none; }
   nav button { font-size: 0; justify-content: center; padding: 0; }
   main { padding: 40px 16px 32px; }
+  .hero { margin-top: 4vh; }
   .hero-line { font-size: 24px; }
-  .galley-head { display: none; }
-  .proof summary { grid-template-columns: minmax(0, 1fr); }
-  .pf-raw { padding-right: 0; }
-  .pf-clean { padding-left: 0; border-left: 0; }
   .row { flex-wrap: wrap; }
   .row > select, .row > input[type="text"], .row > input[type="url"] { width: 100%; }
   .model { flex-wrap: nowrap; }
@@ -656,7 +628,6 @@ body[data-state="recording"] .vu .needle { stroke: var(--molten); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; }
   .working::after { animation: none; border-top-color: var(--line-strong); }
-  .w { animation: none; }
 }
 
 /* Meetings (meetings.js): a start card, the list, and one meeting's transcript. */
@@ -665,7 +636,6 @@ body[data-state="recording"] .vu .needle { stroke: var(--molten); }
 .meeting-row { all: unset; display: flex; align-items: center; gap: 10px; width: 100%; box-sizing: border-box; cursor: default; }
 .meeting-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .meeting-row .tag { flex: none; }
-.meeting-row .text { flex: 1; min-width: 0; }
 .rec-line { display: inline-flex; align-items: center; gap: 7px; font-variant-numeric: tabular-nums; }
 .rec-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--bad); }
 .back { margin: -6px 0 8px -8px; }

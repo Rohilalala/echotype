@@ -944,13 +944,6 @@ async fn toggle_dictation(app: AppHandle) -> R<()> {
     state(&app).dictation.send(Cmd::Key(Ev::Toggle)).map_err(|e| e.to_string())
 }
 
-/// Esc from the settings window: onboarding's microphone test stops without transcribing.
-#[tauri::command]
-async fn cancel_dictation(app: AppHandle) -> R<()> {
-    send(&app, Cmd::Key(Ev::Cancel));
-    Ok(())
-}
-
 // ---------- the pill (the only commands the overlay may call) ----------
 
 /// A click on the idle pill starts a hands-free recording; on a recording (or ✓) it finishes.
@@ -1326,7 +1319,6 @@ pub fn run() {
             get_system_info,
             local_api_status,
             toggle_dictation,
-            cancel_dictation,
             shortcut_status,
             relaunch,
             retry_last,

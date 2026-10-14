@@ -20,7 +20,6 @@ const COMMANDS: &[&str] = &[
     "get_system_info",
     "local_api_status",
     "toggle_dictation",
-    "cancel_dictation",
     "shortcut_status",
     "relaunch",
     "retry_last",
