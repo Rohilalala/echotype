@@ -476,6 +476,17 @@ fn name<'a>(m: &'a Meeting, id: &'a str) -> &'a str {
     m.speakers.get(id).map_or(id, String::as_str)
 }
 
+/// Why a finished meeting gets no summary, or None to write one. The Echotype model only knows cleanup.
+fn no_summary_reason(s: &Settings) -> Option<&'static str> {
+    if !s.cleanup.enabled || crate::cleanup::keyless(s) {
+        Some("Set up cleanup to get summaries")
+    } else if s.cleanup.provider == "echotype" {
+        Some("Summaries need a general model, such as Echotype Cloud or Ollama, as the cleanup provider")
+    } else {
+        None
+    }
+}
+
 /// About 12k tokens, roughly 80 minutes of talk; the rest of a longer meeting is not summarised.
 // ponytail: one call with a cap; summarise in parts and merge if long meetings need full notes.
 pub const SUMMARY_MAX_CHARS: usize = 48_000;
@@ -863,16 +874,18 @@ fn run(app: AppHandle, mut session: Session, rx: mpsc::Receiver<Piece>, stopped:
     }
     let s = crate::current_settings(&app);
     let snapshot = lock(&session.meeting).clone();
-    if s.cleanup.enabled && !crate::cleanup::keyless(&s) {
-        if transcript_lines(&snapshot).len() > SUMMARY_MAX_CHARS {
-            note(&session, "The meeting is long, so the summary covers its first part only".into());
+    match no_summary_reason(&s) {
+        None => {
+            if transcript_lines(&snapshot).len() > SUMMARY_MAX_CHARS {
+                note(&session, "The meeting is long, so the summary covers its first part only".into());
+            }
+            match summarize(&snapshot, |sys, text| crate::cleanup::chat(&s, sys, text, Duration::from_secs(180))) {
+                Ok(summary) => lock(&session.meeting).summary = summary,
+                Err(e) => note(&session, format!("No summary: {e}")),
+            }
         }
-        match summarize(&snapshot, |sys, text| crate::cleanup::chat(&s, sys, text, Duration::from_secs(180))) {
-            Ok(summary) => lock(&session.meeting).summary = summary,
-            Err(e) => note(&session, format!("No summary: {e}")),
-        }
-    } else if !snapshot.segments.is_empty() {
-        note(&session, "Set up cleanup to get summaries".into());
+        Some(why) if !snapshot.segments.is_empty() => note(&session, why.into()),
+        Some(_) => {}
     }
     {
         let mut m = lock(&session.meeting);
@@ -1228,6 +1241,17 @@ mod tests {
         assert!(markdown(&m).contains("12:34\n\n## Summary\nShip on Friday.\n\n## Transcript"));
         assert_eq!(plain(&m), "Launch sync\n\n[00:02] You: Shall we ship Friday?\n[01:05] Priya: Yes, I'll send the deck.\n");
         assert_eq!(clock(3725.0), "1:02:05");
+    }
+
+    #[test]
+    fn the_echotype_model_never_writes_summaries() {
+        let mut s = Settings::default();
+        assert_eq!(no_summary_reason(&s), Some("Set up cleanup to get summaries"));
+        s.cleanup.enabled = true;
+        s.cleanup.provider = "echotype".into();
+        assert!(no_summary_reason(&s).unwrap().starts_with("Summaries need a general model"));
+        s.cleanup.provider = "ollama".into();
+        assert_eq!(no_summary_reason(&s), None);
     }
 
     #[test]
