@@ -481,13 +481,7 @@ fn paste_last(app: &AppHandle, paste: bool) {
 /// Counts one result in the local usage stats (words and speed, never text) when they are on.
 /// Before record_history, so the one-time history import can't count it twice.
 pub(crate) fn record_stats(app: &AppHandle, s: &Settings, source: stats::Source, text: &str, speaking_ms: u64) {
-    if !s.usage_stats {
-        return;
-    }
-    let words = stats::words(text);
-    if words == 0 {
-        return;
-    }
+    let Some(words) = stats::to_count(s, text) else { return };
     match stats::record(source, words, speaking_ms) {
         Ok(()) => {
             let _ = app.emit_to("main", "stats-updated", ());

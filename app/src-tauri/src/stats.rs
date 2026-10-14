@@ -84,6 +84,11 @@ pub fn words(text: &str) -> u64 {
     text.split_whitespace().count() as u64
 }
 
+/// The words a result adds, or None when it adds nothing: stats are off, or there were no words.
+pub fn to_count(s: &settings::Settings, text: &str) -> Option<u64> {
+    Some(words(text)).filter(|w| s.usage_stats && *w > 0)
+}
+
 pub fn wpm(source: Source, words: u64, speaking_ms: u64) -> Option<f64> {
     (source == Source::Dictation && speaking_ms >= WPM_MIN_MS && words >= WPM_MIN_WORDS).then(|| words as f64 * 60_000.0 / speaking_ms as f64)
 }
@@ -124,7 +129,7 @@ impl Store {
 
     /// Word counts of history entries, no WPM (history has no recording length).
     pub fn backfill<Tz: TimeZone>(&mut self, entries: &[HistoryEntry], tz: &Tz) {
-        for e in entries.iter().filter(|e| e.ts > 0) {
+        for e in entries.iter().filter(|e| e.ts > 0 && words(&e.text) > 0) {
             let d = self.days.entry(day_of(e.ts, tz)).or_default();
             d.words += words(&e.text);
             d.count += 1;
@@ -154,9 +159,12 @@ impl Store {
         while self.days.len() > KEEP_DAYS {
             let Some((date, d)) = self.days.pop_first() else { break };
             let a = &mut self.archive;
-            a.tail_run = step(a.last_day, a.tail_run, date);
-            a.last_day = Some(date);
-            a.longest_streak = a.longest_streak.max(a.tail_run);
+            // A day older than the archive's newest (the clock was set back) only adds to the totals.
+            if a.last_day.is_none_or(|l| date > l) {
+                a.tail_run = step(a.last_day, a.tail_run, date);
+                a.last_day = Some(date);
+                a.longest_streak = a.longest_streak.max(a.tail_run);
+            }
             a.words += d.words;
             a.count += d.count as u64;
             a.wpm_words += d.wpm_words;
@@ -289,8 +297,23 @@ fn path() -> PathBuf {
     settings::data_dir().join("stats.json")
 }
 
-fn load(path: &Path) -> Store {
-    std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+/// A missing file is a fresh store that still imports history. A damaged one is moved aside to
+/// stats.json.bak, never written over, and counting starts again without importing history (it
+/// may have been cleared on purpose). Err only when it can't be read or moved: then nothing is written.
+fn load(path: &Path) -> Result<Store, String> {
+    let bad = match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Store::default()),
+        Ok(s) => match serde_json::from_str(&s) {
+            Ok(store) => return Ok(store),
+            Err(e) => e.to_string(),
+        },
+        Err(e) => e.to_string(),
+    };
+    std::fs::rename(path, path.with_extension("json.bak")).map_err(|e| format!("stats.json is unreadable ({bad}) and could not be moved aside: {e}"))?;
+    eprintln!("echotype: stats.json was unreadable ({bad}); kept it as stats.json.bak");
+    let fresh = Store { backfilled: true, ..Default::default() };
+    save(path, &fresh)?;
+    Ok(fresh)
 }
 
 fn save(path: &Path, store: &Store) -> Result<(), String> {
@@ -302,7 +325,7 @@ fn save(path: &Path, store: &Store) -> Result<(), String> {
 
 fn update(path: &Path, history: impl FnOnce() -> Vec<HistoryEntry>, f: impl FnOnce(&mut Store)) -> Result<(), String> {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut store = load(path);
+    let mut store = load(path)?;
     if !store.backfilled {
         store.backfill(&history(), &Local);
     }
@@ -324,7 +347,7 @@ pub fn record(source: Source, words: u64, speaking_ms: u64) -> Result<(), String
 /// Imports history the first time stats run. True when it did.
 pub fn backfill_once() -> Result<bool, String> {
     let p = path();
-    if load(&p).backfilled {
+    if load(&p)?.backfilled {
         return Ok(false);
     }
     update(&p, all_history, |_| {}).map(|()| true)
@@ -332,7 +355,7 @@ pub fn backfill_once() -> Result<bool, String> {
 
 pub fn view(weeks: u32) -> View {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    load(&path()).view(day_of(now_ms(), &Local), weeks)
+    load(&path()).unwrap_or_default().view(day_of(now_ms(), &Local), weeks)
 }
 
 /// Starts over from zero, without importing history again.
@@ -509,11 +532,11 @@ mod tests {
     fn backfill_counts_history_words_by_day_without_speed() {
         let ist = FixedOffset::east_opt(19800).unwrap();
         let mut s = Store::default();
-        s.backfill(&[entry(at("2026-10-13 09:00", 19800), "one two three"), entry(at("2026-10-14 00:30", 19800), "four five"), entry(0, "no time")], &ist);
+        s.backfill(&[entry(at("2026-10-13 09:00", 19800), "one two three"), entry(at("2026-10-14 00:30", 19800), "four five"), entry(0, "no time"), entry(at("2026-10-12 09:00", 19800), "  ")], &ist);
         assert!(s.backfilled);
         assert_eq!(s.days.get(&d("2026-10-13")).map(|x| (x.words, x.count)), Some((3, 1)));
         assert_eq!(s.days.get(&d("2026-10-14")).map(|x| (x.words, x.wpm_ms)), Some((2, 0)));
-        assert_eq!(s.days.len(), 2, "an entry without a timestamp is skipped");
+        assert_eq!(s.days.len(), 2, "entries without a timestamp or words are skipped");
         assert_eq!(s.last, None);
     }
 
@@ -531,7 +554,7 @@ mod tests {
         update(&p, || panic!("history is read once"), |s| s.record(d("2026-10-14"), 6, Source::Dictation, 1, 0)).unwrap();
         let raw = std::fs::read_to_string(&p).unwrap();
         assert!(!raw.contains("private") && !raw.contains("secret"), "{raw}");
-        let s = load(&p);
+        let s = load(&p).unwrap();
         assert!(s.backfilled);
         assert_eq!(s.view(d("2026-10-14"), 1).words_total, 3 + 12 + 1);
     }
@@ -542,21 +565,43 @@ mod tests {
         update(&p, || vec![entry(1_760_000_000_000, "a b c")], |s| s.record(d("2026-10-14"), 5, Source::Dictation, 12, 6_000)).unwrap();
         save(&p, &Store { backfilled: true, ..Default::default() }).unwrap(); // what clear() writes
         update(&p, || panic!("no second import"), |s| s.record(d("2026-10-15"), 7, Source::Dictation, 2, 0)).unwrap();
-        let v = load(&p).view(d("2026-10-15"), 53);
+        let v = load(&p).unwrap().view(d("2026-10-15"), 53);
         assert_eq!((v.words_total, v.count_total, v.longest_streak), (2, 1, 1));
         assert!(v.milestones.is_empty());
     }
 
     #[test]
     fn the_off_switch_stops_recording() {
-        // lib.rs gates every record on the setting; a fresh settings file has it on, and so do upgraders.
-        assert!(settings::Settings::default().usage_stats);
+        let mut s = settings::Settings::default();
+        assert!(s.usage_stats, "on for new installs");
         let old: settings::Settings = serde_json::from_str(r#"{"hotkey":"Alt+Space","history_enabled":false}"#).unwrap();
         assert!(old.usage_stats, "upgraders keep counting");
-        let src = include_str!("lib.rs");
-        let gate = src.split("fn record_stats(").nth(1).unwrap().split("\n}").next().unwrap();
-        assert!(gate.contains("if !s.usage_stats"), "record_stats must return early when stats are off");
-        assert_eq!(src.matches("stats::record(").count(), 1, "every result goes through record_stats");
+        assert_eq!(to_count(&s, "three little words"), Some(3));
+        assert_eq!(to_count(&s, "  \n "), None, "nothing said, nothing counted");
+        s.usage_stats = false;
+        assert_eq!(to_count(&s, "three little words"), None);
+    }
+
+    #[test]
+    fn a_damaged_file_is_kept_aside_not_written_over() {
+        let p = scratch("damaged");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "{ not json").unwrap();
+        update(&p, || panic!("a damaged file must not re-import history"), |s| s.record(d("2026-10-14"), 1, Source::Dictation, 4, 0)).unwrap();
+        assert_eq!(std::fs::read_to_string(p.with_extension("json.bak")).unwrap(), "{ not json");
+        assert_eq!(load(&p).unwrap().view(d("2026-10-14"), 1).words_total, 4);
+    }
+
+    #[test]
+    fn a_day_older_than_the_archive_only_adds_to_the_totals() {
+        let mut s = Store::default();
+        for day in d("2024-01-01").iter_days().take(KEEP_DAYS + 5) {
+            s.record(day, 0, Source::Dictation, 1, 0);
+        }
+        let (last, run) = (s.archive.last_day, s.archive.tail_run);
+        s.record(d("2023-06-01"), 0, Source::Dictation, 7, 0); // clock set back
+        assert_eq!((s.archive.last_day, s.archive.tail_run), (last, run));
+        assert_eq!(s.view(d("2024-01-01") + chrono::Days::new(KEEP_DAYS as u64 + 4), 53).words_total, KEEP_DAYS as u64 + 5 + 7);
     }
 
     #[test]
