@@ -309,6 +309,8 @@ pub fn presets() -> Vec<Preset> {
         p("openrouter", "OpenRouter", false, true, "https://openrouter.ai/api/v1", "", "openai/gpt-4.1-nano", true),
         p("ollama", "Ollama", false, true, "http://localhost:11434/v1", "", "gemma3:1b", false),
         p("lmstudio", "LM Studio", false, true, "http://localhost:1234/v1", "", "google/gemma-3-1b", false),
+        // mlx_lm.server answers the model id "default_model" with whatever --model it was started with.
+        p("echotype", "Echotype model (local)", false, true, "http://127.0.0.1:8899/v1", "", "default_model", false),
         p("custom", "Custom (OpenAI-compatible)", true, true, "", "", "", false),
     ]
 }
@@ -514,7 +516,7 @@ mod tests {
     #[test]
     fn presets_and_base_urls() {
         let ids: Vec<_> = presets().iter().map(|p| p.id).collect();
-        assert_eq!(ids, ["cloud", "openai", "groq", "openrouter", "ollama", "lmstudio", "custom"]);
+        assert_eq!(ids, ["cloud", "openai", "groq", "openrouter", "ollama", "lmstudio", "echotype", "custom"]);
         assert_eq!(preset("openai").unwrap().default_stt_model, "gpt-4o-mini-transcribe");
         assert_eq!(preset("groq").unwrap().default_cleanup_model, "openai/gpt-oss-20b");
         assert!(!preset("openrouter").unwrap().stt);

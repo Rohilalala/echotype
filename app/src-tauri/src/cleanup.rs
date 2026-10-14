@@ -8,8 +8,21 @@ use std::time::{Duration, Instant};
 
 const PROMPT: &str = include_str!("cleanup_prompt.txt");
 
-pub fn system_prompt(dictionary: &[String], style: &str, custom: &str) -> String {
+/// The cleanup system prompt. The `echotype` provider is our fine-tuned model, which was trained
+/// on a short prompt (model/gen.py system_prompt) and gets that instead of cleanup_prompt.txt.
+pub fn system_prompt(s: &Settings) -> String {
+    let (dictionary, style, custom) = (&s.dictionary, s.cleanup.style.as_str(), s.cleanup.custom_instructions.as_str());
     let words: Vec<&str> = dictionary.iter().map(|w| w.trim()).filter(|w| !w.is_empty()).collect();
+    if s.cleanup.provider == "echotype" {
+        let mut p = "Clean up the dictated transcript. Output only what the speaker meant to type.".to_string();
+        if !words.is_empty() {
+            p += &format!("\nDictionary: {}", words.join(", "));
+        }
+        if s.translate_to_english {
+            p += "\nTranslate to English: yes";
+        }
+        return p;
+    }
     let dict = if words.is_empty() { String::new() } else { format!("\nSpell these names and terms exactly as written: {}.", words.join(", ")) };
     let style = match style {
         "casual" => "\nStyle: relaxed and conversational. Use contractions and light punctuation.",
@@ -53,8 +66,7 @@ pub fn parse_reply(v: &Value) -> Option<String> {
 }
 
 pub fn cleanup(s: &Settings, text: &str) -> Result<String, String> {
-    let c = &s.cleanup;
-    chat(s, &system_prompt(&s.dictionary, &c.style, &c.custom_instructions), text, Duration::from_secs(30))
+    chat(s, &system_prompt(s), text, Duration::from_secs(30))
 }
 
 /// One chat completion with the configured cleanup provider: `system` as the system prompt and
@@ -237,7 +249,14 @@ mod tests {
 
     #[test]
     fn prompt_fills_every_placeholder() {
-        let p = system_prompt(&["Arnav".into(), "Xoxoday".into()], "casual", "  Use British spelling. ");
+        let prompt = |dict: &[&str], style: &str, custom: &str| {
+            let mut s = Settings::default();
+            s.dictionary = dict.iter().map(|w| w.to_string()).collect();
+            s.cleanup.style = style.into();
+            s.cleanup.custom_instructions = custom.into();
+            system_prompt(&s)
+        };
+        let p = prompt(&["Arnav", "Xoxoday"], "casual", "  Use British spelling. ");
         assert!(p.starts_with("You clean up dictated text."));
         assert!(p.contains("\nSpell these names and terms exactly as written: Arnav, Xoxoday."));
         assert!(p.contains("contractions and light punctuation"));
@@ -245,9 +264,25 @@ mod tests {
         assert!(!p.contains("{{"));
         assert!(p.contains("Keep the line breaks already in the transcript."));
 
-        let plain = system_prompt(&[], "default", "");
+        let plain = prompt(&[], "default", "");
         assert!(plain.ends_with("If the transcript is empty or only filler, output nothing."));
-        assert!(system_prompt(&[], "formal", "").contains("complete, well-formed sentences"));
+        assert!(prompt(&[], "formal", "").contains("complete, well-formed sentences"));
+    }
+
+    #[test]
+    fn echotype_model_gets_its_trained_prompt() {
+        let mut s = Settings::default();
+        s.cleanup.provider = "echotype".into();
+        s.cleanup.style = "formal".into();
+        s.cleanup.custom_instructions = "Use British spelling.".into();
+        let head = "Clean up the dictated transcript. Output only what the speaker meant to type.";
+        assert_eq!(system_prompt(&s), head);
+        s.dictionary = vec!["Arnav".into(), " ".into(), " Xoxoday ".into()];
+        assert_eq!(system_prompt(&s), format!("{head}\nDictionary: Arnav, Xoxoday"));
+        s.translate_to_english = true;
+        assert_eq!(system_prompt(&s), format!("{head}\nDictionary: Arnav, Xoxoday\nTranslate to English: yes"));
+        s.dictionary.clear();
+        assert_eq!(system_prompt(&s), format!("{head}\nTranslate to English: yes"));
     }
 
     #[test]
