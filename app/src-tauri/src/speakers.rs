@@ -1,7 +1,8 @@
-//! Who spoke when, on this computer: the two ONNX models meeting notes need (downloaded on first
+//! Who spoke when, on this computer: the models meeting notes need (downloaded on first
 //! use like the whisper models), sherpa-onnx diarization over a whole recording, and a light
 //! online clusterer that labels speakers live while the meeting runs.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub struct SpeakerModel {
@@ -14,7 +15,7 @@ pub struct SpeakerModel {
 
 /// pyannote segmentation-3.0 (MIT) finds speech turns; 3D-Speaker ERes2Net (Apache-2.0, trained on
 /// VoxCeleb English) turns a turn into a voice fingerprint. Both pinned to a Hugging Face commit.
-pub const MODELS: [SpeakerModel; 2] = [
+pub const MODELS: [SpeakerModel; 3] = [
     SpeakerModel {
         file: "pyannote-segmentation-3.0.onnx",
         url: "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/9403a6902bb58e3d5ae8c7e77c3422de279db2e0/model.onnx",
@@ -32,7 +33,21 @@ pub const MODELS: [SpeakerModel; 2] = [
         size_mb: 26,
         license: "Apache-2.0 (3D-Speaker, iic/speech_eres2net_sv_en_voxceleb_16k)",
     },
+    // Silero VAD for whisper.cpp: whisper hears only speech, so it stops inventing "Thank you."
+    // in quiet stretches and its word times stop soaking up the silence around them.
+    SpeakerModel {
+        file: "ggml-silero-v6.2.0.bin",
+        url: "https://huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b/ggml-silero-v6.2.0.bin",
+        sha256: "2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987",
+        size_mb: 1,
+        license: "MIT (Silero VAD)",
+    },
 ];
+
+/// The voice activity model, once downloaded.
+pub fn vad() -> Option<PathBuf> {
+    Some(path(&MODELS[2])).filter(|p| p.is_file())
+}
 
 pub fn path(m: &SpeakerModel) -> PathBuf {
     crate::stt::models_dir().join("speakers").join(m.file)
@@ -46,11 +61,17 @@ pub fn ensure(mut progress: impl FnMut(&str, u64, Option<u64>)) -> Result<(), St
     Ok(())
 }
 
-/// Cosine similarity a voice must reach to join a speaker live (against the speaker's running
-/// mean, so stricter than the final pass, which needs every pair of a speaker's turns over 0.5).
-// ponytail: thresholds from synthetic voices; tune both on recorded meetings.
-const SAME_SPEAKER_LIVE: f32 = 0.6;
+/// Cosine similarity a voice must reach to join a speaker live (against the speaker's running mean).
+// ponytail: both thresholds from one recorded 3-person call (2026-10-14: same voice 0.5-0.95,
+// different voices <= 0.37 on whole-cluster fingerprints); retune on more recorded meetings.
+const SAME_SPEAKER_LIVE: f32 = 0.45;
+/// sherpa's own pass: deliberately strict (a cosine distance of 0.5), merge() then joins its pieces.
 const SAME_SPEAKER_FINAL: f32 = 0.5;
+/// Two clusters whose fingerprints are this alike are one speaker.
+const SAME_SPEAKER_MERGE: f32 = 0.45;
+/// Clusters with less speech than this (s) are too short to fingerprint reliably: they join the
+/// closest longer one instead of becoming a speaker.
+const MIN_CLUSTER_S: f32 = 4.0;
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
@@ -81,6 +102,47 @@ impl Clusters {
             }
         }
     }
+}
+
+/// Joins clusters that are one voice. sherpa clusters call audio with complete linkage over short
+/// turns, so one remote voice comes back as dozens of speakers (42 on a 3-person call). Each
+/// cluster: (id, seconds of speech, fingerprint of its audio). Long clusters merge closest pair
+/// first while alike enough; short ones join the closest long one. Returns cluster → speaker.
+pub fn merge(clusters: &[(i32, f32, Vec<f32>)]) -> BTreeMap<i32, i32> {
+    let unit = |v: &[f32]| {
+        let n = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
+        v.iter().map(|x| x / n).collect::<Vec<f32>>()
+    };
+    // (speaker id, members, seconds, mean unit fingerprint)
+    let mut groups: Vec<(i32, Vec<i32>, f32, Vec<f32>)> =
+        clusters.iter().filter(|c| c.1 >= MIN_CLUSTER_S).map(|(id, secs, e)| (*id, vec![*id], *secs, unit(e))).collect();
+    loop {
+        let mut best: Option<(usize, usize, f32)> = None;
+        for i in 0..groups.len() {
+            for j in i + 1..groups.len() {
+                let sim = cosine(&groups[i].3, &groups[j].3);
+                if best.is_none_or(|b| sim > b.2) {
+                    best = Some((i, j, sim));
+                }
+            }
+        }
+        let Some((i, j, _)) = best.filter(|b| b.2 >= SAME_SPEAKER_MERGE) else { break };
+        let g = groups.remove(j);
+        let (a, b) = (groups[i].2, g.2);
+        groups[i].3 = groups[i].3.iter().zip(&g.3).map(|(x, y)| (x * a + y * b) / (a + b)).collect();
+        groups[i].1.extend(g.1);
+        groups[i].2 += b;
+    }
+    let mut out = BTreeMap::new();
+    for (id, _, e) in clusters {
+        let to = groups
+            .iter()
+            .find(|g| g.1.contains(id))
+            .or_else(|| groups.iter().max_by(|a, b| cosine(&a.3, e).total_cmp(&cosine(&b.3, e))))
+            .map_or(*id, |g| g.0);
+        out.insert(*id, to);
+    }
+    out
 }
 
 /// A speech turn found by diarization: seconds, and a cluster number.
@@ -136,7 +198,7 @@ mod engine {
             min_duration_off: 0.5,
         };
         // SAFETY: every pointer in `cfg` outlives the calls; results are freed with their own destroy calls.
-        unsafe {
+        let turns = unsafe {
             let sd = sys::SherpaOnnxCreateOfflineSpeakerDiarization(&cfg);
             if sd.is_null() {
                 return Err("Could not load the speaker models".into());
@@ -154,8 +216,33 @@ mod engine {
             }
             sys::SherpaOnnxOfflineSpeakerDiarizationDestroyResult(result);
             sys::SherpaOnnxDestroyOfflineSpeakerDiarization(sd);
-            Ok(turns)
+            turns
+        };
+        // The caller fixed the count, which sherpa already honoured; else join split voices.
+        Ok(if speakers.is_some() { turns } else { merged(turns, &pcm) })
+    }
+
+    /// Fingerprint at most this much of a cluster's speech (s); more adds time, not accuracy.
+    const MAX_FINGERPRINT_S: usize = 60;
+
+    fn merged(mut turns: Vec<Turn>, pcm: &[f32]) -> Vec<Turn> {
+        let Ok(mut e) = Embedder::new() else { return turns };
+        let rate = crate::audio::RATE as f32;
+        let mut audio: BTreeMap<i32, (f32, Vec<f32>)> = BTreeMap::new();
+        for t in &turns {
+            let a = audio.entry(t.speaker).or_default();
+            a.0 += t.end - t.start;
+            let (lo, hi) = ((t.start.max(0.0) * rate) as usize, ((t.end * rate) as usize).min(pcm.len()));
+            if a.1.len() < MAX_FINGERPRINT_S * rate as usize && lo < hi {
+                a.1.extend_from_slice(&pcm[lo..hi]);
+            }
         }
+        let clusters: Vec<(i32, f32, Vec<f32>)> = audio.into_iter().filter_map(|(id, (secs, a))| Some((id, secs, e.embed(&a)?))).collect();
+        let to = merge(&clusters);
+        for t in &mut turns {
+            t.speaker = to.get(&t.speaker).copied().unwrap_or(t.speaker);
+        }
+        turns
     }
 }
 
@@ -185,6 +272,25 @@ pub fn diarize(_: Vec<f32>, _: Option<i32>) -> Result<Vec<Turn>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_joins_pieces_of_one_voice_and_folds_short_clusters_in() {
+        // Voice A came back as clusters 0 and 2, voice B as 1 and 3; 4 is a 1 s scrap nearest B.
+        let c = vec![
+            (0, 30.0, vec![1.0, 0.1, 0.0]),
+            (1, 20.0, vec![0.0, 1.0, 0.2]),
+            (2, 10.0, vec![0.9, 0.3, 0.1]),
+            (3, 6.0, vec![0.1, 0.9, 0.0]),
+            (4, 1.0, vec![0.3, 0.6, 0.6]),
+        ];
+        let to = merge(&c);
+        assert_eq!(to[&0], to[&2]);
+        assert_eq!(to[&1], to[&3]);
+        assert_ne!(to[&0], to[&1]);
+        assert_eq!(to[&4], to[&1], "a scrap never becomes its own speaker");
+        // Nothing long enough to trust: labels stay as they are.
+        assert_eq!(merge(&[(7, 1.0, vec![1.0, 0.0])])[&7], 7);
+    }
 
     #[test]
     fn online_clusters_join_close_voices_and_split_far_ones() {
