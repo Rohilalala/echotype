@@ -81,7 +81,7 @@ pub struct Ctx {
     pub now_ms: u64,
     /// Echotype's own window is the key window (D14).
     pub main_key: bool,
-    /// ...showing Home or onboarding, which show the live state themselves.
+    /// ...showing Home, which shows the live state itself. Onboarding wants the real pill (its "try it" step).
     pub main_home: bool,
     /// Show Echotype in the menu bar: the status item is the indicator and the pill never shows.
     pub menubar: bool,
@@ -95,7 +95,7 @@ impl Ctx {
 
 /// On screen while dictating or showing a notice, and when idle only if the idle pill is on,
 /// onboarding is done and it isn't hidden for the hour. Over Echotype's own focused window only
-/// the live states show, and not on Home or onboarding, which show them already (D14).
+/// the live states show, and not on Home, which shows them already (D14).
 pub fn visible(c: &Ctx, active: bool) -> bool {
     if c.mac && c.menubar {
         return false;
@@ -683,7 +683,7 @@ fn ctx(app: &AppHandle, s: &Settings) -> Ctx {
         hidden_until: s.pill_hidden_until,
         now_ms: now_ms(),
         main_key: state(app).main_key.load(std::sync::atomic::Ordering::SeqCst),
-        main_home: state(app).main_home.load(std::sync::atomic::Ordering::SeqCst) || !s.onboarded,
+        main_home: state(app).main_home.load(std::sync::atomic::Ordering::SeqCst),
         menubar: in_menu_bar(s),
     }
 }

@@ -47,6 +47,10 @@ pub struct Settings {
     /// Shown on the Stats page ("Aditya's stats"). Stays on this computer.
     pub display_name: String,
     pub onboarded: bool,
+    /// The onboarding step on screen (1-5), so a relaunch resumes there. From step 3 on, a
+    /// dictation into another app is pasted (the real-app try); before it, it only lands in
+    /// onboarding's practice field.
+    pub onboard_step: u8,
     /// macOS extra talk key next to the shortcut: "accelerator" (none) | "fn" | "left_control" |
     /// "right_control" and the same for option, command and shift (hotkey::KEYS). Hold or press it
     /// like the shortcut, per `mode`; it counts only when pressed alone.
@@ -170,6 +174,7 @@ impl Default for Settings {
             usage_stats: true,
             display_name: String::new(),
             onboarded: false,
+            onboard_step: 0,
             talk_key: "accelerator".into(),
             paste_last_hotkey: String::new(),
             copy_last_hotkey: String::new(),

@@ -258,6 +258,55 @@ pub fn microphone_status() -> &'static str {
     "unknown"
 }
 
+/// An administrator (MDM, Screen Time) decides microphone access: nothing in Echotype can change it.
+pub fn microphone_restricted() -> bool {
+    #[cfg(target_os = "macos")]
+    return mac::microphone() == 1;
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
+/// Shows the system's microphone prompt now (onboarding asks up front, not mid-dictation). The
+/// answer arrives later; callers poll `microphone_status`. Already answered: no prompt.
+pub fn request_microphone() {
+    #[cfg(target_os = "macos")]
+    mac::request_microphone();
+}
+
+/// The name of the app in front, unless it is Echotype itself. Asked on the main thread.
+pub fn frontmost_app(app: &AppHandle) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.run_on_main_thread(move || {
+            let _ = tx.send(mac::frontmost_app());
+        })
+        .ok()?;
+        rx.recv_timeout(Duration::from_secs(1)).ok().flatten()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        None
+    }
+}
+
+/// `tccutil reset <service> <bundle id>`.
+fn tcc_reset_args<'a>(service: &'a str, bundle_id: &'a str) -> [&'a str; 3] {
+    ["reset", service, bundle_id]
+}
+
+/// Forgets this app's Accessibility entry, so the next request adds a fresh one. Ad-hoc signed
+/// builds change their code signature on every update, and the old entry then shows "on" in
+/// System Settings while macOS no longer trusts the new build.
+pub fn reset_accessibility(bundle_id: &str) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+    let out = std::process::Command::new("/usr/bin/tccutil").args(tcc_reset_args("Accessibility", bundle_id)).output().map_err(|e| format!("Couldn't run tccutil: {e}"))?;
+    if out.status.success() { Ok(()) } else { Err(format!("tccutil failed: {}", String::from_utf8_lossy(&out.stderr).trim())) }
+}
+
 pub fn settings_url(kind: &str) -> Option<&'static str> {
     match (std::env::consts::OS, kind) {
         ("macos", "microphone") => Some("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"),
@@ -407,6 +456,51 @@ mod mac {
         }
     }
 
+    /// [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL){}].
+    pub fn request_microphone() {
+        // SAFETY: a class method taking an NSString and a block; objc_msgSend is cast to that
+        // signature. AVFoundation copies the block, so the RcBlock may be dropped after the call.
+        unsafe {
+            let cls = objc_getClass(c"AVCaptureDevice".as_ptr());
+            if cls.is_null() {
+                return;
+            }
+            let done = block2::RcBlock::new(|_granted: u8| {}); // BOOL: a byte on every Mac ABI
+            let send: extern "C" fn(*const c_void, *const c_void, *const c_void, *const block2::Block<dyn Fn(u8)>) = std::mem::transmute(objc_msgSend as *const ());
+            send(cls, sel_registerName(c"requestAccessForMediaType:completionHandler:".as_ptr()), AVMediaTypeAudio, &*done);
+        }
+    }
+
+    /// [[NSWorkspace sharedWorkspace] frontmostApplication].localizedName, unless it is this process.
+    /// Main thread only (the result is autoreleased into the main run loop's pool).
+    pub fn frontmost_app() -> Option<String> {
+        // SAFETY: each objc_msgSend cast matches its selector (no arguments; returning an object, an
+        // NSInteger-sized pid_t or a C string); every returned pointer is checked for null.
+        unsafe {
+            let msg0: extern "C" fn(*const c_void, *const c_void) -> *const c_void = std::mem::transmute(objc_msgSend as *const ());
+            let sel = |s: &std::ffi::CStr| sel_registerName(s.as_ptr());
+            let ws = objc_getClass(c"NSWorkspace".as_ptr());
+            if ws.is_null() {
+                return None;
+            }
+            let front = msg0(msg0(ws, sel(c"sharedWorkspace")), sel(c"frontmostApplication"));
+            if front.is_null() {
+                return None;
+            }
+            let pid: extern "C" fn(*const c_void, *const c_void) -> i32 = std::mem::transmute(objc_msgSend as *const ());
+            if pid(front, sel(c"processIdentifier")) == std::process::id() as i32 {
+                return None;
+            }
+            let name = msg0(front, sel(c"localizedName"));
+            if name.is_null() {
+                return None;
+            }
+            let utf8: extern "C" fn(*const c_void, *const c_void) -> *const c_char = std::mem::transmute(objc_msgSend as *const ());
+            let p = utf8(name, sel(c"UTF8String"));
+            (!p.is_null()).then(|| std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned())
+        }
+    }
+
     // Layout-aware Cmd+V keycode, adapted from Handy (MIT): Dvorak/AZERTY users get the key that types "v".
     #[link(name = "Carbon", kind = "framework")]
     unsafe extern "C" {
@@ -512,6 +606,11 @@ mod tests {
 
     fn el(role: &str) -> Focused {
         Focused { role: role.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn reset_and_ask_again_resets_only_echotypes_accessibility_entry() {
+        assert_eq!(tcc_reset_args("Accessibility", "app.echotype.desktop"), ["reset", "Accessibility", "app.echotype.desktop"]);
     }
 
     #[test]
