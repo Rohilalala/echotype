@@ -615,6 +615,10 @@ fn local_api_token() -> Result<String, String> {
 }
 
 fn show_main(app: &AppHandle) {
+    // On-screen tests drive the pill without ever putting the settings window over the desktop.
+    if std::env::var_os("ECHOTYPE_NO_MAIN").is_some() {
+        return;
+    }
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
@@ -1031,8 +1035,10 @@ pub fn run() {
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());
+    // A second profile (ECHOTYPE_CONFIG_DIR: tests) runs beside the usual one instead of
+    // opening the usual one's window.
+    let builder = if std::env::var_os("ECHOTYPE_CONFIG_DIR").is_some() { builder } else { builder.plugin(tauri_plugin_single_instance::init(|app, _, _| show_main(app))) };
     let app = builder
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| show_main(app)))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(
