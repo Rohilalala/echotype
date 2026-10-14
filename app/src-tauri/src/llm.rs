@@ -311,12 +311,18 @@ fn start(bin: &Path, opts: &Opts, log: &Path) -> Result<Server, String> {
 
 /// Whether process `pid` is the one listening on 127.0.0.1:`port`.
 // ponytail: one lsof call at start-up (~50 ms); read the socket table with proc_pidfdinfo if lsof
-// is ever missing (it ships with macOS and every Linux distro Echotype targets).
+// is ever missing. macOS only: the built-in model's server ships with the macOS app alone.
+#[cfg(target_os = "macos")]
 fn listens_on(pid: u32, port: u16) -> bool {
     Command::new("/usr/sbin/lsof")
         .args(["-nP", "-a", "-p", &pid.to_string(), &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
         .output()
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().any(|p| p == pid.to_string()))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn listens_on(_: u32, _: u16) -> bool {
+    true // no built-in model server off macOS
 }
 
 /// Polls GET /health (503 while the model loads, 200 once it answers) until ready, dead or timed out.
@@ -385,6 +391,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn a_port_is_only_trusted_from_the_process_listening_on_it() {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();

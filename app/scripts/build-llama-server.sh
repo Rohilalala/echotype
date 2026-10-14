@@ -17,10 +17,14 @@ case $TRIPLE in
   *) echo "build-llama-server.sh: macOS targets only, not $TRIPLE" >&2; exit 1 ;;
 esac
 
-[ -d "$DIR/src/.git" ] || git clone --quiet --depth 1 --branch "$TAG" https://github.com/ggml-org/llama.cpp "$DIR/src"
-if [ "$(git -C "$DIR/src" rev-parse HEAD)" != "$COMMIT" ]; then
-  echo "build-llama-server.sh: $DIR/src is not llama.cpp $TAG ($COMMIT); delete it and run again" >&2
-  exit 1
+# Missing, half-restored from a CI cache, or another version: start from a clean clone of the pin.
+if [ "$(git -C "$DIR/src" rev-parse HEAD 2>/dev/null)" != "$COMMIT" ]; then
+  rm -rf "$DIR/src"
+  git clone --quiet --depth 1 --branch "$TAG" https://github.com/ggml-org/llama.cpp "$DIR/src"
+  if [ "$(git -C "$DIR/src" rev-parse HEAD)" != "$COMMIT" ]; then
+    echo "build-llama-server.sh: llama.cpp $TAG is no longer $COMMIT upstream; check the tag" >&2
+    exit 1
+  fi
 fi
 
 # Static, no OpenSSL, no web UI, Metal shaders embedded: one file that needs only system libraries.
