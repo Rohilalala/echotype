@@ -18,7 +18,7 @@ let cur = { state: 'idle' }, view = null, muted = false;
 function primary(p) {
   if (p.state === 'error') return (p.error || 'Something went wrong').split('\n')[0];
   if (p.state === 'hint') return p.message || '';
-  if (p.state === 'done') return p.copied ? 'Copied, ⌘V to paste' : 'Pasted';
+  if (p.state === 'done') return p.copied ? `Copied, ${/Mac/.test(navigator.platform) ? '⌘V' : 'Ctrl+V'} to paste` : 'Pasted';
   if (p.state === 'transcribing') return 'Transcribing…';
   if (p.state === 'cleaning') return 'Cleaning up…';
   return '';
