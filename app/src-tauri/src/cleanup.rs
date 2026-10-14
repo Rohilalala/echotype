@@ -42,8 +42,12 @@ pub fn request_body(model: &str, system: &str, transcript: &str, reasoning_off: 
 }
 
 /// Content of the first choice, minus any leaked <think> block.
+/// `"content": null` (mlx_lm.server's empty completion) reads as "".
 pub fn parse_reply(v: &Value) -> Option<String> {
-    let c = v["choices"][0]["message"]["content"].as_str()?;
+    let c = match v["choices"][0]["message"].get("content")? {
+        Value::Null => "",
+        c => c.as_str()?,
+    };
     let c = c.rsplit_once("</think>").map_or(c, |(_, after)| after);
     Some(c.trim().to_string())
 }
@@ -263,6 +267,8 @@ mod tests {
         let v = json!({"choices":[{"message":{"content":"<think>hmm</think>\n Hello. "}}]});
         assert_eq!(parse_reply(&v).unwrap(), "Hello.");
         assert!(parse_reply(&json!({"error":"x"})).is_none());
+        assert_eq!(parse_reply(&json!({"choices":[{"message":{"role":"assistant","content":null}}]})).unwrap(), "");
+        assert!(parse_reply(&json!({"choices":[{"message":{"content":7}}]})).is_none());
     }
 
     #[test]
