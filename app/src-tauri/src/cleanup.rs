@@ -162,6 +162,13 @@ pub fn has_speech(text: &str) -> bool {
     text.chars().any(char::is_alphanumeric)
 }
 
+/// Nothing but filler ("um", "uh, you know", "Hmm."): what the Echotype model rightly answers with
+/// nothing. "No", "yes", "nope" and "ok" are answers, not filler.
+pub fn only_filler(text: &str) -> bool {
+    const FILLER: [&str; 17] = ["um", "umm", "uh", "uhh", "er", "erm", "ah", "hmm", "hm", "mm", "like", "you", "know", "i", "mean", "so", "well"];
+    text.split(|c: char| !c.is_alphanumeric() && c != '\'').filter(|w| !w.is_empty()).all(|w| FILLER.contains(&w.to_lowercase().as_str()))
+}
+
 /// Spoken "new line" / "new paragraph" become line breaks without the LLM. Whole phrase, any case;
 /// the spaces around it and the punctuation Whisper adds after it ("New line.") are absorbed.
 pub fn spoken_breaks(text: &str) -> String {
@@ -236,7 +243,8 @@ fn after_stt(s: &Settings, raw: String, stt_ms: u64, mut warning: Option<String>
         match llm(s, &text) {
             Ok(c) if !c.is_empty() => text = c,
             // The Echotype model was trained to answer filler-only input with nothing: no speech.
-            Ok(_) if s.cleanup.provider == "echotype" => text.clear(),
+            // It also drops some one-word answers ("No.", "Yes.", "Nope."), so real words are kept.
+            Ok(_) if s.cleanup.provider == "echotype" && only_filler(&text) => text.clear(),
             Ok(_) => {}
             Err(e) => {
                 let first = e.lines().next().unwrap_or_default().trim_end_matches('.');
@@ -364,6 +372,11 @@ mod tests {
         s.cleanup.provider = "echotype".into();
         let o = empty(&s);
         assert_eq!((o.text.as_str(), o.warning, o.no_cleanup), ("", None, false));
+        // ...but a short answer the model dropped is still typed.
+        for word in ["No.", "Yes.", "Nope.", "OK", "Bye."] {
+            let o = after_stt(&s, word.into(), 1, None, false, true, || {}, |_, _| Ok(String::new()));
+            assert_eq!(o.text, word);
+        }
     }
 
     #[test]
