@@ -113,7 +113,7 @@ The pill stays out of screenshots and screen sharing unless you turn on **Show p
 
 ### Talk key (macOS)
 
-You can also dictate with one key: **fn**, **Right Option**, **Right Command** or **Right Control**. Pick it in Settings → Shortcuts. ⌥ Space keeps working alongside it. Pressing another key while the talk key is down (fn + arrow, Right ⌘ + C) cancels the dictation, so your usual shortcuts still work.
+You can also dictate with one key: **fn**, or the left or right **Control**, **Option**, **Command** or **Shift**. Pick it in Settings → Shortcuts. ⌥ Space keeps working alongside it. Hold the key to talk, or tap it twice to go hands-free and tap it once more to finish. It only counts when pressed on its own: pressing another key or clicking while it is down (⌃ + C, ⌘-click, fn + arrow) is your usual shortcut, never a dictation.
 
 To use **fn**, first stop macOS from acting on it: System Settings → Keyboard → **Press 🌐 key to** → **Do Nothing**. This should print `0`:
 

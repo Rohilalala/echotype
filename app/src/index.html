@@ -247,14 +247,19 @@
       <div class="group">
         <div class="row"><span class="row-text"><span class="row-title" id="hotkeyLabel">Dictation shortcut</span><span class="row-desc" id="hotkeyDesc">Click, then press the keys you want. Esc cancels.</span><span class="row-desc error" id="hotkeyError" role="alert" hidden></span></span>
           <button class="hotkey" id="hotkeyBtn" data-shortcut="hotkey" type="button" aria-describedby="hotkeyDesc" aria-labelledby="hotkeyLabel hotkeyBtn"></button></div>
-        <label class="row" id="talkRow"><span class="row-text"><span class="row-title">Talk key</span><span class="row-desc">Also dictate with a single key. The shortcut keeps working.</span>
+        <label class="row" id="talkRow"><span class="row-text"><span class="row-title">Talk key</span><span class="row-desc">Also dictate with a single key, pressed on its own. The shortcut keeps working.</span>
             <span class="row-desc" id="talkStatus" role="status"></span></span>
           <select id="talkKey" data-bind="talk_key">
             <option value="accelerator">Shortcut only</option>
             <option value="fn">fn (Globe)</option>
-            <option value="right_option">Right Option ⌥</option>
-            <option value="right_command">Right Command ⌘</option>
-            <option value="right_control">Right Control ⌃</option>
+            <option value="left_control">Left ⌃ Control</option>
+            <option value="right_control">Right ⌃ Control</option>
+            <option value="left_option">Left ⌥ Option</option>
+            <option value="right_option">Right ⌥ Option</option>
+            <option value="left_command">Left ⌘ Command</option>
+            <option value="right_command">Right ⌘ Command</option>
+            <option value="left_shift">Left ⇧ Shift</option>
+            <option value="right_shift">Right ⇧ Shift</option>
           </select></label>
         <div class="row"><span class="row-text"><span class="row-title" id="modeLabel">Mode</span><span class="row-desc" id="modeDesc"></span></span>
           <span class="seg" role="radiogroup" aria-labelledby="modeLabel">
@@ -401,9 +406,14 @@
             <select id="obTalk" aria-label="Talk key">
               <option value="accelerator">Shortcut only</option>
               <option value="fn">fn (Globe)</option>
-              <option value="right_option">Right Option ⌥</option>
-              <option value="right_command">Right Command ⌘</option>
-              <option value="right_control">Right Control ⌃</option>
+              <option value="left_control">Left ⌃ Control</option>
+              <option value="right_control">Right ⌃ Control</option>
+              <option value="left_option">Left ⌥ Option</option>
+              <option value="right_option">Right ⌥ Option</option>
+              <option value="left_command">Left ⌘ Command</option>
+              <option value="right_command">Right ⌘ Command</option>
+              <option value="left_shift">Left ⇧ Shift</option>
+              <option value="right_shift">Right ⇧ Shift</option>
             </select></label>
           <label class="row"><span class="row-text"><span class="row-title">Cleanup</span><span class="row-desc">Removes fillers and fixes punctuation with a language model.</span></span>
             <select id="obCleanup" aria-label="Cleanup">

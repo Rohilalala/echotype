@@ -181,8 +181,7 @@ function accelFrom(e) {
 }
 
 // The keys that dictate: the talk key when it is active, else the shortcut.
-const TALK = { fn: ['fn'], right_option: ['Right', '⌥'], right_command: ['Right', '⌘'], right_control: ['Right', '⌃'] };
-const talkCaps = () => status.talk_key_active && TALK[S.talk_key] ? [h('kbd', {}, TALK[S.talk_key].join(' '))] : keycaps(S.hotkey);
+const talkCaps = () => status.talk_key_active && S.talk_key !== 'accelerator' ? [h('kbd', {}, status.key_label)] : keycaps(S.hotkey);
 const verb = () => (S.mode === 'toggle' ? 'Press' : 'Hold');
 // ponytail: macOS only. Elsewhere the paste keystroke itself would be Ctrl+V while Ctrl+Alt is still
 // held (no modifier wait off macOS), re-firing the shortcut; users can bind their own there.
@@ -262,7 +261,7 @@ async function refreshStatus() {
 }
 function talkLines() {
   if (S.talk_key === 'accelerator') return [];
-  if (status.talk_key_active) return [h('span', {}, `On. ${S.mode === 'toggle' ? 'Press' : 'Hold'} it anywhere to dictate.`)];
+  if (status.talk_key_active) return [h('span', {}, S.mode === 'toggle' ? 'On. Press it alone to start, again to stop.' : 'On. Hold it alone to dictate, or tap it twice to go hands-free.')];
   const recheck = h('button', { className: 'btn', type: 'button', onclick: refreshStatus }, 'Check again');
   if (S.talk_key === 'fn' && !status.globe_does_nothing) return [h('span', {}, 'In System Settings, Keyboard, set “Press 🌐 key to” to “Do Nothing”. Until then fn would also open emoji or dictation.'),
     h('button', { className: 'btn', type: 'button', onclick: () => invoke('open_permission_settings', { kind: 'keyboard' }).catch(() => {}) }, 'Open Keyboard Settings'), recheck];
@@ -271,9 +270,12 @@ function talkLines() {
   if (status.needs_relaunch) return [h('span', {}, 'Relaunch Echotype to finish.'), h('button', { className: 'btn primary', type: 'button', onclick: () => invoke('relaunch') }, 'Relaunch')];
   return [h('span', {}, status.talk_key_error || 'Not active yet.'), recheck];
 }
+// Allowed, not blocked: say why ⌘C and capitals keep working.
+const SHORTCUT_KEYS = { left_command: 'Left ⌘', left_shift: 'Left ⇧' };
+const shortcutNote = () => SHORTCUT_KEYS[S.talk_key] ? [h('span', {}, `${SHORTCUT_KEYS[S.talk_key]} is used in many shortcuts. Echotype only reacts when it's pressed alone. `)] : [];
 function renderTalk() {
   for (const id of ['#talkStatus', '#obTalkStatus']) {
-    const el = $(id), lines = talkLines();
+    const el = $(id), lines = [...shortcutNote(), ...talkLines()];
     el.replaceChildren(...lines);
     el.hidden = !lines.length;
     el.classList.toggle('warn', S.talk_key !== 'accelerator' && !status.talk_key_active);
