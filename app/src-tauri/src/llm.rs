@@ -402,6 +402,58 @@ mod tests {
         assert!(!wanted(&s));
     }
 
+    #[test]
+    fn a_refused_mlock_is_read_from_the_server_log() {
+        let log = std::env::temp_dir().join(format!("echotype-mlock-{}.log", std::process::id()));
+        std::fs::write(&log, "warning: failed to mlock 983040000-byte buffer (after previously locking 0 bytes): Resource temporarily unavailable\n").unwrap();
+        assert!(mlock_failed(&log));
+        std::fs::write(&log, "load_model: loading model\n").unwrap();
+        assert!(!mlock_failed(&log));
+        std::fs::remove_file(&log).unwrap();
+        assert!(!mlock_failed(&log), "no log, no failure");
+    }
+
+    /// The real sidecar: memory modes reach llama-server's command line, a change restarts it on
+    /// the next cleanup, and "Unload when idle" stops it. `cargo test -- --ignored --nocapture modes_and_idle`.
+    #[test]
+    #[ignore]
+    fn modes_and_idle_on_the_real_sidecar() {
+        if !installed(&CLEANERS[0]) {
+            eprintln!("skipped: no {}", model_path(&CLEANERS[0]).display());
+            return;
+        }
+        let argv = || {
+            let pid = SERVER.lock().unwrap().as_ref().map(|s| s.child.id()).expect("running");
+            let out = Command::new("ps").args(["-o", "args=", "-p", &pid.to_string()]).output().unwrap();
+            (pid, String::from_utf8_lossy(&out.stdout).trim().to_string())
+        };
+        let mut s = Settings { advanced: true, cleaner_memory: "ready".into(), ..Default::default() };
+        s.cleanup.enabled = true;
+        s.cleanup.provider = "echotype".into();
+        let t = Instant::now();
+        ensure(&s).unwrap();
+        let (ready_pid, a) = argv();
+        eprintln!("ready ({} ms): {a}", t.elapsed().as_millis());
+        assert!(a.contains("--load-mode mmap+mlock") && a.contains("-c 1024"), "{a}");
+        assert!(crate::cleanup::cleanup(&s, "um so the meeting is at uh five").unwrap().contains("meeting"));
+        s.cleaner_memory = "save".into();
+        s.cleaner_context = 2048;
+        ensure(&s).unwrap();
+        let (save_pid, a) = argv();
+        eprintln!("save: {a}");
+        assert!(save_pid != ready_pid && !a.contains("--load-mode") && a.contains("-c 2048"), "{a}");
+        s.cleaner_idle_unload = true;
+        ensure(&s).unwrap();
+        assert_eq!(argv().0, save_pid, "idle unload is not a server flag: no restart");
+        IDLE_SECS.store(1, Ordering::Relaxed); // instead of the 5-minute minimum
+        std::thread::sleep(Duration::from_secs(32));
+        assert!(SERVER.lock().unwrap().is_none(), "stopped after going unused");
+        let t = Instant::now();
+        assert!(crate::cleanup::cleanup(&s, "um so the meeting is at uh five").unwrap().contains("meeting"));
+        eprintln!("first cleanup after an idle unload: {} ms", t.elapsed().as_millis());
+        stop();
+    }
+
     /// The real sidecar and model: `cargo test -- --ignored llm` after scripts/build-llama-server.sh,
     /// with the GGUF in the models dir. Starts the server, cleans one transcript, stops it.
     #[test]

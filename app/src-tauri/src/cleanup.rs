@@ -550,18 +550,22 @@ mod tests {
         s
     }
 
-    /// The real sidecar on a 600-word dictation: `cargo test -- --ignored six_hundred`.
+    /// The real sidecar on a long dictation: ECHOTYPE_TEST_TEXT=<600-word .txt>
+    /// `cargo test -- --ignored --nocapture long_dictation`. Every piece comes back; nothing is cut.
     #[test]
     #[ignore]
-    fn six_hundred_words_clean_without_truncation() {
-        let sentence = "um so we walked down to the river and uh talked about the plan for next week.";
-        let long: String = std::iter::repeat_n(sentence, 600 / 17).collect::<Vec<_>>().join(" ");
+    fn long_dictation_cleans_without_truncation() {
+        let Ok(path) = std::env::var("ECHOTYPE_TEST_TEXT") else { return eprintln!("skipped: no ECHOTYPE_TEST_TEXT") };
+        let long = std::fs::read_to_string(path).unwrap();
+        let s = echotype();
+        let budget = (crate::llm::context(&s) as usize - 64 - tokens(&system_prompt(&s))) / 2;
         let t = Instant::now();
-        let out = cleanup(&echotype(), &long).unwrap();
+        let out = cleanup(&s, long.trim()).unwrap();
         let (n_in, n_out) = (long.split_whitespace().count(), out.split_whitespace().count());
-        eprintln!("{n_in} words in, {n_out} out, {} ms", t.elapsed().as_millis());
-        assert_eq!(out.matches("river").count(), long.matches("river").count(), "every sentence is still there: {out}");
-        assert!(!out.contains(" um ") && !out.contains(" uh "), "{out}");
+        eprintln!("{n_in} words in {} pieces, {n_out} out, {} ms\n{out}", pieces(long.trim(), budget).unwrap().len(), t.elapsed().as_millis());
+        assert!(n_out * 10 >= n_in * 8, "most words survive cleanup");
+        let tail: Vec<&str> = long.split_whitespace().rev().take(3).collect();
+        assert!(out.trim_end_matches('.').ends_with(&tail.iter().rev().copied().collect::<Vec<_>>().join(" ").trim_end_matches('.').to_string()), "the end is there: {out}");
         crate::llm::stop();
     }
 

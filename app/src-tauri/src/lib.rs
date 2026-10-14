@@ -1476,6 +1476,12 @@ pub fn cli(args: &[String]) -> i32 {
         return 2;
     };
     stt::quiet_whisper_logs();
+    if s.stt.provider == "local" {
+        eprintln!("echotype: speech model {}{}", stt::local_model(&s), if s.advanced { "" } else { " (Automatic)" });
+    }
+    if llm::wanted(&s) {
+        eprintln!("echotype: cleanup model {} ({}, {} tokens)", llm::cleaner(&s).id, llm::memory(&s), llm::context(&s));
+    }
     let t = std::time::Instant::now();
     let result = transcribe_path(&s, &file);
     stt::unload();
