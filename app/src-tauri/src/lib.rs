@@ -1,11 +1,14 @@
 mod api;
 mod audio;
+mod capture;
 mod cleanup;
 mod cloud;
 mod hotkey;
+mod meeting;
 mod pill;
 mod platform;
 mod settings;
+mod speakers;
 mod stt;
 
 use audio::{LevelStats, Quality};
@@ -943,12 +946,12 @@ async fn retry_last(app: AppHandle) -> R<()> {
 
 #[tauri::command]
 async fn check_permissions() -> R<serde_json::Value> {
-    Ok(serde_json::json!({ "microphone": platform::microphone_status(), "accessibility": platform::accessibility_granted() }))
+    Ok(serde_json::json!({ "microphone": platform::microphone_status(), "accessibility": platform::accessibility_granted(), "screen_recording": capture::screen_recording_allowed() }))
 }
 
 #[tauri::command]
 async fn open_permission_settings(app: AppHandle, kind: String) -> R<()> {
-    if !matches!(kind.as_str(), "microphone" | "accessibility" | "input_monitoring" | "keyboard") {
+    if !matches!(kind.as_str(), "microphone" | "accessibility" | "input_monitoring" | "keyboard" | "screen_recording") {
         return Err(format!("Unknown permission '{kind}'"));
     }
     let k = kind.clone();
@@ -1003,8 +1006,10 @@ async fn cloud_logout() -> R<()> {
 fn create_tray(app: &tauri::App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Echotype", true, None::<&str>)?;
     let toggle = MenuItem::with_id(app, "toggle", "Start/Stop dictation", true, None::<&str>)?;
+    let meeting = MenuItem::with_id(app, "meeting", meeting::menu_label(), true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &toggle, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &toggle, &meeting, &quit])?;
+    meeting::set_tray_item(meeting);
     // The idle pill is macOS-only, and so is its hide/show item; the pill loop sets its label.
     if cfg!(target_os = "macos") {
         let item = MenuItem::with_id(app, "pill", "Hide pill for 1 hour", true, None::<&str>)?;
@@ -1015,6 +1020,7 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
         "open" => show_main(app),
         "toggle" => send(app, Cmd::Key(Ev::Toggle)),
         "pill" => pill::on_tray(app),
+        "meeting" => meeting::toggle(app),
         "quit" => app.exit(0),
         _ => {}
     });
@@ -1160,6 +1166,15 @@ pub fn run() {
             pill_cancel,
             pill_open,
             pill_menu,
+            meeting::meeting_start,
+            meeting::meeting_stop,
+            meeting::meeting_status,
+            meeting::meeting_list,
+            meeting::meeting_get,
+            meeting::meeting_rename_speaker,
+            meeting::meeting_delete,
+            meeting::meeting_export,
+            meeting::meeting_save,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Echotype");
@@ -1178,6 +1193,9 @@ pub fn run() {
 /// `echotype --transcribe <file> [--model <ggml path>] [--translate]`: the full pipeline
 /// minus paste, headless, with the saved settings. Returns the process exit code.
 pub fn cli(args: &[String]) -> i32 {
+    if args.iter().any(|a| a == "--meeting") {
+        return meeting::cli(args);
+    }
     let mut s = Settings::load();
     let mut file = None;
     let mut it = args.iter();
@@ -1245,7 +1263,7 @@ mod tests {
     fn capabilities_list_every_command_and_the_overlay_only_the_pill() {
         let lib = include_str!("lib.rs");
         let block = lib.split("tauri::generate_handler![").nth(1).unwrap().split(']').next().unwrap();
-        let handler: Vec<&str> = block.split(',').map(str::trim).filter(|c| !c.is_empty()).collect();
+        let handler: Vec<&str> = block.split(',').map(|c| c.trim().rsplit("::").next().unwrap()).filter(|c| !c.is_empty()).collect();
         let build = include_str!("../build.rs");
         let listed = build.split("const COMMANDS: &[&str] = &[").nth(1).unwrap().split("];").next().unwrap();
         let manifest: Vec<&str> = listed.split(',').map(|c| c.trim().trim_matches('"')).filter(|c| !c.is_empty()).collect();

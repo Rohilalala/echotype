@@ -33,6 +33,15 @@ const COMMANDS: &[&str] = &[
     "pill_cancel",
     "pill_open",
     "pill_menu",
+    "meeting_start",
+    "meeting_stop",
+    "meeting_status",
+    "meeting_list",
+    "meeting_get",
+    "meeting_rename_speaker",
+    "meeting_delete",
+    "meeting_export",
+    "meeting_save",
 ];
 
 fn main() {

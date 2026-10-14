@@ -586,6 +586,7 @@ pub fn show_menu(app: &AppHandle, win: &WebviewWindow) -> tauri::Result<()> {
         &PredefinedMenuItem::separator(app)?,
         &MenuItem::with_id(app, "pill-paste", "Paste last transcript", has_last, None::<&str>)?,
         &MenuItem::with_id(app, "pill-history", "History…", true, None::<&str>)?,
+        &MenuItem::with_id(app, "pill-meeting", crate::meeting::menu_label(), true, None::<&str>)?,
         &PredefinedMenuItem::separator(app)?,
         &MenuItem::with_id(app, "pill-hide", "Hide for 1 hour", true, None::<&str>)?,
         &MenuItem::with_id(app, "pill-settings", "Settings…", true, None::<&str>)?,
@@ -604,6 +605,7 @@ pub fn on_menu(app: &AppHandle, id: &str) {
         match id {
             "pill-paste" => crate::paste_last(app, true),
             "pill-history" => crate::open_page(app, "history"),
+            "pill-meeting" => crate::meeting::toggle(app),
             "pill-settings" => crate::open_page(app, "settings"),
             "pill-hide" => hide_for_hour(app),
             _ => {}
