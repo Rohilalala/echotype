@@ -39,7 +39,7 @@ const progress = {}, modelErr = {};
 let recent = [], dropResults = [], apiStatus = null, tokenShown = false;
 
 // ---------- saving ----------
-let saveTimer, savedTimer, saving = Promise.resolve();
+let saveTimer, saving = Promise.resolve();
 // Saves run one after another, each sending S as it is when its turn comes.
 function save(quiet) {
   clearTimeout(saveTimer);
@@ -69,7 +69,6 @@ async function saveNow(quiet) {
   const sentCopy = base = clone(settings); // from here on these values are Rust's to confirm or correct
   try {
     await invoke('save_settings', { settings, base: sentBase });
-    flash();
     return null;
   } catch (e) {
     // Nothing was saved unless Rust confirmed with settings-changed (which replaces `base`):
@@ -80,15 +79,14 @@ async function saveNow(quiet) {
   }
 }
 const saveSoon = () => { clearTimeout(saveTimer); saveTimer = setTimeout(save, 450); };
+// Settings save as you change them, silently; only a failed save says so.
 function flash(err) {
   const el = $('#saved');
-  clearTimeout(savedTimer);
-  el.classList.toggle('err', !!err);
-  el.replaceChildren(...(err ? [`Couldn't save: ${err}`] : [svg(CHECK), 'Saved']));
+  el.classList.add('err');
+  el.replaceChildren(`Couldn't save: ${err}`);
   el.classList.add('show');
   void el.offsetWidth;
   el.classList.remove('show');
-  if (!err) savedTimer = setTimeout(() => el.replaceChildren(), 2000);
 }
 
 // ---------- bound controls ----------
@@ -512,7 +510,7 @@ async function renderKey(kind) {
   const store = async () => {
     const value = input.value.trim();
     if (!value) return input.focus();
-    try { await invoke('set_secret', { name, value }); flash(); renderKey(kind); }
+    try { await invoke('set_secret', { name, value }); renderKey(kind); }
     catch (e) { flash(String(e)); }
   };
   btn.onclick = store;
