@@ -124,14 +124,8 @@
 /* The desk stays opaque: Ink's sidebar is a colour, not the macOS vibrancy (later in the
    cascade than styles.css, so it wins over [data-vibrant] at the same specificity). */
 
-/* The sheet: inset on every side and rounded all round, separated from the desk by tone. */
-:root[data-look="v2"] main {
-  margin: 8px 8px 8px 0;
-  padding-right: 24px; /* 8 px narrower than Classic's pane, so content keeps Classic's width */
-  border: 0;
-  border-radius: var(--r-float);
-  box-shadow: 0 0 0 1px var(--line);
-}
+/* The pane: the same size and shape as Classic's, so switching looks never moves anything;
+   Ink only changes colour. */
 
 /* The desk is ink in both modes, so the sidebar carries its own light-on-ink text tokens. */
 :root[data-look="v2"] .sidebar {

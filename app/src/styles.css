@@ -59,8 +59,8 @@
   --shadow-float: 0 4px 16px rgba(0, 0, 0, 0.05), 0 1px 3px rgba(0, 0, 0, 0.04);
   --shadow-menu: 0 8px 16px -4px rgba(0, 0, 0, 0.12), 0 0 0 1px rgba(0, 0, 0, 0.06);
 
-  --accent: #0a6b62;
-  --accent-weak: rgba(10, 107, 98, 0.12);
+  --accent: #3c3c3e; /* graphite: Classic has no colour accent */
+  --accent-weak: rgba(60, 60, 62, 0.14);
   --ok: #0f7a3d;
   --warn: #a14a00;
   --bad: #c22a25;
@@ -94,8 +94,8 @@
     --shadow-menu: 0 8px 16px -4px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.08);
 
     /* a lighter, desaturated sibling of the light teal, not a neon cyan */
-    --accent: #5cb8ab;
-    --accent-weak: rgba(92, 184, 171, 0.16);
+    --accent: #8e8e93;
+    --accent-weak: rgba(142, 142, 147, 0.22);
     --ok: #4cc77a;
     --warn: #f2a93b;
     --bad: #ff6b63;
