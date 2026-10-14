@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-look="foundry">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="styles.css" />
   <link rel="stylesheet" href="stats.css" />
   <link rel="stylesheet" href="look-v2.css" />
+  <link rel="stylesheet" href="foundry.css" />
   <script type="module" src="main.js"></script>
 </head>
 <body>
@@ -30,35 +31,28 @@
     <div class="pane-drag" data-tauri-drag-region aria-hidden="true"></div>
     <p class="saved" id="saved" role="status" aria-live="polite"></p>
 
-    <!-- Home -->
+    <!-- Home: a front panel. What to press, whether it hears you, what it wrote. -->
     <section data-page="home" hidden>
-      <div class="hero">
-        <p class="hero-state" id="heroState" aria-live="polite"><i class="dot"></i><span>Ready</span></p>
-        <h1 class="hero-line" id="heroLine"></h1>
-        <p class="hero-sub" id="heroSub"></p>
+      <h1 class="hero-line" id="heroLine"></h1>
+      <p class="ready-line" id="heroState" aria-live="polite"><i class="dot" aria-hidden="true"></i><b id="heroStateText">Ready</b>
+        <span class="chip-bar">
+          <button class="chip-btn" type="button" data-go="speech" title="Speech model"><span id="chipModel"></span></button>
+          <button class="chip-btn" type="button" data-go="language" title="Language"><span id="chipLang"></span></button>
+          <button class="chip-btn" type="button" data-go="cleanup" title="Cleanup style"><span id="chipStyle"></span></button>
+        </span></p>
+      <p class="hero-sub" id="heroSub"></p>
+
+      <!-- The input meter: dB above the room's noise floor (audio.rs METER_RANGE_DB), live only while dictating. -->
+      <div class="hmeter" id="hmeter" data-live="false">
+        <div class="hm-top"><span>Input level <small>dB over the room</small></span><button class="btn sm" id="heroMic" type="button">Start dictation</button></div>
+        <div class="hm-track" aria-hidden="true"><i class="hm-fill" id="hmFill"></i><i class="hm-peak" id="hmPeak"></i></div>
+        <div class="hm-ticks" aria-hidden="true"><i style="left:0"></i><i class="minor" style="left:16.667%"></i><i style="left:33.333%"></i><i class="minor" style="left:50%"></i><i style="left:66.667%"></i><i class="minor" style="left:83.333%"></i><i style="left:calc(100% - 1px)"></i>
+          <b style="left:0">0</b><b style="left:33.333%">10</b><b style="left:66.667%">20</b><b style="left:100%">30</b></div>
       </div>
 
-      <!-- The composer card: a drop zone for voice notes and, while dictating, the live waveform. -->
-      <div class="composer drop" id="drop">
-        <div class="composer-body">
-          <div class="drop-idle">
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5v8M4.75 7.25 8 10.5l3.25-3.25"/><path d="M2.75 10.5v1.25a1.75 1.75 0 0 0 1.75 1.75h7a1.75 1.75 0 0 0 1.75-1.75V10.5"/></svg>
-            <span><strong>Drop a voice note here</strong>
-              <span>WhatsApp .opus, .m4a, .mp3 or .wav. You get a clean transcript to copy.</span></span>
-          </div>
-          <div class="drop-live"><span class="meter" id="heroMeter" aria-hidden="true"></span></div>
-        </div>
-        <div class="composer-foot">
-          <span class="chip-bar">
-            <button class="chip-btn" type="button" data-go="speech" title="Speech model"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 6.5v3M5.25 4v8M8 2v12M10.75 5v6M13.5 7v2"/></svg><span id="chipModel"></span></button>
-            <button class="chip-btn" type="button" data-go="language" title="Language"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.75"/><ellipse cx="8" cy="8" rx="2.4" ry="5.75"/><path d="M2.4 8h11.2"/></svg><span id="chipLang"></span></button>
-            <button class="chip-btn" type="button" data-go="cleanup" title="Cleanup style"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.4 2.6l3 3L6 13H3v-3z"/><path d="M8.6 4.4l3 3"/></svg><span id="chipStyle"></span></button>
-          </span>
-          <button class="mic" id="heroMic" type="button" aria-label="Start dictation">
-            <svg class="i-mic" viewBox="0 0 16 16" aria-hidden="true"><rect x="5.75" y="2" width="4.5" height="7.5" rx="2.25"/><path d="M3.5 8a4.5 4.5 0 0 0 9 0M8 12.5V14"/></svg>
-            <svg class="i-done" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7"/></svg>
-          </button>
-        </div>
+      <div class="drop" id="drop">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5v8M4.75 7.25 8 10.5l3.25-3.25"/><path d="M2.75 10.5v1.25a1.75 1.75 0 0 0 1.75 1.75h7a1.75 1.75 0 0 0 1.75-1.75V10.5"/></svg>
+        <span><strong>Drop a voice note here</strong> for a clean transcript to copy. WhatsApp .opus, .m4a, .mp3 or .wav.</span>
       </div>
       <div id="dropResults" class="drop-results"></div>
 
@@ -195,7 +189,7 @@
           <button class="btn danger" id="clearYes" type="button">Clear history</button>
         </span>
       </div>
-      <p class="lede">Everything you dictated, newest first. Expand an entry to see what the speech model heard.</p>
+      <p class="lede">Newest first. On the left what you said, with the words cleanup took out struck through; on the right what was pasted. Open an entry for timings.</p>
       <div id="historyList" class="history"></div>
     </section>
 
@@ -287,8 +281,9 @@
 
       <h2 class="group-title">Appearance</h2>
       <div class="group">
-        <div class="row"><span class="row-text"><span class="row-title" id="lookLabel">Look</span><span class="row-desc">Ink swaps the grays for deep blue ink on warm paper. Both follow the system's light or dark setting.</span></span>
+        <div class="row"><span class="row-text"><span class="row-title" id="lookLabel">Look</span><span class="row-desc">Foundry is pewter and ink, with your words set in Recursive. Classic is plain grays; Ink is deep blue on warm paper. All follow the system's light or dark setting.</span></span>
           <span class="seg" role="radiogroup" aria-labelledby="lookLabel">
+            <label><input type="radio" name="look" value="foundry" data-bind="look" /><span>Foundry</span></label>
             <label><input type="radio" name="look" value="classic" data-bind="look" /><span>Classic</span></label>
             <label><input type="radio" name="look" value="v2" data-bind="look" /><span>Ink</span></label>
           </span></div>
@@ -323,39 +318,51 @@
     </section>
   </main>
 
-  <!-- First run -->
+  <!-- First run: a sound check. The needle answers the microphone, the first sentence is cast into type. -->
   <div class="onboard" id="onboard" data-tauri-drag-region role="dialog" aria-modal="true" aria-labelledby="obTitle" hidden>
     <div class="ob-card">
       <div class="ob-top">
-        <ol class="ob-steps" id="obSteps"><li>Microphone</li><li>Try it</li><li>Paste</li><li>Extras</li></ol>
+        <span class="ob-steps" id="obSteps" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></span>
+        <span class="ob-count" id="obCount"></span>
         <button class="btn quiet" id="obSkip" type="button">Set up later</button>
       </div>
 
       <div class="ob-step" data-step="1">
-        <h2 id="obTitle" tabindex="-1">Let Echotype hear you</h2>
-        <p class="lede">Echotype listens only while you hold the shortcut. Your speech model is downloading meanwhile, and it runs on this Mac.</p>
-        <div class="group" id="obMic"></div>
+        <h2 id="obTitle" tabindex="-1">Welcome to Echotype</h2>
+        <p class="lede">Hold a key, speak, and clean text lands where your cursor is. Speech is turned into text on this Mac. This sound check takes about a minute.</p>
         <p class="ob-model" id="obModel" aria-live="polite"></p>
-        <div class="ob-foot"><button class="btn quiet" id="obApi" type="button">Use an API instead</button><button class="btn primary" data-next type="button">Continue</button></div>
+        <div class="ob-foot"><button class="btn quiet" id="obApi" type="button">Use an API instead</button><button class="btn primary" data-next type="button">Start the sound check</button></div>
       </div>
 
       <div class="ob-step" data-step="2" hidden>
-        <h2 class="ob-try" id="obTry" tabindex="-1"></h2>
-        <p class="lede" id="obTryState" aria-live="polite">Say a sentence. Your words show up below.</p>
-        <p class="ob-result text" id="obResult" data-empty="Your words show up here"></p>
-        <div class="ob-foot"><button class="btn quiet" id="obToggle" type="button">Start with a click</button><button class="btn primary" data-next id="obTryNext" type="button">Continue</button></div>
+        <h2 tabindex="-1">Let Echotype hear you</h2>
+        <p class="lede">Echotype listens only while you dictate. Test the microphone and talk: the needle should swing with your voice. macOS asks for access the first time.</p>
+        <svg class="vu" viewBox="0 0 280 132" aria-hidden="true"></svg>
+        <p class="ob-meter-note" id="obMeterNote" aria-live="polite"></p>
+        <div class="group" id="obMic"></div>
+        <label class="ob-mic"><span>Microphone</span><select id="obMicSelect"></select></label>
+        <div class="ob-foot"><button class="btn" id="obMicTest" type="button">Test the microphone</button><button class="btn primary" data-next type="button">Continue</button></div>
       </div>
 
       <div class="ob-step" data-step="3" hidden>
+        <h2 class="ob-try" id="obTry" tabindex="-1"></h2>
+        <p class="lede" id="obTryState" aria-live="polite">Say a sentence. Your words are set below.</p>
+        <svg class="vu" viewBox="0 0 280 132" aria-hidden="true"></svg>
+        <p class="ob-result text" id="obResult" data-empty="Your words are set here"></p>
+        <div class="ob-foot"><button class="btn" id="obToggle" type="button">Start with a click</button><button class="btn primary" data-next id="obTryNext" type="button">Sounds right</button></div>
+      </div>
+
+      <div class="ob-step" data-step="4" hidden>
         <h2 tabindex="-1">Let Echotype type for you</h2>
-        <p class="lede">With Accessibility on, Echotype presses ⌘V in the app you are using. Without it, your text waits on the clipboard.</p>
+        <p class="lede">To put text where your cursor is, Echotype presses ⌘V in the app you are using. macOS calls that Accessibility access. Echotype uses it for nothing else. Without it, your text waits on the clipboard and you paste it yourself.</p>
         <div class="group" id="obPerms"></div>
         <div class="ob-foot"><button class="btn quiet" data-recheck type="button">Check again</button><button class="btn primary" data-next id="obPasteNext" type="button">Continue</button></div>
       </div>
 
-      <div class="ob-step" data-step="4" hidden>
-        <h2 tabindex="-1">A few extras</h2>
-        <p class="lede">All optional. You can change them in Settings.</p>
+      <div class="ob-step" data-step="5" hidden>
+        <h2 tabindex="-1">The pill and the talk key</h2>
+        <p class="lede">While you dictate, a small pill at the bottom of the screen shows a needle and the time. Click it to dictate, right-click it for options.</p>
+        <div class="pill-demo" aria-hidden="true"><span class="pd-idle"></span><span class="pd-live"><svg viewBox="0 0 42 16"><line x1="9.9" y1="9" x2="8" y2="7.3"/><line x1="14.9" y1="5.3" x2="13.9" y2="3.1"/><line x1="21" y1="4" x2="21" y2="1.5"/><line x1="27.1" y1="5.3" x2="28.1" y2="3.1"/><line x1="32.1" y1="9" x2="34" y2="7.3"/><line class="pd-needle" x1="21" y1="19" x2="21" y2="1.5"/></svg><span class="num">0:04</span></span></div>
         <div class="group">
           <label class="row" id="obTalkRow"><span class="row-text"><span class="row-title">Talk key</span><span class="row-desc">Dictate with one key as well as the shortcut.</span><span class="row-desc" id="obTalkStatus" role="status"></span></span>
             <select id="obTalk" aria-label="Talk key">
@@ -365,6 +372,14 @@
               <option value="right_command">Right Command ⌘</option>
               <option value="right_control">Right Control ⌃</option>
             </select></label>
+        </div>
+        <div class="ob-foot"><span></span><button class="btn primary" data-next type="button">Continue</button></div>
+      </div>
+
+      <div class="ob-step" data-step="6" hidden>
+        <h2 tabindex="-1">Ready to dictate</h2>
+        <p class="lede" id="obDoneLine">Two last choices. Both can be changed in Settings.</p>
+        <div class="group">
           <label class="row"><span class="row-text"><span class="row-title">Cleanup</span><span class="row-desc">Removes fillers and fixes punctuation with a language model.</span></span>
             <select id="obCleanup" aria-label="Cleanup">
               <option value="off">Off for now</option>

@@ -2,6 +2,7 @@
 const preview = !window.__TAURI__;
 if (preview) await import('./mock.js'); // browser preview for design QA
 const meetingsPage = await import('./meetings.js');
+const { proof } = await import('./proof.js');
 
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -30,6 +31,14 @@ const svg = (d, w = 16) => {
   return el;
 };
 const CHECK = '<path d="M3.5 8.5l3 3 6-7"/>';
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+// Type cooling: each word lands in Recursive casual and settles to linear over 400 ms (foundry.css).
+function cast(el, text, step) {
+  if (reduceMotion.matches) return el.replaceChildren(text);
+  let k = 0;
+  el.replaceChildren(...text.split(/(\s+)/).filter(Boolean).map(w => /^\s/.test(w) ? w
+    : h('span', { className: 'w', style: `animation-delay:${k++ * step}ms` }, w)));
+}
 const CROSS = '<path d="M4 4l8 8M12 4l-8 8"/>';
 
 let S, presets, models = [], sys, isMac = true;
@@ -294,8 +303,6 @@ const ACTIONS = {
 };
 const actionBtn = kind => ACTIONS[kind] && h('button', { className: 'btn', type: 'button', onclick: ACTIONS[kind][1] }, ACTIONS[kind][0]);
 let muted = false;
-// Per-bar gain of the Home waveform: a soft envelope, tallest in the middle.
-const METER = Array.from({ length: 28 }, (_, i) => 0.35 + 0.65 * Math.sin(Math.PI * (i + 0.5) / 28));
 
 // What stops dictation from working right now, with the one action that fixes it.
 let perms = null, sttKeySaved = true;
@@ -319,12 +326,13 @@ function renderHero() {
   const b = st === 'idle' || st === 'done' ? blocker() : null;
   document.body.dataset.state = st;
   document.body.toggleAttribute('data-blocked', !!b);
-  $('#heroState span').textContent = b ? 'Not ready' : dictation.copied ? 'Copied' : STATE_LABEL[st] ?? 'Ready';
+  $('#heroStateText').textContent = b ? 'Not ready' : dictation.copied ? 'Copied' : STATE_LABEL[st] ?? 'Ready';
   const chip = dictation.chip && h('span', { className: 'tag' }, CHIP[dictation.chip]);
   const line = $('#heroLine'), sub = $('#heroSub');
   const mic = $('#heroMic');
-  mic.ariaLabel = st === 'recording' ? 'Finish dictation' : 'Start dictation';
+  mic.textContent = st === 'recording' ? 'Finish dictation' : 'Start dictation';
   mic.ariaDisabled = st === 'transcribing' || st === 'cleaning'; // not `disabled`: focus stays on it
+  $('#hmeter').dataset.live = st === 'recording';
   renderChips();
   if (st === 'recording') {
     line.replaceChildren(muted ? 'Is your mic muted?' : 'Listening');
@@ -357,7 +365,51 @@ function renderChips() {
 }
 for (const b of $$('[data-go]')) b.addEventListener('click', () => go(b.dataset.go));
 $('#heroMic').addEventListener('click', e => e.currentTarget.ariaDisabled !== 'true' && invoke('toggle_dictation'));
-$('#heroMeter').append(...METER.map(() => h('i')));
+
+// ---------- the input meter and the needle ----------
+// One second-order ballistic for the Home meter and the onboarding needles: fast attack, slow
+// release, damping 0.8 (about 1.5% overshoot). Levels arrive only while recording (audio.rs, 0..1
+// over 30 dB above the room); when they stop the meter falls back to rest and the loop ends.
+const ball = { x: 0, v: 0, target: 0, peak: 0, at: 0, last: 0, raf: 0 };
+function meterTo(level) {
+  ball.target = level;
+  ball.at = performance.now();
+  if (!ball.raf) ball.raf = requestAnimationFrame(meterFrame);
+}
+function meterFrame(now) {
+  const dt = Math.min(0.05, (now - (ball.last || now)) / 1000);
+  ball.last = now;
+  if (now - ball.at > 250) ball.target = 0;
+  if (reduceMotion.matches) { ball.x = ball.target; ball.v = 0; }
+  else for (let i = 0, n = Math.max(1, Math.ceil(dt / 0.004)), hs = dt / n; i < n; i++) {
+    const w = ball.target > ball.x || ball.v > 0 ? 38 : 9;
+    ball.v += (w * w * (ball.target - ball.x) - 1.6 * w * ball.v) * hs;
+    ball.x += ball.v * hs;
+  }
+  ball.x = Math.max(0, ball.x);
+  ball.peak = Math.max(Math.min(1, ball.x), ball.peak - dt * 0.4);
+  const x = Math.min(1, ball.x);
+  $('#hmFill').style.transform = `scaleX(${x})`;
+  $('#hmPeak').style.left = `calc(${ball.peak * 100}% - 1px)`;
+  for (const n of $$('.vu .needle')) n.style.transform = `rotate(${-48 + 96 * x}deg)`;
+  if (!ball.target && ball.x < 0.002 && Math.abs(ball.v) < 0.01 && ball.peak < 0.002) { ball.raf = ball.last = 0; return; }
+  ball.raf = requestAnimationFrame(meterFrame);
+}
+// The onboarding needle: an arc scaled 0 to 30 dB over the room, ticks every 2.5 dB.
+for (const vu of $$('.vu')) {
+  const cx = 140, cy = 154, R = 118, pt = (a, r) => [(cx + r * Math.sin(a)).toFixed(2), (cy - r * Math.cos(a)).toFixed(2)];
+  let s = '';
+  for (let i = 0; i <= 12; i++) {
+    const a = (-48 + i * 8) * Math.PI / 180, major = i % 4 === 0, [x1, y1] = pt(a, R - (major ? 10 : 6)), [x2, y2] = pt(a, R);
+    s += `<line class="${major ? 'major' : 'minor'}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`;
+    if (major) { const [x, y] = pt(a, R + 11); s += `<text x="${x}" y="${+y + 3}">${i * 2.5}</text>`; }
+  }
+  const [ax, ay] = pt(-48 * Math.PI / 180, R), [bx, by] = pt(48 * Math.PI / 180, R);
+  s += `<path class="minor" d="M ${ax} ${ay} A ${R} ${R} 0 0 1 ${bx} ${by}"/><line class="base" x1="0" y1="139.5" x2="280" y2="139.5"/>`;
+  s += `<line class="needle" x1="${cx}" y1="${cy}" x2="${cx}" y2="${cy - R + 2}"/>`;
+  vu.setAttribute('viewBox', '0 0 280 140');
+  vu.innerHTML = s;
+}
 
 // "No cleanup" (D4): cleanup is off, or on with no key. A dismissible Home banner offers the setup.
 let cleanupKeySaved = true;
@@ -401,13 +453,17 @@ function keptText() {
 // The recording is kept when transcription fails: run it again without re-dictating.
 const retryBtn = () => h('button', { className: 'btn primary', type: 'button', onclick: () => invoke('retry_last').catch(e => { dictation = { state: 'error', error: String(e) }; renderHero(); }) }, 'Retry');
 
-function renderRecent() {
+// `fresh`: the newest row just arrived, so its words cool into place.
+function renderRecent(fresh) {
   const box = $('#recent');
   if (!recent.length) return box.replaceChildren(h('p', { className: 'empty' }, 'Your dictations show up here.'));
-  box.replaceChildren(...recent.slice(0, 3).map(r => {
+  box.replaceChildren(...recent.slice(0, 3).map((r, i) => {
     const copy = h('button', { className: 'btn quiet', type: 'button' }, 'Copy');
     copy.onclick = () => copyText(r.text, copy);
-    return h('div', { className: 'row entry' }, h('span', { className: 'text' }, r.text.replace(/\s*\n\s*[-*•]?\s*/g, ' · ')), h('time', { className: 'when', title: fmtTime(r.ts).replace('\n', ' ') }, fmtAgo(r.ts)), copy);
+    const text = h('span', { className: 'text spoken' }), line = r.text.replace(/:\s*\n\s*[-*•]?\s*/g, ': ').replace(/\s*\n\s*[-*•]?\s*/g, ' · ');
+    if (fresh && i === 0) cast(text, line, 30); else text.textContent = line;
+    const when = fmtWhen(r.ts);
+    return h('div', { className: 'row entry' }, h('time', { className: /^\d/.test(when) ? 'when num' : 'when', title: fmtWhen(r.ts, true) }, when), text, copy);
   }));
 }
 
@@ -793,24 +849,14 @@ $('#addRep').addEventListener('click', () => {
 });
 
 // ---------- history ----------
-function fmtTime(ts) {
+// "9:41" today, then "Yesterday" or "Oct 12"; `full` adds the day and the time ("Today 9:41").
+function fmtWhen(ts, full) {
   const d = new Date(typeof ts === 'number' && ts < 1e12 ? ts * 1000 : ts);
   if (isNaN(d)) return '';
-  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  if (d.toDateString() === new Date().toDateString()) return time;
-  const day = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
-  return `${day}\n${time}`;
-}
-
-// "2m", "1h" under a day, then a date (D15).
-function fmtAgo(ts) {
-  const d = new Date(typeof ts === 'number' && ts < 1e12 ? ts * 1000 : ts);
-  if (isNaN(d)) return '';
-  const min = Math.max(0, Math.floor((Date.now() - d) / 60000));
-  if (min < 1) return 'now';
-  if (min < 60) return `${min}m`;
-  if (min < 1440) return `${Math.floor(min / 60)}h`;
-  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const ago = Math.round((new Date().setHours(0, 0, 0, 0) - new Date(d).setHours(0, 0, 0, 0)) / 864e5);
+  const day = ago === 0 ? 'Today' : ago === 1 ? 'Yesterday' : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  return full ? `${day} ${time}` : ago === 0 ? time : day;
 }
 
 async function renderHistory() {
@@ -830,18 +876,32 @@ async function renderHistory() {
       : h('p', { className: 'empty' }, 'History is off, so nothing is kept.', h('button', { className: 'btn', type: 'button', onclick: () => go('settings') }, 'Turn on in Settings')));
     return;
   }
-  list.replaceChildren(...items.map(it => {
+  // Galley proofs: as said (removed words struck) beside as pasted. One column when nothing changed.
+  list.replaceChildren(h('div', { className: 'galley-head', 'aria-hidden': 'true' }, h('span', {}, 'As said'), h('span', {}, 'As pasted')), ...items.map(it => {
     const copy = h('button', { className: 'btn quiet', type: 'button' }, 'Copy');
     copy.onclick = e => { e.preventDefault(); copyText(it.text, copy); };
-    return h('details', {},
-      h('summary', {}, h('span', { className: 'text' }, it.text), it.no_cleanup && h('span', { className: 'tag' }, 'No cleanup'), h('time', { className: 'when', title: fmtTime(it.ts).replace('\n', ' ') }, fmtAgo(it.ts)), copy),
+    const words = it.text.split(/\s+/).filter(Boolean).length, same = it.raw.trim() === it.text.trim();
+    return h('details', { className: 'proof' },
+      h('summary', {},
+        h('span', { className: 'pf-meta' }, h('time', { className: 'num' }, fmtWhen(it.ts, true)), h('span', { className: 'num' }, `${fmtNum(words)} ${words === 1 ? 'word' : 'words'}`), it.no_cleanup && h('span', { className: 'tag' }, 'No cleanup'), copy),
+        same ? h('span', { className: 'pf-clean pf-only text spoken' }, it.text)
+          : [h('span', { className: 'pf-raw text spoken' }, struck(it.raw, it.text)), h('span', { className: 'pf-clean text spoken' }, it.text)]),
       h('div', { className: 'detail' },
-        it.raw !== it.text && h('p', { className: 'raw text' }, h('b', {}, 'Heard: '), it.raw),
         h('span', { className: 'timing' },
-          h('span', {}, `Speech ${it.stt_ms} ms${it.stt_provider ? ` (${it.stt_provider})` : ''}`),
-          it.cleanup_provider && h('span', {}, `Cleanup ${it.cleanup_ms} ms (${it.cleanup_provider})`)),
+          h('span', {}, 'Speech ', h('span', { className: 'num' }, `${it.stt_ms} ms`), it.stt_provider ? ` (${it.stt_provider})` : ''),
+          it.cleanup_provider && h('span', {}, 'Cleanup ', h('span', { className: 'num' }, `${it.cleanup_ms} ms`), ` (${it.cleanup_provider})`)),
         it.no_cleanup && noCleanup() && h('p', { className: 'hint' }, 'Kept as you said it because cleanup is off. ', h('button', { className: 'btn quiet', type: 'button', onclick: () => go('cleanup') }, 'Set up cleanup'))));
   }));
+}
+// The raw words with each run of removed words in one <del>.
+function struck(raw, text) {
+  const out = [];
+  for (const { w, cut } of proof(raw, text)) {
+    const prev = out.at(-1);
+    if (cut && prev?.tagName === 'DEL') prev.append(' ' + w);
+    else out.push(out.length ? ' ' : '', cut ? h('del', {}, w) : w);
+  }
+  return out;
 }
 const confirmClear = on => { $('#clearHistory').hidden = on; $('#clearConfirm').hidden = !on; (on ? $('#clearCancel') : $('#clearHistory')).focus(); };
 $('#clearHistory').addEventListener('click', () => confirmClear(true));
@@ -859,8 +919,10 @@ async function renderMics() {
   try { devices = await invoke('list_input_devices'); $('#micError').hidden = true; }
   catch (e) { devices = []; $('#micError').textContent = `Couldn't list microphones (${e}). Echotype uses the system default.`; $('#micError').hidden = false; }
   const def = devices.find(d => d.default);
-  $('#mic').replaceChildren(h('option', { value: '' }, def ? `System default (${def.name})` : 'System default'), ...devices.map(d => h('option', { value: d.name }, d.name)));
-  $('#mic').value = S.input_device ?? '';
+  for (const sel of [$('#mic'), $('#obMicSelect')]) {
+    sel.replaceChildren(h('option', { value: '' }, def ? `System default (${def.name})` : 'System default'), ...devices.map(d => h('option', { value: d.name }, d.name)));
+    sel.value = S.input_device ?? '';
+  }
   renderMicNote();
 }
 // D13: a persistent info glyph for a Bluetooth mic, plus a one-time tip.
@@ -871,6 +933,7 @@ function renderMicNote() {
   $('#btTip').hidden = !bt || S.dismissed.includes('bluetooth_tip');
 }
 $('#btTipOk').addEventListener('click', () => dismiss('bluetooth_tip'));
+$('#obMicSelect').addEventListener('change', e => { S.input_device = e.target.value || null; syncBound(); save(); renderMicNote(); });
 
 // Upgraders: the new shortcuts and launch at login are offered once, never switched on silently.
 function renderUpgrade() {
@@ -974,15 +1037,19 @@ window.addEventListener('focus', () => S && refreshStatus()); // Input Monitorin
 for (const b of $$('[data-perm]')) b.addEventListener('click', () => invoke('open_permission_settings', { kind: b.dataset.perm }));
 
 // ---------- onboarding ----------
-// D9: the model downloads in the background while the mic is set up; the first dictation lands in
-// a practice field (never pasted); Accessibility comes after; extras last. Nothing blocks the next step.
+// D9, as a sound check: welcome while the model downloads; the microphone moves a needle; the first
+// dictation is cast into type in a practice field (never pasted); Accessibility; the talk key and
+// the pill; then the last choices. Nothing blocks the next step.
 let obStep = 1;
+const OB_STEPS = $$('.ob-step').length;
 function obShow(n) {
+  if (obStep === 2 && n !== 2) cancelTest(); // a mic test left running
   obStep = n;
   $$('.ob-step').forEach(s => (s.hidden = +s.dataset.step !== n));
-  $$('#obSteps li').forEach((li, i) => { li.className = i + 1 === n ? 'on' : i + 1 < n ? 'done' : ''; li.toggleAttribute('aria-current', i + 1 === n); });
+  $$('#obSteps i').forEach((i, k) => i.classList.toggle('on', k < n));
+  $('#obCount').textContent = `Step ${n} of ${OB_STEPS}`;
   renderObModel();
-  if (n === 4) refreshStatus();
+  if (n === 5) refreshStatus();
   $(`.ob-step[data-step="${n}"] h2`).focus();
 }
 function showOnboarding(on) {
@@ -1010,13 +1077,27 @@ function renderObModel() {
   $('#obModel').textContent = text;
   const ready = S.stt.provider !== 'local' || m?.downloaded;
   if (dictation.state === 'idle' || dictation.state === 'done' || dictation.state === 'hint') {
-    $('#obTryState').textContent = ready ? 'Say a sentence. Your words show up below.' : `Model downloading ${Math.round((p || 0) * 100)}%. You can try as soon as it finishes.`;
+    $('#obTryState').textContent = ready ? 'Say a sentence. Your words are set below.' : `Model downloading ${Math.round((p || 0) * 100)}%. You can try as soon as it finishes.`;
   }
-  $('#obToggle').disabled = !ready && dictation.state !== 'recording';
+  $('#obToggle').disabled = $('#obMicTest').disabled = !ready && dictation.state !== 'recording';
+  obPct = ready ? null : Math.round((p || 0) * 100);
+  renderMeterNote();
 }
+// The microphone test records through the dictation path, which opens the mic only once a model is
+// ready. ponytail: no record-only meter in the core yet; add one if waiting on the download hurts.
+let obPct = null;
+function renderMeterNote() {
+  const st = dictation.state;
+  $('#obMeterNote').textContent = st === 'recording' ? (muted ? 'Echotype hears nothing. Check that the microphone below is not muted.' : 'Listening. Talk, then stop the test.')
+    : st === 'hint' || st === 'error' ? dictation.message || dictation.error || ''
+    : obPct != null ? `The test can start once the speech model is ready (${obPct}%).` : '';
+}
+// Onboarding never pastes; a recording still running when it closes would, so it is dropped.
+const cancelTest = () => dictation.state === 'recording' && invoke('cancel_dictation').catch(() => {});
 $$('[data-next]').forEach(b => b.addEventListener('click', () => obShow(obStep + 1)));
 $$('[data-recheck]').forEach(b => b.addEventListener('click', refreshPerms));
 async function finishOnboarding(page) {
+  cancelTest();
   // New installs get the new shortcuts and (when allowed) launch at login; upgraders are only offered them.
   const [p, c] = DEFAULT_LAST();
   S.paste_last_hotkey ||= p;
@@ -1039,6 +1120,8 @@ $('#obDone').addEventListener('click', () => {
   finishOnboarding(how === 'off' ? 'home' : 'cleanup');
 });
 $('#obToggle').addEventListener('click', () => invoke('toggle_dictation'));
+// The mic test records without transcribing: Stop cancels it (onboarding never pastes either way).
+$('#obMicTest').addEventListener('click', () => dictation.state === 'recording' ? cancelTest() : invoke('toggle_dictation').catch(e => { $('#obMeterNote').textContent = String(e); }));
 
 // ---------- clipboard ----------
 async function copyText(text, btn) {
@@ -1060,7 +1143,7 @@ listen('dictation-state', ({ payload }) => {
   renderHero();
   if ((payload.state === 'done' || payload.state === 'error') && payload.text) { // error + text = transcribed but not pasted
     recent.unshift({ ts: Date.now(), text: payload.text });
-    renderRecent();
+    renderRecent(true);
   }
   if (payload.state === 'done' || payload.state === 'error') refreshCloud(); // words used went up
   if (payload.state !== 'recording') muted = false;
@@ -1069,10 +1152,12 @@ listen('dictation-state', ({ payload }) => {
   st.textContent = payload.state === 'error' ? payload.error || 'Something went wrong. Try again.'
     : payload.state === 'hint' ? payload.message
     : payload.state === 'done' ? 'That is what Echotype heard. Try another, or continue.'
-    : payload.state === 'idle' ? 'Say a sentence. Your words show up below.'
+    : payload.state === 'idle' ? 'Say a sentence. Your words are set below.'
     : `${STATE_LABEL[payload.state]}…`;
-  if (payload.state === 'done' && payload.text) res.textContent = payload.text;
+  if (payload.state === 'done' && payload.text && !$('#onboard').hidden) cast(res, payload.text, 110);
   $('#obToggle').textContent = payload.state === 'recording' ? 'Stop' : 'Start with a click';
+  $('#obMicTest').textContent = payload.state === 'recording' ? 'Stop the test' : 'Test the microphone';
+  renderMeterNote();
   if (payload.state === 'idle') renderObModel();
 });
 
@@ -1088,10 +1173,12 @@ listen('settings-changed', ({ payload }) => {
 });
 
 listen('audio-level', ({ payload }) => {
-  if (!!payload.muted !== muted) { muted = !!payload.muted; renderHero(); }
-  const bars = $$('#heroMeter i');
-  const lvl = Math.max(0, Math.min(1, payload.meter));
-  bars.forEach((b, i) => { b.style.transform = `scaleY(${Math.max(0.15, Math.min(1, lvl * METER[i] * (0.75 + Math.random() * 0.5)))})`; });
+  if (!!payload.muted !== muted) {
+    muted = !!payload.muted;
+    renderHero();
+    renderMeterNote();
+  }
+  meterTo(Math.max(0, Math.min(1, payload.meter)));
 });
 
 listen('model-download', ({ payload: p }) => {
@@ -1142,10 +1229,10 @@ S.dismissed ??= [];
 base = clone(S);
 recent = await invoke('get_history', { limit: 3 }).catch(() => []);
 
-// Ink (look-v2.css) applies under <html data-look="v2">; anything else is Classic.
+// Foundry (foundry.css, the default) and Ink (look-v2.css) apply under <html data-look>; Classic has none.
 function applyLook() {
-  if (S.look === 'v2') document.documentElement.dataset.look = 'v2';
-  else delete document.documentElement.dataset.look;
+  if (S.look === 'classic') delete document.documentElement.dataset.look;
+  else document.documentElement.dataset.look = S.look === 'v2' ? 'v2' : 'foundry';
 }
 
 function renderAll() {
