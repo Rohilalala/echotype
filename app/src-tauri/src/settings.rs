@@ -68,9 +68,6 @@ pub struct Settings {
     pub pill_in_recordings: bool,
     /// Settings window look: "foundry" (the default), "classic" or "v2" (Ink).
     pub look: String,
-    /// True once the user picks a look in Settings. Builds before Foundry saved "classic" without
-    /// anyone choosing it, so an unchosen "classic" loads as Foundry.
-    pub look_chosen: bool,
     /// Where the pill was dropped on each display (macOS): its window's top-left as a fraction
     /// of the room it has in that display's visible frame, keyed by the display's name. A display
     /// with no entry gets bottom-centre; double-clicking the pill removes its entry.
@@ -151,7 +148,6 @@ impl Default for Settings {
             pill_hidden_until: 0,
             pill_in_recordings: false,
             look: "foundry".into(),
-            look_chosen: false,
             pill_positions: BTreeMap::new(),
             pill_screen: None,
             pill_follow_cursor: true,
@@ -208,18 +204,10 @@ impl Settings {
             }),
             Err(_) => Self::default(),
         };
-        s.migrate();
+        if s.local_api.port < MIN_PORT {
+            s.local_api.port = LocalApi::default().port; // older builds saved 0 from a cleared field
+        }
         s
-    }
-
-    /// Fixes values older builds wrote.
-    fn migrate(&mut self) {
-        if !self.look_chosen && self.look == "classic" {
-            self.look = "foundry".into(); // saved by a pre-Foundry build, never picked
-        }
-        if self.local_api.port < MIN_PORT {
-            self.local_api.port = LocalApi::default().port; // older builds saved 0 from a cleared field
-        }
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -475,12 +463,6 @@ mod tests {
         assert!(s.pill_idle && s.pill_hidden_until == 0 && !s.pill_in_recordings, "the idle pill is on for upgraders, hidden from capture");
         assert_eq!(s.look, "foundry", "upgraders who never picked a look get Foundry");
         assert_eq!(serde_json::from_str::<Settings>(r#"{"look":"v2"}"#).unwrap().look, "v2", "a chosen look is kept");
-        let mut m: Settings = serde_json::from_str(r#"{"look":"classic"}"#).unwrap();
-        m.migrate();
-        assert_eq!(m.look, "foundry", "an unchosen classic from an older build becomes Foundry");
-        let mut m: Settings = serde_json::from_str(r#"{"look":"classic","look_chosen":true}"#).unwrap();
-        m.migrate();
-        assert_eq!(m.look, "classic", "a picked Classic stays");
         assert!(s.pill_positions.is_empty() && s.show_in == "pill", "upgraders keep the pill, bottom-centre");
         assert!(s.pill_follow_cursor && s.pill_screen.is_none(), "...on the screen they are using");
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
