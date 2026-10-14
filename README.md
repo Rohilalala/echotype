@@ -121,6 +121,16 @@ defaults read com.apple.HIToolbox AppleFnUsageType
 
 Turbo models can't translate, so with translation on Echotype switches to a multilingual model you've downloaded.
 
+## Meeting notes
+
+Start meeting notes from the menu bar, the pill's right-click menu or the **Meetings** page. Your microphone is labelled **You**; everyone else is heard through the computer's audio and told apart as Speaker 1, Speaker 2 and so on, which you can rename. The transcript appears as people talk, and when you stop, the configured cleanup model writes a summary with decisions and action items. Without cleanup set up you still get the full transcript. Copy or save any meeting as Markdown or text.
+
+Let everyone know before you start. Everything runs on this Mac: the audio of each meeting is kept in Echotype's app data folder under `meetings/`, and delete removes it.
+
+- Computer audio needs **Screen Recording** permission (macOS 13 or later). Echotype records sound only. Without it, only your microphone is transcribed.
+- Telling speakers apart uses two small models downloaded with the first meeting: [pyannote segmentation 3.0](https://huggingface.co/pyannote/segmentation-3.0) (6 MB, MIT) and [3D-Speaker ERes2Net](https://modelscope.cn/models/iic/speech_eres2net_sv_en_voxceleb_16k) (26 MB, Apache-2.0), run with [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx).
+- Try it on a recording: `echotype --meeting call.m4a [--speakers 3]` prints a speaker-labelled transcript.
+
 ## Local API
 
 Turn it on in Settings, copy the token, then:
@@ -158,7 +168,7 @@ Without `SMTP_HOST` it runs in dev mode and prints sign-in codes to its log. Poi
 
 ## Credits
 
-Built on [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and [Tauri](https://tauri.app). Hotkey and paste handling borrow from [Handy](https://github.com/cjpais/Handy) (MIT).
+Built on [whisper.cpp](https://github.com/ggml-org/whisper.cpp), [Tauri](https://tauri.app), [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) and [screencapturekit-rs](https://github.com/doom-fish/screencapturekit-rs). Hotkey and paste handling borrow from [Handy](https://github.com/cjpais/Handy) (MIT).
 
 ## License
 
