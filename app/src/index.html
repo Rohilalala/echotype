@@ -62,6 +62,11 @@
       </div>
       <div id="dropResults" class="drop-results"></div>
 
+      <div class="banner" id="cloudMoved" hidden>
+        <span>Echotype Cloud isn't part of this version, so Echotype now uses the models on this Mac, chosen automatically.</span>
+        <button class="icon-btn" id="cloudMovedOk" type="button" aria-label="Dismiss"></button>
+      </div>
+
       <div class="banner" id="rawBanner" hidden>
         <span>Dictation is pasted the way you said it, with no cleanup.</span>
         <button class="btn" id="rawSetup" type="button">Set up cleanup</button>
@@ -81,6 +86,7 @@
       <div class="seg" id="sttProvider" role="radiogroup" aria-label="Speech provider"></div>
 
       <div id="sttLocal">
+        <div class="group" id="sttAuto"></div>
         <p class="memline" id="memline"></p>
         <div class="list" id="modelList"></div>
       </div>
@@ -108,7 +114,7 @@
         <h2 class="group-title" id="cleanupSetupTitle">Turn on cleanup</h2>
         <p class="lede small">Pick any one. None is required, and nothing leaves this computer with a local server.</p>
         <div class="group">
-          <div class="row"><span class="row-text"><span class="row-title">Echotype Cloud</span><span class="row-desc">Sign in with your email. Free includes 2,000 words a week.</span></span>
+          <div class="row" id="setupCloud"><span class="row-text"><span class="row-title">Echotype Cloud</span><span class="row-desc">Sign in with your email. Free includes 2,000 words a week.</span></span>
             <button class="btn" type="button" data-setup="cloud">Use Echotype Cloud</button></div>
           <div class="row"><span class="row-text"><span class="row-title">Your own API key</span><span class="row-desc">OpenAI, Groq or OpenRouter. Stored in your keychain.</span></span>
             <button class="btn" type="button" data-setup="key">Add a key</button></div>
@@ -131,6 +137,8 @@
             <input type="url" id="cleanupUrl" spellcheck="false" /></label>
           <label class="row"><span class="row-text"><span class="row-title">Model</span></span>
             <input type="text" id="cleanupModel" data-bind="cleanup.model" spellcheck="false" /></label>
+          <label class="row" id="cleanerRow" hidden><span class="row-text"><span class="row-title">Model</span><span class="row-desc" id="cleanerDesc"></span></span>
+            <select id="cleanerPick"></select></label>
           <div class="row key-row" data-key="cleanup"></div>
           <div class="row" id="cleanupCloud" hidden></div>
         </div>
@@ -327,6 +335,25 @@
         </div>
       </div>
 
+      <h2 class="group-title">Advanced</h2>
+      <div class="group">
+        <label class="row"><span class="row-text"><span class="row-title">Greeting on Home</span><span class="row-desc">A short hello at the top of Home, by time of day.</span></span>
+          <input type="checkbox" class="switch" data-bind="greetings" /></label>
+        <label class="row"><span class="row-text"><span class="row-title">Show advanced settings</span><span class="row-desc">Choose the speech and cleanup models yourself, and how the built-in cleanup model uses memory. Off, Echotype picks what suits this Mac.</span></span>
+          <input type="checkbox" class="switch" data-bind="advanced" /></label>
+        <div id="advBody">
+          <div class="row"><span class="row-text"><span class="row-title" id="memLabel">Model memory</span><span class="row-desc" id="memDesc"></span></span>
+            <span class="seg" role="radiogroup" aria-labelledby="memLabel">
+              <label><input type="radio" name="cleaner_memory" value="save" data-bind="cleaner_memory" /><span>Save memory</span></label>
+              <label><input type="radio" name="cleaner_memory" value="ready" data-bind="cleaner_memory" /><span>Keep ready</span></label>
+            </span></div>
+          <label class="row"><span class="row-text"><span class="row-title">Unload when idle</span><span class="row-desc">Stops the built-in cleanup model after this many minutes unused. It starts again on the next dictation, which then takes a moment longer.</span></span>
+            <span class="actions"><input type="number" class="narrow" min="5" max="240" required data-bind="cleaner_idle_minutes" aria-label="Minutes" /><input type="checkbox" class="switch" data-bind="cleaner_idle_unload" aria-label="Unload when idle" /></span></label>
+          <label class="row"><span class="row-text"><span class="row-title">Cleanup context</span><span class="row-desc">How much text the built-in model reads at once. Longer dictations are cleaned a few sentences at a time. More context uses a little more memory.</span></span>
+            <select id="ctxPick"><option value="1024">1,024 tokens</option><option value="2048">2,048 tokens</option><option value="4096">4,096 tokens</option></select></label>
+        </div>
+      </div>
+
       <h2 class="group-title">Permissions</h2>
       <div class="group" id="perms"></div>
     </section>
@@ -378,7 +405,7 @@
             <select id="obCleanup" aria-label="Cleanup">
               <option value="off">Off for now</option>
               <option value="local">Local server (Ollama, LM Studio)</option>
-              <option value="cloud">Echotype Cloud</option>
+              <option value="cloud" id="obCloud">Echotype Cloud</option>
               <option value="key">My own API key</option>
             </select></label>
           <label class="row" id="obAutostartRow"><span class="row-text"><span class="row-title">Launch at login</span><span class="row-desc" id="obAutostartDesc">Echotype starts quietly in the menu bar.</span></span>
