@@ -20,7 +20,7 @@ const settings = {
   paste_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+V',
   copy_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+C',
   autostart: !q.has('upgrade'), sounds: true,
-  look: q.get('look') === 'v2' ? 'v2' : 'classic',
+  look: ['classic', 'v2'].includes(q.get('look')) ? q.get('look') : 'foundry',
   pill_idle: !q.has('pilloff'), pill_hidden_until: q.has('pillhidden') ? now + 42 * 60000 : 0, pill_in_recordings: false,
   pill_positions: {}, pill_screen: null, pill_follow_cursor: true, show_in: q.has('menubar') ? 'menubar' : 'pill',
   dismissed: q.has('upgrade') || q.has('onboarding') ? [] : ['upgrade_offer'],
@@ -53,7 +53,9 @@ let history = [
   { ts: ago(38), raw: 'can you send me the uh the figma link no wait the loom link from the demo', text: 'Can you send me the Loom link from the demo?', stt_ms: 410, cleanup_ms: 610, stt_provider: 'local', cleanup_provider: 'ollama' },
   { ts: ago(95), raw: 'groceries eggs milk sourdough and two avocados', text: 'Groceries:\n- Eggs\n- Milk\n- Sourdough\n- Two avocados', stt_ms: 380, cleanup_ms: 720, stt_provider: 'local', cleanup_provider: 'ollama' },
   { ts: ago(60 * 26), raw: 'ship it after the tauri build passes on ci', text: 'ship it after the tauri build passes on ci', stt_ms: 350, cleanup_ms: 0, stt_provider: 'local', cleanup_provider: null, no_cleanup: true },
+  { ts: ago(60 * 50), raw: 'okay so for the quarterly review um I want to cover three things first the onboarding numbers which are up about twelve percent since we shipped the new sound check second the uh the support queue which is still too slow on weekends and third the hiring plan for the platform team you know two engineers and maybe a designer if the budget holds so can you put that into a short agenda and send it to the leads before thursday', text: 'For the quarterly review I want to cover three things:\n1. The onboarding numbers, up about 12% since we shipped the new sound check.\n2. The support queue, which is still too slow on weekends.\n3. The hiring plan for the platform team: two engineers, and a designer if the budget holds.\nCan you put that into a short agenda and send it to the leads before Thursday?', stt_ms: 1240, cleanup_ms: 980, stt_provider: 'local', cleanup_provider: 'ollama' },
 ];
+if (q.has('nohistory')) history = [];
 const secrets = new Set(['llm:groq']);
 
 // Echotype Cloud: ?cloud=free or ?cloud=pro starts signed in; any 6 digits except 000000 sign in.
@@ -64,7 +66,7 @@ const sampleAccount = plan => plan === 'pro'
   : { email: 'you@example.com', plan: 'free', words_used: 1240, words_limit: 2000, resets_at: nextMonday(), audio_seconds_used: 610, audio_seconds_limit: 7200 };
 let cloudAccount = ['free', 'pro'].includes(q.get('cloud')) ? sampleAccount(q.get('cloud')) : null;
 if (q.has('cloud')) settings.stt.provider = 'cloud';
-let busy = false;
+let busy = false, cancelled = false;
 
 const commands = {
   get_settings: () => structuredClone(settings),
@@ -100,7 +102,10 @@ const commands = {
       needs_relaunch: talk && im && relaunch, shortcut_errors: q.has('shortcutfail') ? ["Could not register hotkey 'Alt+Space': already in use"] : [], key_label: '⌥ Space' };
   },
   relaunch: () => null,
-  get_history: ({ limit }) => (settings.history_enabled ? history.slice(0, limit) : []),
+  get_history: ({ limit }) => {
+    if (q.has('historyfail')) throw 'the history file could not be read (sample error)';
+    return settings.history_enabled ? history.slice(0, limit) : [];
+  },
   clear_history: () => { history = []; return null; },
   transcribe_file: async ({ path }) => {
     await wait(1400);
@@ -116,8 +121,13 @@ const commands = {
   toggle_dictation: async () => {
     if (busy) return null;
     busy = true;
+    cancelled = false;
     emit('dictation-state', { state: 'recording' });
-    for (let i = 0; i < 60; i++) { await wait(50); emit('audio-level', { meter: Math.abs(Math.sin(i / 4)) * 0.6 + Math.random() * 0.2, muted: false }); }
+    for (let i = 0; i < 60; i++) {
+      await wait(50);
+      if (cancelled) { emit('dictation-state', { state: 'idle' }); busy = false; return null; }
+      emit('audio-level', { meter: Math.abs(Math.sin(i / 4)) * 0.6 + Math.random() * 0.2, muted: false });
+    }
     emit('dictation-state', { state: 'transcribing' }); await wait(700);
     emit('dictation-state', { state: 'cleaning' }); await wait(600);
     emit('dictation-state', { state: 'done', text: 'Let’s move the standup to 10:30 tomorrow.' });
@@ -127,7 +137,7 @@ const commands = {
     return null;
   },
   pill_click: () => (busy ? null : commands.toggle_dictation()),
-  pill_cancel: () => null,
+  pill_cancel: () => { cancelled = true; return null; },
   pill_open: () => null,
   pill_menu: () => null,
   pill_drag: () => null,
