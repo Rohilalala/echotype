@@ -134,6 +134,28 @@ defaults read com.apple.HIToolbox AppleFnUsageType
 
 Turbo models can't translate, so with translation on Echotype switches to a multilingual model you've downloaded.
 
+### Echotype's own cleanup model
+
+A small cleanup model trained for Echotype: Qwen2.5-1.5B-Instruct (Apache-2.0) with a LoRA fine-tune on generated pairs of messy dictation and the text the speaker meant to type, then quantized to 4-bit for MLX. It removes fillers, applies "no wait" corrections, spells your dictionary words and formats spoken lists, all on your Mac.
+
+On the 198 hand-written test cases in `model/eval/handwritten.jsonl`, measured on an M5 Pro:
+
+| | Exact match | Word error rate | Checks passed |
+|---|---|---|---|
+| Echotype model | 70.7% | 6.1% | 93.9% |
+| Same base model, prompted | 7.1% | 42.6% | 35.4% |
+
+It answers in about 94 ms on average and uses about 1 GB of memory. Its weak spot is translating Hinglish to English, where it can drop a negation and flip the meaning, so check those results. Style and custom instructions are not used with this model; it was trained on one short prompt.
+
+The weights are not distributed yet, so you train them yourself. From `model/` (needs [uv](https://docs.astral.sh/uv/) and an Apple silicon Mac with about 10 GB of free memory; training took 35 to 56 minutes on an M5 Pro):
+
+```sh
+sh train.sh                      # generate data, LoRA train, fuse, quantize to out/fused-4bit, evaluate
+.venv/bin/mlx_lm.server --model out/fused-4bit --host 127.0.0.1 --port 8899
+```
+
+Then pick **Echotype model (local)** as the cleanup provider. `.venv/bin/python serve.py --model out/fused-4bit` checks the running server with a few sample requests. `train.sh` also builds a GGUF for Ollama, but only the Echotype model provider sends the prompt the model was trained on.
+
 ## Meeting notes
 
 Start meeting notes from the menu bar, the pill's right-click menu or the **Meetings** page. Your microphone is labelled **You**; everyone else is heard through the computer's audio and told apart as Speaker 1, Speaker 2 and so on, which you can rename. The transcript appears as people talk, and when you stop, the configured cleanup model writes a summary with decisions and action items. Without cleanup set up you still get the full transcript. Copy or save any meeting as Markdown or text.
