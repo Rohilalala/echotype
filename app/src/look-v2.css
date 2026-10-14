@@ -5,7 +5,8 @@
   Idea: dark ink on warm paper. Classic is grayscale with borders doing the structure; Ink lets
   tone do it. The sidebar is an ink-blue desk in both modes, the content pane is a sheet laid
   on it (inset on every side), and cards are tinted slips on the sheet with no outline, rows
-  split by a thin gap of sheet colour. In dark mode the sheet itself turns ink. Ink blue is the accent and now also the one solid colour: primary buttons, the
+  split by a thin gap of sheet colour. Dark mode is blue-black ink, after Total Eclipse, with
+  paper-white text and a faded Classic Blue. Ink blue is the accent and now also the one solid colour: primary buttons, the
   mic, the live waveform, switches, the selected step. Corners are tighter (6 / 10 / 12) and
   nothing casts a shadow except menus. Fonts, sizes and weights are Classic's.
 
@@ -13,7 +14,8 @@
   research references; PANTONE is a trademark of Pantone LLC, which has not endorsed this.
   Tokens are named by role, not by Pantone name, and no Pantone library ships with the app.
     Classic Blue 19-4052  #0F4C81  (Colour of the Year 2020)  accent, light
-    Serenity 15-3919      #92A8D1  (2016)                     accent, dark
+    Serenity 15-3919      #92A8D1  (2016)                     accent on the desk
+    (dark-mode accent #7F9CC8 is a Classic Blue tint, between the two)
     Cloud Dancer 11-4201  #F0EEE9  (2026)                     paper: light sheet base, text on ink
     Dress Blues 19-4024   #2A3244                             the desk (light); ink text, deepened
     Total Eclipse 19-4010 #2D313D                             dark surfaces, deepened
@@ -22,11 +24,11 @@
   The three candidates (WCAG 2 contrast; every text pair >= 4.5:1, see the report):
     Ink (chosen)
       light  desk #2A3244 (text #F0EEE9 / #B7BCC7 / #A3A8B5, accent #92A8D1)
-             sheet #FAF9F6  card #F3F1EC  elev #FFFFFF  soft #E9E6DF
+             sheet #FAF9F6  card #EFECE5  elev #FFFFFF  soft #E9E6DF
              text #1A2030 / #495164 / #5C6476  accent #0F4C81 on #FFFFFF
              ok #1E6B4F  warn #97481C  bad #9B2335
-      dark   desk #0F131B (same desk text)  sheet #1A2030  card #222A3B  elev #263043
-             soft #2B3446  text #F0EEE9 / #B4B8C2 / #9BA1AE  accent #92A8D1 on #14203A
+      dark   desk #0F1218 (same desk text)  sheet #1A1E28  card #222734  elev #262C39
+             soft #2B3140  text #F0EEE9 / #B4B8C2 / #9BA1AE  accent #7F9CC8 on #111A2E
              ok #7DBE9C  warn #E2A272  bad #E88A90
     Marsala (Marsala 18-1438 #955251, Mocha Mousse 17-1230 #A47864, Sand Dollar 13-1106 #DFCFBE)
       light  side #EFEAE4  pane #FBF9F7  card #F4F0EB  soft #EAE3DB
@@ -57,7 +59,7 @@
 
   --side: #2a3244;
   --pane: #faf9f6;
-  --card: #f3f1ec;
+  --card: #efece5;
   --elev: #ffffff;
   --soft: #e9e6df;
   --fg: #1a2030;
@@ -68,7 +70,7 @@
   --outline: rgba(26, 32, 48, 0.2);
   --outline-hover: rgba(26, 32, 48, 0.32);
   --hover: rgba(26, 32, 48, 0.05);
-  --selected: rgba(15, 76, 129, 0.1);
+  --selected: rgba(15, 76, 129, 0.13);
   --solid: #0f4c81;
   --solid-hover: #0b3c68;
   --solid-ink: #ffffff;
@@ -88,11 +90,11 @@
 
 @media (prefers-color-scheme: dark) {
   :root[data-look="v2"] {
-    --side: #0f131b;
-    --pane: #1a2030;
-    --card: #222a3b;
-    --elev: #263043;
-    --soft: #2b3446;
+    --side: #0f1218;
+    --pane: #1a1e28;
+    --card: #222734;
+    --elev: #262c39;
+    --soft: #2b3140;
     --fg: #f0eee9;
     --fg-2: #b4b8c2;
     --fg-3: #9ba1ae;
@@ -101,18 +103,18 @@
     --outline: rgba(240, 238, 233, 0.2);
     --outline-hover: rgba(240, 238, 233, 0.3);
     --hover: rgba(240, 238, 233, 0.06);
-    --selected: rgba(146, 168, 209, 0.14);
-    --solid: #92a8d1;
-    --solid-hover: #a7b9db;
-    --solid-ink: #14203a;
-    --seg-track: #0f131b;
-    --seg-thumb: #354057;
-    --switch-off: #3b4558;
+    --selected: rgba(127, 156, 200, 0.18);
+    --solid: #7f9cc8;
+    --solid-hover: #93acd2;
+    --solid-ink: #111a2e;
+    --seg-track: #0f1218;
+    --seg-thumb: #353c4c;
+    --switch-off: #3c4354;
     --composer-line: rgba(240, 238, 233, 0.1);
     --shadow-menu: 0 8px 20px -6px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(240, 238, 233, 0.08);
 
-    --accent: #92a8d1;
-    --accent-weak: rgba(146, 168, 209, 0.2);
+    --accent: #7f9cc8;
+    --accent-weak: rgba(127, 156, 200, 0.22);
     --ok: #7dbe9c;
     --warn: #e2a272;
     --bad: #e88a90;
@@ -158,7 +160,7 @@
 @media (prefers-color-scheme: dark) {
   /* white on the light dark-mode accent is too faint, so the check takes the ink colour */
   :root[data-look="v2"] .choice input[type="radio"]:checked {
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%2314203a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.5 8.25l2.25 2.25 4.75-5'/%3E%3C/svg%3E");
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23111a2e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.5 8.25l2.25 2.25 4.75-5'/%3E%3C/svg%3E");
   }
 }
 :root[data-look="v2"] .chip { border-radius: var(--r-ctl); background: var(--card); }
@@ -167,8 +169,3 @@
 /* The accent at the moment that matters: the live waveform while you speak, the current step. */
 :root[data-look="v2"] .meter i { background: var(--accent); }
 :root[data-look="v2"] .ob-steps li.on::before { background: var(--accent); }
-
-/* First run gets the same sheet on the desk. The ::before paints between the dialog's
-   background and its content (the dialog is its own stacking context). */
-:root[data-look="v2"] .onboard { background: var(--side); }
-:root[data-look="v2"] .onboard::before { content: ""; position: fixed; inset: 8px; z-index: -1; background: var(--pane); border-radius: var(--r-float); }
