@@ -1147,7 +1147,7 @@ function obEnter(n) {
   // Permissions are polled while their step shows, so a grant in System Settings carries on by itself.
   clearInterval(obPoll);
   if (n === 1 || n === 3) { obPoll = setInterval(obTick, n === 1 ? 700 : 500); obTick(); }
-  if (n === 1) obMicRender();
+  if (n === 1) { if (ob.mic === 'granted' && !ob.checked && !ob.listening) obListen(true); obMicRender(); } // back here before the check finished
   if (n === 2) {
     renderObKeys();
     obTryRender();
