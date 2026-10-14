@@ -26,7 +26,7 @@
 - **Speak Hinglish, get English.** Talk in Hindi, English or both at once; Echotype writes English.
 - **A pill that stays out of the way.** A small ball at the bottom of the screen that stays faint until your pointer comes near; drag it anywhere and it snaps to the centre as it passes. When you talk it bursts into a dotted orb that moves with your voice, thinks while it transcribes, and falls back into the ball. Drag it anywhere; it follows the screen you are using, or stays where you put it. Prefer nothing on screen? Use the menu bar icon instead. When nothing can take text, it shows your words in a small card with **Copy** rather than pasting into nowhere.
 - **Meeting notes.** Echotype hears your microphone and the computer's audio, writes down who said what and, with a cleanup model set up, sums up decisions and action items. It all runs on your Mac.
-- **Drop in a voice note.** Drag a WhatsApp `.opus`, `.m4a`, `.mp3` or `.wav` onto the window for a clean transcript.
+- **Drop in a voice note.** Drag an `.opus`, `.m4a`, `.mp3` or `.wav` onto the window for a clean transcript.
 - **Any model, both stages.** Local whisper.cpp on your machine, or any OpenAI-compatible endpoint: OpenAI, Groq, OpenRouter, Ollama, LM Studio, or your own server.
 - **Knows your machine.** Echotype checks free memory before it loads or recommends a model.
 - **A local API for your scripts and agents.** `POST http://127.0.0.1:7811/v1/audio/transcriptions` runs the same pipeline.
