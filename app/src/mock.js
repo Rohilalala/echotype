@@ -14,6 +14,7 @@ const settings = {
   dictionary: ['Echotype', 'Tauri', 'Hinglish', 'Supabase'],
   replacements: [{ from: 'my email', to: 'aditya@example.com' }],
   restore_clipboard: true, history_enabled: true,
+  usage_stats: !q.has('statsoff'), display_name: q.get('name') || '',
   onboarded: !q.has('onboarding'),
   talk_key: q.get('talk') || 'accelerator',
   paste_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+V',
@@ -150,6 +151,8 @@ const commands = {
     return null;
   },
 };
+
+Object.assign(commands, (await import('./mock-stats.js')).statsCommands(q));
 
 window.__TAURI__ = {
   core: {
