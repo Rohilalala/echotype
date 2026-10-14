@@ -139,10 +139,20 @@ const TEXT_ROLES: [&str; 4] = ["AXTextField", "AXTextArea", "AXComboBox", "AXSea
 /// Focus that plainly takes no text. Anything else without a text signal (a web area Chrome has
 /// not filled in yet, an Electron app before it turns its tree on, a terminal's custom view)
 /// counts as "can't tell" and is pasted into as before.
-const NOT_TEXT: [&str; 12] = [
+/// (Cells and tables are not here: a spreadsheet takes a paste.)
+const NOT_TEXT: [&str; 20] = [
     "AXList", "AXOutline", "AXRow", "AXButton", "AXCheckBox", "AXRadioButton", "AXImage", "AXScrollArea", "AXSlider", "AXPopUpButton",
-    "AXMenuButton", "AXDisclosureTriangle",
+    "AXMenuButton", "AXDisclosureTriangle", "AXWindow", "AXApplication", "AXStaticText", "AXLink", "AXToolbar", "AXTabGroup",
+    "AXSplitGroup", "AXMenuItem",
 ];
+/// Focus that is usually a page or a pane, not a text box, but that a browser or Electron app may
+/// report for a moment before it reports the box itself: asked again once before the card shows.
+const UNSURE: [&str; 3] = ["AXWebArea", "AXGroup", "AXLayoutArea"];
+
+/// The focus is a page or pane with no sign of a caret (see UNSURE).
+fn unsure(f: &Focused) -> bool {
+    UNSURE.contains(&f.role.as_str()) && !(f.editable || f.text_value || f.text_range)
+}
 /// kAXErrorAPIDisabled: Accessibility is off for Echotype.
 pub const AX_DISABLED: i32 = -25211;
 
@@ -163,9 +173,24 @@ pub fn target(trusted: bool, focus: Result<Option<Focused>, i32>) -> Target {
 /// Whether the frontmost app's focused element takes text, asked right before pasting.
 pub fn paste_target() -> Target {
     #[cfg(target_os = "macos")]
-    return target(accessibility_granted(), mac::focused());
+    return mac_paste_target();
     #[cfg(not(target_os = "macos"))]
     Target::Paste
+}
+
+#[cfg(target_os = "macos")]
+fn mac_paste_target() -> Target {
+    let trusted = accessibility_granted();
+    let first = mac::focused();
+    if !matches!(&first, Ok(Some(f)) if unsure(f)) {
+        return target(trusted, first);
+    }
+    // A page with no caret: give the app a moment to report the box that has focus.
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    match mac::focused() {
+        Ok(Some(f)) if unsure(&f) => Target::Card, // still a page: nothing takes text
+        again => target(trusted, again),
+    }
 }
 
 /// The trackpad's alignment click (macOS), as when a dragged object snaps into place.
@@ -460,13 +485,16 @@ mod tests {
         assert_eq!(paste(Ok(Some(Focused { text_range: true, ..el("AXWebArea") }))), Target::Paste);
         assert_eq!(paste(Ok(Some(Focused { text_value: true, ..el("AXUnknown") }))), Target::Paste, "a settable text value");
         // Nowhere to paste: the card.
-        for role in ["AXList", "AXOutline", "AXButton", "AXScrollArea", "AXCheckBox"] {
+        for role in ["AXList", "AXOutline", "AXButton", "AXScrollArea", "AXCheckBox", "AXWindow", "AXStaticText", "AXLink"] {
             assert_eq!(paste(Ok(Some(el(role)))), Target::Card, "{role}");
         }
-        // Focus that may still take text once the app fills in its tree: paste as before.
+        // Focus that may still take text once the app fills in its tree: paste on the first look;
+        // a page or pane is asked again once (paste_target) and only a second blank look is the card.
         for role in ["AXWebArea", "AXGroup", "AXCell", "AXUnknown", ""] {
             assert_eq!(paste(Ok(Some(el(role)))), Target::Paste, "{role}");
         }
+        assert!(unsure(&el("AXWebArea")) && unsure(&el("AXGroup")));
+        assert!(!unsure(&Focused { text_range: true, ..el("AXWebArea") }) && !unsure(&el("AXCell")) && !unsure(&el("AXTextArea")));
         assert_eq!(paste(Ok(None)), Target::Card, "nothing focused (the desktop)");
         assert_eq!(paste(Err(AX_DISABLED)), Target::Card, "Accessibility switched off");
         assert_eq!(target(false, Ok(Some(el("AXTextArea")))), Target::Card, "no Accessibility, no ⌘V");
