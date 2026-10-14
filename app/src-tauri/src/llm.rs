@@ -309,6 +309,16 @@ fn start(bin: &Path, opts: &Opts, log: &Path) -> Result<Server, String> {
     Ok(s) // on error `s` drops above, which kills the process
 }
 
+/// Whether process `pid` is the one listening on 127.0.0.1:`port`.
+// ponytail: one lsof call at start-up (~50 ms); read the socket table with proc_pidfdinfo if lsof
+// is ever missing (it ships with macOS and every Linux distro Echotype targets).
+fn listens_on(pid: u32, port: u16) -> bool {
+    Command::new("/usr/sbin/lsof")
+        .args(["-nP", "-a", "-p", &pid.to_string(), &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().any(|p| p == pid.to_string()))
+}
+
 /// Polls GET /health (503 while the model loads, 200 once it answers) until ready, dead or timed out.
 fn wait_ready(s: &mut Server, timeout: Duration) -> Result<(), String> {
     let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(2)).build().map_err(|e| e.to_string())?;
@@ -319,6 +329,11 @@ fn wait_ready(s: &mut Server, timeout: Duration) -> Result<(), String> {
             return Err(format!("it exited ({status})"));
         }
         if client.get(&health).send().is_ok_and(|r| r.status().is_success()) {
+            // The port was free a moment ago, not reserved: make sure the process answering on it
+            // is the one we started before it gets the key and transcripts.
+            if !listens_on(s.child.id(), s.port) {
+                return Err(format!("another program answered on port {}", s.port));
+            }
             return Ok(());
         }
         if t.elapsed() > timeout {
@@ -367,6 +382,16 @@ mod tests {
         assert_eq!(cleaner(&s).id, "echotype-clean");
         let st = cleaners(8192);
         assert!(st.iter().all(|c| c.ram_mb > 0 && c.warning.is_none()), "one cleaner: nothing larger to warn about");
+    }
+
+    #[test]
+    fn a_port_is_only_trusted_from_the_process_listening_on_it() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        assert!(listens_on(std::process::id(), port), "this test process listens there");
+        assert!(!listens_on(1, port), "launchd does not");
+        drop(l);
+        assert!(!listens_on(std::process::id(), port), "nobody listens any more");
     }
 
     #[test]
