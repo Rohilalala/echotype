@@ -145,7 +145,7 @@ On the 198 hand-written test cases in `model/eval/handwritten.jsonl`, measured o
 | Echotype model | 70.7% | 6.1% | 93.9% |
 | Same base model, prompted | 7.1% | 42.6% | 35.4% |
 
-It answers in about 94 ms on average and uses about 1 GB of memory. Its weak spot is translating Hinglish to English, where it can drop a negation and flip the meaning, so check those results. Style and custom instructions are not used with this model; it was trained on one short prompt.
+It answers in about 94 ms on average and uses about 1 GB of memory. Its weak spot is translating Hinglish to English, where it can drop a negation and flip the meaning, so check those results. Style and custom instructions are not used with this model, since it was trained on one short prompt, and it does not write meeting summaries.
 
 The weights are not distributed yet, so you train them yourself. From `model/` (needs [uv](https://docs.astral.sh/uv/) and an Apple silicon Mac with about 10 GB of free memory; training took 35 to 56 minutes on an M5 Pro):
 
