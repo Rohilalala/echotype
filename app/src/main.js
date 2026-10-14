@@ -1114,6 +1114,8 @@ function showOnboarding(on) {
   document.documentElement.classList.toggle('ob-on', on);
 }
 
+$('#rerunSetup').addEventListener('click', () => startOnboarding(1));
+
 function startOnboarding(step) {
   showOnboarding(true);
   window.__TAURI__.event.emit?.('main-page', 'onboarding'); // the real pill may show over this window
@@ -1133,6 +1135,8 @@ function startOnboarding(step) {
 // swaps at once and fades. The orb is outside the steps and follows its slot either way.
 function obShow(n, first = false) {
   n = Math.max(1, Math.min(5, n));
+  // Step 3 is macOS's Accessibility switch; elsewhere pasting needs nothing, so the flow steps over it.
+  if (n === 3 && !isMac) n = n > obStep ? 4 : 2;
   const from = $(`.ob-step[data-step="${obStep}"]`), to = $(`.ob-step[data-step="${n}"]`);
   document.documentElement.classList.toggle('ob-back', n < obStep);
   obStep = n;
