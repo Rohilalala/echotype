@@ -225,11 +225,9 @@ addEventListener('drop', e => {
   emit('tauri://drag-drop', { paths: [...e.dataTransfer.files].map(f => `/Users/you/Downloads/${f.name}`) });
 });
 
-// overlay.html?view=idle|hint and &hover=1: what pill.rs would send (the idle bar, its hint, ✕/✓ on hover);
-// &meeting=1: meeting notes recording for 12:34.
-if (q.has('view') || q.has('hover') || q.has('meeting')) {
-  const meeting = q.has('meeting') ? Date.now() - 754000 : null;
-  setTimeout(() => emit('pill', { active: q.has('state'), hover: q.has('hover'), expand: q.get('view') === 'hint', hint: 'Hold ⌥ Space or click to dictate', meeting }), 60);
+// overlay.html?view=idle|hint and &hover=1: what pill.rs would send (the idle bar, its hint, ✕/✓ on hover).
+if (q.has('view') || q.has('hover')) {
+  setTimeout(() => emit('pill', { active: q.has('state'), hover: q.has('hover'), expand: q.get('view') === 'hint', hint: 'Hold ⌥ Space or click to dictate' }), 60);
 }
 
 // overlay.html?state=<state>&chip=<chip> (and index.html?state=... for the Home hero) renders any

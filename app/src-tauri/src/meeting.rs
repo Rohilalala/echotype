@@ -686,11 +686,6 @@ pub fn recording() -> bool {
     lock(&LIVE).as_ref().is_some_and(|l| l.capture.is_some())
 }
 
-/// When the running meeting started (ms since the epoch), while it records: the pill's timer.
-pub fn started_ms() -> Option<u64> {
-    lock(&LIVE).as_ref().filter(|l| l.capture.is_some()).map(|l| l.started_ms)
-}
-
 pub fn menu_label() -> &'static str {
     if recording() { "Stop meeting notes" } else { "Start meeting notes" }
 }
@@ -701,11 +696,11 @@ struct Event<'a> {
     state: &'a str,
 }
 
-/// `meeting` → every window: the Meetings page refetches; the pill loop wakes to show or drop
-/// its "Meeting · 12:34" state (pill.rs reads `started_ms`).
+/// `meeting` → every window: the Meetings page refetches, and the pill can show its own state.
+// TODO(pill): the overlay could show "Meeting · 12:34" from this event; until then the menu bar
+// title (tray) carries the meeting state, so the pill code stays untouched here.
 fn emit(app: &AppHandle, id: &str, state: &str) {
     let _ = app.emit("meeting", Event { id, state });
-    let _ = crate::state(app).pill_wake.send(());
 }
 
 /// Tray and pill menu: start, or stop the running meeting.
@@ -778,7 +773,6 @@ pub fn stop(app: &AppHandle) -> Result<(), String> {
     capture.stop(); // joins both streams: every sample has been sent
     stopped.store(true, Ordering::SeqCst);
     refresh_tray(app, None);
-    let _ = crate::state(app).pill_wake.send(()); // the pill drops its meeting state now, not when processing starts
     Ok(())
 }
 

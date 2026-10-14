@@ -1,14 +1,14 @@
 if (!window.__TAURI__) await import('./mock.js');
-import { step, angle, clockText, face, cardReason } from './overlay-model.js';
 const { listen } = window.__TAURI__.event;
 const { invoke } = window.__TAURI__.core;
 const pill = document.getElementById('pill'), label = document.getElementById('label');
 const chipEl = document.getElementById('chip'), time = document.getElementById('time'), secs = document.getElementById('secs');
 const ctext = document.getElementById('ctext'), ckey = document.getElementById('ckey'), copyBtn = document.getElementById('copy'), ring = document.getElementById('ringLeft');
-const ccap = document.getElementById('ccap'), needleEl = document.getElementById('needle'), mtime = document.getElementById('mtime');
+const bars = [...pill.querySelectorAll('.wave i')];
+const WEIGHT = [0.35, 0.55, 0.75, 0.9, 1, 0.95, 1, 0.9, 0.75, 0.55, 0.35];
 const CHIP = { too_quiet: 'Too quiet, move the mic closer', quiet: 'Quiet voice', no_cleanup: 'No cleanup' };
 const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
-let since = 0, clock, meetClock;
+let smooth = 0, since = 0, clock;
 // `cur`: the last dictation state. `view`: what pill.rs says to show (idle bar or that state,
 // hover, the hint); null in the browser preview, where the state alone decides.
 let cur = { state: 'idle' }, view = null, muted = false;
@@ -24,39 +24,17 @@ function primary(p) {
   return '';
 }
 
-// The needle follows the level on every frame while listening (overlay-model.js has the ballistics).
-let needle = { x: 0, v: 0 }, level = 0, raf = 0, last = 0;
-function frame(t) {
-  needle = step(needle, level, Math.min(0.05, Math.max(0, (t - last) / 1000)), still);
-  last = t;
-  needleEl.style.transform = `rotate(${angle(needle.x)}deg)`;
-  raf = requestAnimationFrame(frame);
-}
-function needleOn(on) {
-  if (on && !raf) {
-    last = performance.now();
-    raf = requestAnimationFrame(frame);
-  } else if (!on && raf) {
-    cancelAnimationFrame(raf);
-    raf = 0;
-    needle = { x: 0, v: 0 };
-    level = 0;
-    needleEl.style.transform = '';
-  }
-}
-
 function tick() {
   const s = Math.floor((Date.now() - since) / 1000);
-  if (cur.state === 'recording') time.textContent = clockText(Date.now() - since);
+  if (cur.state === 'recording') time.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   // D11: transcribing and cleaning show their seconds once they pass 3 (outside the live region).
   else secs.textContent = s >= 3 ? `${s}s` : '';
 }
 
 function render() {
-  const { active, meeting, expand } = face(cur.state, view);
+  const active = cur.state !== 'idle' && (view ? view.active : true);
   pill.classList.toggle('active', active);
-  pill.classList.toggle('meeting', meeting);
-  pill.classList.toggle('expand', expand);
+  pill.classList.toggle('expand', !active && !!view?.expand);
   pill.classList.toggle('hover', !!view?.hover);
   pill.classList.toggle('drag', !!view?.drag);
   pill.classList.toggle('locked', active && !!cur.locked);
@@ -65,24 +43,15 @@ function render() {
   const card = active && !!cur.card;
   pill.classList.toggle('card', card);
   ctext.textContent = card ? cur.text || '' : '';
-  // Why it is here in one line, then the paste-last keys as keycaps: lib.rs accel_label() joins
-  // them with a space on macOS and "+" elsewhere.
-  ccap.textContent = card ? cardReason(cur) : '';
-  ckey.replaceChildren(...(card && cur.paste_key ? ['Paste last', ...cur.paste_key.split(/[ +]/).filter(Boolean).map(k => Object.assign(document.createElement('kbd'), { textContent: k }))] : []));
-  clearInterval(meetClock);
-  if (meeting) {
-    const show = () => (mtime.textContent = clockText(Date.now() - view.meeting));
-    show();
-    meetClock = setInterval(show, 1000);
-  }
-  const text = active ? (muted ? 'Is your mic muted?' : primary(cur)) : meeting ? 'Meeting' : expand ? view.hint : '';
+  ckey.textContent = card && cur.paste_key ? `Paste last: ${cur.paste_key}` : '';
+  const text = !active ? (view?.expand ? view.hint : '') : muted ? 'Is your mic muted?' : primary(cur);
   label.textContent = text;
   chipEl.hidden = !active || !cur.chip;
   chipEl.dataset.chip = cur.chip || '';
   chipEl.textContent = CHIP[cur.chip] || '';
-  const full = card ? `${cur.warning || ccap.textContent}: ${cur.text || ''}` : meeting ? 'Meeting notes are recording. Click to open Meetings, right-click to stop.' : [text, active && CHIP[cur.chip]].filter(Boolean).join(' · ');
+  const full = card ? `Nowhere to paste: ${cur.text || ''}` : [text, active && CHIP[cur.chip]].filter(Boolean).join(' · ');
   pill.title = full;
-  pill.setAttribute('aria-label', active || meeting ? full || 'Dictating' : 'Start dictation');
+  pill.setAttribute('aria-label', active ? full || 'Dictating' : 'Start dictation');
 }
 
 listen('dictation-state', ({ payload: p }) => {
@@ -106,16 +75,20 @@ listen('dictation-state', ({ payload: p }) => {
   }
   render();
   if (p.state === 'recording') tick();
-  needleOn(p.state === 'recording');
+  else { bars.forEach(b => (b.style.transform = '')); smooth = 0; }
 });
 
 listen('pill', ({ payload }) => { view = payload; render(); });
 
-// ~20 Hz. `meter` is 0..1 above the room's own noise floor, so a whisper still moves the needle.
+// ~20 Hz. `meter` is 0..1 above the room's own noise floor, so a whisper still moves the bars.
 listen('audio-level', ({ payload }) => {
   if (cur.state !== 'recording') return;
   if (!!payload.muted !== muted) { muted = !!payload.muted; render(); }
-  level = Math.max(0, Math.min(1, payload.meter));
+  smooth = smooth * 0.45 + Math.max(0, Math.min(1, payload.meter)) * 0.55;
+  bars.forEach((b, i) => {
+    const jitter = still ? 1 : 0.75 + Math.random() * 0.5;
+    b.style.transform = `scaleY(${Math.max(0.12, Math.min(1, smooth * WEIGHT[i] * jitter)).toFixed(3)})`;
+  });
 });
 
 // A click counts only when the button goes down and up on the capsule (D1). pill.rs lets the
@@ -140,7 +113,6 @@ addEventListener('mouseup', e => {
   if (target === pill && e.detail === 2) return invoke('pill_reset');
   const active = pill.classList.contains('active');
   if (act === 'cancel') invoke('pill_cancel');
-  else if (pill.classList.contains('meeting')) invoke('pill_open', { page: 'meetings' });
   else if (active && cur.action && cur.state !== 'recording') invoke('pill_open');
   else if (!active || ['recording', 'done', 'hint'].includes(cur.state)) invoke('pill_click');
 });

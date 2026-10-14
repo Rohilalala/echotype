@@ -129,9 +129,7 @@ impl Tray {
         let mics = &self.mics.as_ref().expect("just filled").1;
         let recording = state(app).recording.load(std::sync::atomic::Ordering::SeqCst);
         let has_last = lock(&state(app).last_output).is_some();
-        // The meeting item says Start or Stop, so a meeting starting or ending rebuilds the menu.
-        let meeting = crate::meeting::recording();
-        let key = format!("{line:?}|{copy}|{recording}|{meeting}|{has_last}|{:?}|{}|{mics:?}", s.input_device, s.language);
+        let key = format!("{line:?}|{copy}|{recording}|{has_last}|{:?}|{}|{mics:?}", s.input_device, s.language);
         if self.menu.as_ref() != Some(&key)
             && let Ok(m) = crate::pill::menu(app, mics, Some(crate::pill::Bar { line, recording, copy }))
         {
