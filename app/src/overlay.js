@@ -1,5 +1,5 @@
 if (!window.__TAURI__) await import('./mock.js');
-import { step, angle } from './needle.js';
+import { step, angle, clockText, face, cardReason } from './overlay-model.js';
 const { listen } = window.__TAURI__.event;
 const { invoke } = window.__TAURI__.core;
 const pill = document.getElementById('pill'), label = document.getElementById('label');
@@ -24,13 +24,7 @@ function primary(p) {
   return '';
 }
 
-// "12:34", or "1:02:03" past the hour.
-function clockText(ms) {
-  const s = Math.max(0, Math.floor(ms / 1000)), h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, ss = String(s % 60).padStart(2, '0');
-  return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
-}
-
-// The needle follows the level on every frame while listening (needle.js has the ballistics).
+// The needle follows the level on every frame while listening (overlay-model.js has the ballistics).
 let needle = { x: 0, v: 0 }, level = 0, raf = 0, last = 0;
 function frame(t) {
   needle = step(needle, level, Math.min(0.05, Math.max(0, (t - last) / 1000)), still);
@@ -59,12 +53,10 @@ function tick() {
 }
 
 function render() {
-  const active = cur.state !== 'idle' && (view ? view.active : true);
-  // A recording meeting shows whenever no dictation state does (pill.rs sizes it the same way).
-  const meeting = !active && !!view?.meeting;
+  const { active, meeting, expand } = face(cur.state, view);
   pill.classList.toggle('active', active);
   pill.classList.toggle('meeting', meeting);
-  pill.classList.toggle('expand', !active && !meeting && !!view?.expand);
+  pill.classList.toggle('expand', expand);
   pill.classList.toggle('hover', !!view?.hover);
   pill.classList.toggle('drag', !!view?.drag);
   pill.classList.toggle('locked', active && !!cur.locked);
@@ -73,8 +65,9 @@ function render() {
   const card = active && !!cur.card;
   pill.classList.toggle('card', card);
   ctext.textContent = card ? cur.text || '' : '';
-  // Why it is here ("Nowhere to paste", or Accessibility being off), then the paste-last keys as keycaps.
-  ccap.textContent = card ? cur.warning || 'Nowhere to paste' : '';
+  // Why it is here in one line, then the paste-last keys as keycaps: lib.rs accel_label() joins
+  // them with a space on macOS and "+" elsewhere.
+  ccap.textContent = card ? cardReason(cur) : '';
   ckey.replaceChildren(...(card && cur.paste_key ? ['Paste last', ...cur.paste_key.split(/[ +]/).filter(Boolean).map(k => Object.assign(document.createElement('kbd'), { textContent: k }))] : []));
   clearInterval(meetClock);
   if (meeting) {
@@ -82,12 +75,12 @@ function render() {
     show();
     meetClock = setInterval(show, 1000);
   }
-  const text = active ? (muted ? 'Is your mic muted?' : primary(cur)) : meeting ? 'Meeting' : view?.expand ? view.hint : '';
+  const text = active ? (muted ? 'Is your mic muted?' : primary(cur)) : meeting ? 'Meeting' : expand ? view.hint : '';
   label.textContent = text;
   chipEl.hidden = !active || !cur.chip;
   chipEl.dataset.chip = cur.chip || '';
   chipEl.textContent = CHIP[cur.chip] || '';
-  const full = card ? `${ccap.textContent}: ${cur.text || ''}` : meeting ? 'Meeting notes are recording. Click to open Meetings, right-click to stop.' : [text, active && CHIP[cur.chip]].filter(Boolean).join(' · ');
+  const full = card ? `${cur.warning || ccap.textContent}: ${cur.text || ''}` : meeting ? 'Meeting notes are recording. Click to open Meetings, right-click to stop.' : [text, active && CHIP[cur.chip]].filter(Boolean).join(' · ');
   pill.title = full;
   pill.setAttribute('aria-label', active || meeting ? full || 'Dictating' : 'Start dictation');
 }
