@@ -129,11 +129,13 @@ defaults read com.apple.HIToolbox AppleFnUsageType
 
 ## Local models
 
+Echotype picks the models for your Mac by itself (**Automatic**): on a Mac with 8 GB of memory, Small and the smallest Echotype cleanup model, which macOS may page out when it needs the room; with more, Large v3 Turbo Q5 and the 1.5B cleanup model, kept ready. Turn on **Settings → Advanced → Show advanced settings** to choose the models yourself and set how the cleanup model uses memory.
+
 | Model | Download | Memory | Use it for |
 |---|---|---|---|
 | Large v3 Turbo Q5 | 547 MB | 0.8 GB | The default. Fast and accurate in 99 languages |
 | Medium | 1.5 GB | 1.8 GB | Translating Hinglish or any language to English |
-| Small | 488 MB | 0.9 GB | Lighter multilingual, also translates |
+| Small | 488 MB | 0.7 GB | Macs with 8 GB of memory; multilingual, also translates |
 | Base (English) | 148 MB | 0.4 GB | Low-memory machines |
 
 Turbo models can't translate, so with translation on Echotype switches to a multilingual model you've downloaded.
@@ -149,7 +151,7 @@ On the 198 hand-written test cases in `model/eval/handwritten.jsonl`, measured o
 | Echotype model | 70.7% | 6.5% | 94.9% |
 | Same base model, prompted | 7.1% | 42.6% | 35.4% |
 
-It answers in about 100 ms on average and uses about 1.2 GB of memory. Its weak spot is translating Hinglish to English, where it can drop a negation and flip the meaning, so check those results. Style and custom instructions are not used with this model, since it was trained on one short prompt, and it does not write meeting summaries.
+It answers in about 100 ms on average and uses about 1.1 GB of memory. Its weak spot is translating Hinglish to English, where it can drop a negation and flip the meaning, so check those results. Style and custom instructions are not used with this model, since it was trained on one short prompt, and it does not write meeting summaries.
 
 It runs inside Echotype: pick **Echotype model (local)** as the cleanup provider and Echotype starts it on your Mac when needed, through a bundled llama.cpp `llama-server` that only Echotype can talk to. There is nothing to install or start.
 
@@ -187,26 +189,7 @@ It speaks the OpenAI transcription format, so OpenAI client libraries work if yo
 
 ## Echotype Cloud
 
-For computers that can't spare the memory, Echotype Cloud runs transcription and cleanup on a server instead. It's optional; everything above works without it.
-
-| Plan | Price | Includes |
-|---|---|---|
-| Free | $0 | 2,000 words and 2 audio hours a week |
-| Pro | $6 a month or $60 a year | Unlimited words, 40 audio hours a month fair use |
-
-Pick **Echotype Cloud** as the speech provider and sign in with your email; there's no password. Audio is transcribed and dropped. The server keeps word and audio-second counts, nothing else.
-
-### Run your own
-
-The server is in [`server/`](server): a single Go binary in front of any OpenAI-compatible provider, with SQLite for accounts. Every setting is documented at the top of [`server/main.go`](server/main.go).
-
-```sh
-cd server
-echo "STT_UPSTREAM_KEY=<your Groq key>" > .env
-docker compose up -d
-```
-
-Without `SMTP_HOST` it runs in dev mode and prints sign-in codes to its log. Point the app at it with `ECHOTYPE_CLOUD_URL=http://localhost:8080/v1`.
+A hosted option for computers that can't spare the memory may come later. Its server is in [`server/`](server); this version of the app does not offer it.
 
 ## Credits
 
