@@ -669,4 +669,4 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .range input { width: 160px; accent-color: var(--accent); }
 .range output { min-width: 3.2em; text-align: right; color: var(--fg-2); font-variant-numeric: tabular-nums; }
 .pill-preview { display: flex; justify-content: center; align-items: flex-end; overflow: hidden; padding: 8px 0 4px; border-top: 1px solid var(--line-strong); border-radius: 0 0 var(--r-card) var(--r-card); background: linear-gradient(160deg, #9aa3ad, #6d7681); }
-.pill-preview iframe { display: block; width: 260px; height: 100px; border: 0; background: transparent; pointer-events: none; }
+.pill-preview iframe { display: block; flex: none; width: 260px; height: 100px; border: 0; background: transparent; pointer-events: none; transform-origin: 50% 100%; }

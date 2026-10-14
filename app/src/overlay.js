@@ -107,7 +107,7 @@ const LISTEN = resolvePreset('listening', 64), THINK = resolvePreset('working', 
 // Dots visible in the ball and along an edge; the rest wait, unseen, on those same spots.
 const BALL_DOTS = 90, EDGE_GAP = 4;
 // The window shows this page zoomed 1.5x (pill.rs ZOOM): draw at 3x so the dots stay crisp.
-const dpr = Math.max(3, devicePixelRatio || 1);
+const dpr = Math.max(preview ? 4 : 3, devicePixelRatio || 1); // the Settings preview is scaled up to 2x
 cvs.width = W * dpr;
 cvs.height = H * dpr;
 const box = { x: W / 2 - 5, y: H - 21, w: 10, h: 10, r: 5 };

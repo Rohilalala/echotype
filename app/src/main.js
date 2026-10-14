@@ -934,7 +934,11 @@ const pillPreview = $('#pillPreview');
 function sizePreview() {
   $('#pillSizeOut').textContent = `${Math.round((S.pill_size ?? 1.5) * 100)}%`;
   $('#ballSizeOut').textContent = `${Math.round((S.ball_size ?? 1) * 100)}%`;
-  pillPreview.style.zoom = S.pill_size ?? 1.5;
+  // A transform, not CSS zoom: WebKit's zoom on a frame puts the drawn backing and the words
+  // in different places. The frame's box keeps its height, so the container is sized here.
+  const z = S.pill_size ?? 1.5;
+  pillPreview.style.transform = `scale(${z})`;
+  pillPreview.parentElement.style.height = `${100 * z + 13}px`;
   pillPreview.contentDocument?.documentElement.style.setProperty('--ball', S.ball_size ?? 1);
 }
 for (const id of ['pill_size', 'ball_size']) {
