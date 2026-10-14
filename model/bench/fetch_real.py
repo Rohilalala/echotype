@@ -8,6 +8,7 @@ Writes <out>/real/<source>/<id>.wav and <out>/cases/real-<source>.jsonl rows:
 """
 
 import argparse
+import hashlib
 import io
 import json
 import random
@@ -50,7 +51,9 @@ def to16k(data, sr):
 
 
 def safe(s):
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", s)[:120]
+    """File-safe and unique: long ids (People's Speech paths) keep a hash so truncation can't collide."""
+    t = re.sub(r"[^A-Za-z0-9_.-]+", "_", s)
+    return t if len(t) <= 100 else t[:80] + "-" + hashlib.sha1(s.encode()).hexdigest()[:12]
 
 
 def ami_dur(i):

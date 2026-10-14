@@ -53,7 +53,7 @@ def run(a):
         for r in b:
             cmd += ["-f", r["wav"]]
         t0 = time.perf_counter()
-        p = subprocess.run(cmd, capture_output=True, text=True)
+        p = subprocess.run(cmd, capture_output=True)  # bytes: whisper can print invalid UTF-8 mid-character
         dt = time.perf_counter() - t0
         aud = sum(r["duration_s"] for r in b)
         done_s += aud
@@ -62,7 +62,7 @@ def run(a):
         print(f"  batch {i // a.batch}: {len(b)} clips {aud:.0f} s audio in {dt:.1f} s ({aud / dt:.1f}x realtime) rc={p.returncode} missing={len(missing)}"
               f" | {done_s / 3600:.2f}/{total / 3600:.2f} h, eta {(total - done_s) / max(done_s / el, 1e-9) / 60:.0f} min", flush=True)
         if p.returncode and missing:
-            print(p.stderr[-2000:], flush=True)
+            print(p.stderr[-2000:].decode("utf-8", "replace"), flush=True)
 
 
 def collect(a):
