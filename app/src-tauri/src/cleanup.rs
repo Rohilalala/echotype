@@ -231,6 +231,8 @@ fn after_stt(s: &Settings, raw: String, stt_ms: u64, mut warning: Option<String>
         let t = Instant::now();
         match llm(s, &text) {
             Ok(c) if !c.is_empty() => text = c,
+            // The Echotype model was trained to answer filler-only input with nothing: no speech.
+            Ok(_) if s.cleanup.provider == "echotype" => text.clear(),
             Ok(_) => {}
             Err(e) => {
                 let first = e.lines().next().unwrap_or_default().trim_end_matches('.');
@@ -347,6 +349,17 @@ mod tests {
         for kept in ["a.", "2", "नमस्ते"] {
             assert!(post(&s, kept).text.starts_with("clean:"), "{kept}");
         }
+    }
+
+    #[test]
+    fn an_empty_reply_is_no_speech_only_for_the_echotype_model() {
+        let mut s = Settings::default();
+        s.cleanup.enabled = true;
+        let empty = |s: &Settings| after_stt(s, "um uh you know".into(), 1, None, false, true, || {}, |_, _| Ok(String::new()));
+        assert_eq!(empty(&s).text, "um uh you know", "other providers keep the raw text");
+        s.cleanup.provider = "echotype".into();
+        let o = empty(&s);
+        assert_eq!((o.text.as_str(), o.warning, o.no_cleanup), ("", None, false));
     }
 
     #[test]
