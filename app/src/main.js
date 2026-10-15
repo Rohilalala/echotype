@@ -147,6 +147,7 @@ function go(page) {
   for (const s of $$('main > section')) s.hidden = s.dataset.page !== page;
   for (const b of $$('nav button')) b.toggleAttribute('aria-current', false), b.dataset.page === page && b.setAttribute('aria-current', 'page');
   $('#main').scrollTop = 0;
+  document.documentElement.classList.remove('pane-scrolled');
   if (page === 'home') renderGreeting();
   if (page === 'history') renderHistory();
   if (page === 'meetings') meetingsPage.show();
@@ -1882,6 +1883,12 @@ S.replacements ??= [];
 S.dismissed ??= [];
 base = clone(S);
 recent = await invoke('get_history', { limit: 3 }).catch(() => []);
+
+// The title bar over the pane frosts once the page's content has scrolled up under it (.pane-drag).
+$('#main').addEventListener('scroll', () => {
+  const top = $('main > section:not([hidden])')?.firstElementChild?.getBoundingClientRect().top ?? Infinity;
+  document.documentElement.classList.toggle('pane-scrolled', top < $('.pane-drag').offsetHeight);
+}, { passive: true });
 
 // Large windows: the whole window a step larger (the webview's page zoom, like the pill's), so
 // it doesn't sit tiny on a big screen. From the window's own width, which zoom doesn't change.
