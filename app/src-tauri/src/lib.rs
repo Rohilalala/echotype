@@ -936,6 +936,11 @@ async fn get_history(limit: Option<usize>) -> R<Vec<HistoryEntry>> {
 }
 
 #[tauri::command]
+async fn update_history(ts: u64, text: String) -> R<()> {
+    settings::update_history(ts, &text)
+}
+
+#[tauri::command]
 async fn clear_history(app: AppHandle) -> R<()> {
     *lock(&state(&app).last_output) = None;
     settings::clear_history()
@@ -1682,6 +1687,7 @@ pub fn run() {
             delete_model,
             list_input_devices,
             get_history,
+            update_history,
             clear_history,
             get_stats,
             clear_stats,

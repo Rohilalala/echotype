@@ -550,6 +550,32 @@ pub fn get_history(limit: usize) -> Vec<HistoryEntry> {
     s.lines().rev().filter_map(|l| serde_json::from_str(l).ok()).take(limit).collect()
 }
 
+/// A fix from the History page: replaces the text of the entry recorded at `ts`.
+pub fn update_history(ts: u64, text: &str) -> Result<(), String> {
+    update_history_in(&history_path(), ts, text)
+}
+
+fn update_history_in(path: &Path, ts: u64, text: &str) -> Result<(), String> {
+    let _g = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
+    let old = std::fs::read_to_string(path).unwrap_or_default();
+    let mut found = false;
+    let mut lines = Vec::new();
+    for l in old.lines().filter(|l| !l.trim().is_empty()) {
+        match serde_json::from_str::<HistoryEntry>(l) {
+            Ok(mut e) if e.ts == ts && !found => {
+                found = true;
+                e.text = text.to_string();
+                lines.push(serde_json::to_string(&e).map_err(|e| e.to_string())?);
+            }
+            _ => lines.push(l.to_string()), // other entries stay byte for byte
+        }
+    }
+    if !found {
+        return Err("That entry is no longer in history.".into());
+    }
+    write_atomic(path, &(lines.join("\n") + "\n"))
+}
+
 pub fn clear_history() -> Result<(), String> {
     let _g = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
     match std::fs::remove_file(history_path()) {
@@ -743,6 +769,23 @@ mod tests {
         assert_eq!(ts, want);
         let leftovers = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
         assert_eq!(leftovers, 1, "temp files left behind");
+    }
+
+    #[test]
+    fn update_history_changes_only_that_entry() {
+        let path = scratch("history-update").join("history.jsonl");
+        for ts in 1..=3u64 {
+            let e = HistoryEntry { ts, raw: format!("r{ts}"), text: format!("t{ts}"), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false };
+            append_history_to(&path, &e).unwrap();
+        }
+        let before: Vec<String> = std::fs::read_to_string(&path).unwrap().lines().map(String::from).collect();
+        update_history_in(&path, 2, "Ping Midhun").unwrap();
+        let after: Vec<String> = std::fs::read_to_string(&path).unwrap().lines().map(String::from).collect();
+        assert_eq!((after[0].as_str(), after[2].as_str()), (before[0].as_str(), before[2].as_str()));
+        let e: HistoryEntry = serde_json::from_str(&after[1]).unwrap();
+        assert_eq!((e.ts, e.raw.as_str(), e.text.as_str()), (2, "r2", "Ping Midhun"));
+        assert!(update_history_in(&path, 9, "x").is_err(), "a missing entry is an error, not a silent no-op");
+        assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), 1, "temp files left behind");
     }
 
     #[test]
