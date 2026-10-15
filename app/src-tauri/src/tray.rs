@@ -171,7 +171,9 @@ impl Tray {
         let mics = &self.mics.as_ref().expect("just filled").1;
         let recording = state(app).recording.load(std::sync::atomic::Ordering::SeqCst);
         let has_last = lock(&state(app).last_output).is_some();
-        let key = format!("{line:?}|{copy}|{recording}|{has_last}|{:?}|{:?}|{mics:?}|{}", s.input_device, s.languages, crate::meeting::menu_label());
+        // Re-run's model list is read again whenever the line changes, which every dictation does.
+        let kept = (lock(&state(app).last_clip).is_some(), lock(&state(app).last_cleaned).is_some(), s.cleanup.enabled);
+        let key = format!("{line:?}|{copy}|{recording}|{has_last}|{kept:?}|{:?}|{:?}|{mics:?}|{}", s.input_device, s.languages, crate::meeting::menu_label());
         if self.menu.as_ref() != Some(&key)
             && let Ok(m) = crate::pill::menu(app, mics, Some(crate::pill::Bar { line, recording, copy }))
         {

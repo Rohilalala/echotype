@@ -12,13 +12,16 @@ const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
 // `cur`: the last dictation state. `view`: what pill.rs says to show (idle ball or that state,
 // hover, near, the hint); null in the browser preview, where the state alone decides.
 let cur = { state: 'idle' }, view = null, muted = false;
+// The guard's card (cur.cleaned): Copy cleaned was pressed, so the card says what is on the clipboard.
+let cleanedCopied = false;
+const PASTE = /Mac/.test(navigator.platform) ? '⌘V' : 'Ctrl+V';
 
 // One primary line from the state; the chip (already ranked in Rust) is the only extra.
 // pill.rs `line()` sizes the hit area from the same words.
 function primary(p) {
   if (p.state === 'error') return (p.error || 'Something went wrong').split('\n')[0];
   if (p.state === 'hint') return p.message || '';
-  if (p.state === 'done') return p.copied ? `Copied, ${/Mac/.test(navigator.platform) ? '⌘V' : 'Ctrl+V'} to paste` : 'Pasted';
+  if (p.state === 'done') return p.copied ? `Copied, ${PASTE} to paste` : 'Pasted';
   if (p.state === 'transcribing') return 'Transcribing…';
   if (p.state === 'cleaning') return 'Cleaning up…';
   return '';
@@ -43,19 +46,21 @@ function render() {
   // Listening and thinking are the orb; a plain paste falls straight back into the ball.
   pill.classList.toggle('orb', active && !muted && ['recording', 'transcribing', 'cleaning'].includes(cur.state));
   pill.classList.toggle('collapse', active && cur.state === 'done' && !card && !cur.copied && !cur.chip);
-  ctext.textContent = card ? cur.text || '' : '';
+  // The guard's card shows the cleanup it did not paste, the one Copy cleaned copies.
+  ctext.textContent = card ? cur.cleaned ?? cur.text ?? '' : '';
   // Why the words are here and not in the app: Accessibility (fixable here) or nothing to type into.
   const fixable = card && cur.action === 'accessibility';
-  creason.textContent = !card ? '' : fixable ? 'Accessibility is off, can’t paste' : reason(cur.warning);
+  creason.textContent = !card ? '' : fixable ? 'Accessibility is off, can’t paste'
+    : cur.cleaned ? (cleanedCopied ? 'Copied the cleaned version' : `${cur.copied ? 'Copied' : 'Pasted'} as you said it. Cleanup had:`) : reason(cur.warning);
   creason.classList.toggle('fixable', fixable);
   fixBtn.hidden = !fixable;
-  ckey.textContent = card && cur.paste_key ? `Paste last: ${cur.paste_key}` : '';
+  ckey.textContent = card && cleanedCopied ? `${PASTE} to paste` : card && cur.paste_key ? `Paste last: ${cur.paste_key}` : '';
   const text = !active ? (view?.expand ? view.hint : '') : muted ? 'Is your mic muted?' : primary(cur);
   label.textContent = text;
   chipEl.hidden = !active || !cur.chip;
   chipEl.dataset.chip = cur.chip || '';
   chipEl.textContent = CHIP[cur.chip] || '';
-  const full = card ? `${creason.textContent}: ${cur.text || ''}` : [text, active && CHIP[cur.chip]].filter(Boolean).join(' · ');
+  const full = card ? `${cur.cleaned ? cur.warning : creason.textContent}: ${ctext.textContent}` : [text, active && CHIP[cur.chip]].filter(Boolean).join(' · ');
   pill.title = full;
   pill.setAttribute('aria-label', active ? full || 'Dictating' : 'Start dictation');
   kick();
@@ -66,11 +71,12 @@ listen('dictation-state', ({ payload: p }) => {
   // A new state shows at once; pill.rs confirms (or ends it) with its next `pill` event.
   if (view && p.state !== 'idle') view = { ...view, active: true };
   if (p.state !== 'recording') muted = false;
+  cleanedCopied = false;
   if (p.card) {
     // A new card: the ring starts over and Copy says Copy again. A detected call's offer
     // (calls.rs) puts Not now and Start notes (or Stop notes) there instead, for 15 s (pill.rs OFFER_FOR).
-    copyBtn.textContent = p.offer || 'Copy';
-    copyBtn.dataset.act = p.offer ? 'offer' : 'copy';
+    copyBtn.textContent = p.offer || (p.cleaned ? 'Copy cleaned' : 'Copy');
+    copyBtn.dataset.act = p.offer ? 'offer' : p.cleaned ? 'cleaned' : 'copy';
     laterBtn.hidden = !p.offer;
     ring.style.animation = 'none';
     void ring.getBoundingClientRect();
@@ -293,6 +299,7 @@ addEventListener('mouseup', e => {
   if (e.button !== 0 || !target || (e.target.closest('[data-act]') || pill) !== target) return;
   const act = target.dataset?.act;
   if (act === 'copy') return invoke('pill_copy').then(() => (copyBtn.textContent = 'Copied'), () => {});
+  if (act === 'cleaned') return invoke('pill_copy_cleaned').then(() => { copyBtn.textContent = 'Copied'; cleanedCopied = true; render(); }, () => {});
   if (act === 'offer') return invoke('pill_offer');
   if (act === 'close') return invoke('pill_dismiss');
   if (act === 'fix') return invoke('pill_open'); // Home, with the Accessibility fix

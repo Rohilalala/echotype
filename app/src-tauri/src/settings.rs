@@ -154,6 +154,9 @@ pub struct Stt {
     pub model: String,
     /// Overrides the preset base URL when non-empty.
     pub base_url: String,
+    /// Re-run last with another downloaded model: that model for this one run, Automatic or not. Never saved.
+    #[serde(skip)]
+    pub rerun_model: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -302,6 +305,7 @@ impl Default for Stt {
             local_model: "large-v3-turbo-q5_0".into(),
             model: "whisper-large-v3-turbo".into(),
             base_url: String::new(),
+            rerun_model: None,
         }
     }
 }
@@ -584,6 +588,9 @@ pub struct HistoryEntry {
     /// Cleanup was off or had no key, so this is the raw transcript ("No cleanup").
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_cleanup: bool,
+    /// The cleanup the guard rejected; `text` is the words as spoken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleaned: Option<String>,
 }
 
 fn history_path() -> PathBuf {
@@ -845,7 +852,7 @@ mod tests {
                 let path = path.clone();
                 std::thread::spawn(move || {
                     for i in 0..25u64 {
-                        let e = HistoryEntry { ts: t * 1000 + i, raw: "r".into(), text: "t".into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false };
+                        let e = HistoryEntry { ts: t * 1000 + i, raw: "r".into(), text: "t".into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false, cleaned: None };
                         append_history_to(&path, &e).unwrap();
                     }
                 })
@@ -866,7 +873,7 @@ mod tests {
     fn update_history_changes_only_that_entry() {
         let path = scratch("history-update").join("history.jsonl");
         for ts in 1..=3u64 {
-            let e = HistoryEntry { ts, raw: format!("r{ts}"), text: format!("t{ts}"), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false };
+            let e = HistoryEntry { ts, cleaned: None, raw: format!("r{ts}"), text: format!("t{ts}"), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false };
             append_history_to(&path, &e).unwrap();
         }
         let before: Vec<String> = std::fs::read_to_string(&path).unwrap().lines().map(String::from).collect();

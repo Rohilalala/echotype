@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn noise_only_audio_is_an_empty_200_not_an_error() {
-        let out = crate::cleanup::Output { raw: String::new(), text: String::new(), stt_ms: 1, cleanup_ms: 0, warning: None, no_cleanup: false };
+        let out = crate::cleanup::Output { raw: String::new(), text: String::new(), stt_ms: 1, cleanup_ms: 0, warning: None, no_cleanup: false, cleaned: None };
         let body = |r: Response| {
             assert_eq!(r.status(), StatusCode::OK);
             tauri::async_runtime::block_on(axum::body::to_bytes(r.into_body(), 1024)).unwrap()

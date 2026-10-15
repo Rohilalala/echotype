@@ -15,6 +15,7 @@
     "allow-pill-drag",
     "allow-pill-reset",
     "allow-pill-copy",
+    "allow-pill-copy-cleaned",
     "allow-pill-dismiss",
     "allow-pill-offer"
   ]

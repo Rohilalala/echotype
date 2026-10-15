@@ -360,8 +360,8 @@ function renderHero() {
     if (b) fill(sub, h('span', {}, b.text), h('button', { className: 'btn', type: 'button', onclick: b.act }, b.label));
     else if (st === 'error') fill(sub, h('span', {}, `${dictation.error || 'Dictation stopped.'}`), ...keptText(), dictation.retry && retryBtn(), actionBtn(dictation.action));
     else if (st === 'hint') fill(sub, h('span', { className: 'notice-inline' }, dictation.message), actionBtn(dictation.action));
-    else if (st === 'done' && dictation.copied) fill(sub, h('span', {}, dictation.warning || pc('Press ⌘V to paste it.')), chip, ...keptText(), actionBtn(dictation.action));
-    else if (st === 'done' && dictation.warning) fill(sub, h('span', {}, dictation.warning), chip, actionBtn(dictation.action) || cleanupFix);
+    else if (st === 'done' && dictation.copied) fill(sub, h('span', {}, dictation.warning || pc('Press ⌘V to paste it.')), chip, ...keptText(), cleanedBtn(), actionBtn(dictation.action));
+    else if (st === 'done' && dictation.warning) fill(sub, h('span', {}, dictation.warning), chip, cleanedBtn(), actionBtn(dictation.action) || cleanupFix);
     else fill(sub, h('span', {}, 'Text appears wherever your cursor is.'), chip);
   }
 }
@@ -420,6 +420,14 @@ function keptText() {
   const copy = h('button', { className: 'btn', type: 'button' }, 'Copy');
   copy.onclick = () => copyText(dictation.text, copy);
   return [h('span', { className: 'text kept' }, dictation.text), copy];
+}
+
+// The guard pasted the words as spoken: the cleanup it rejected, one tap away.
+function cleanedBtn() {
+  if (!dictation.cleaned) return null;
+  const b = h('button', { className: 'btn', type: 'button' }, 'Copy cleaned version');
+  b.onclick = () => copyText(dictation.cleaned, b);
+  return b;
 }
 
 // The recording is kept when transcription fails: run it again without re-dictating.
@@ -967,6 +975,7 @@ async function renderHistory() {
     return;
   }
   $('#clearHistory').disabled = !items.length;
+  renderRerun();
   if (!items.length) {
     list.replaceChildren(S.history_enabled
       ? h('p', { className: 'empty' }, 'Your dictations show up here. ', verb(), ' ', hotkeyText(S.hotkey), ' in any text field to start.')
@@ -982,6 +991,7 @@ async function renderHistory() {
       h('summary', {}, text, it.no_cleanup && h('span', { className: 'tag' }, 'No cleanup'), h('time', { className: 'when', title: fmtTime(it.ts).replace('\n', ' ') }, fmtAgo(it.ts)), copy),
       h('div', { className: 'detail' }, fix,
         it.raw !== it.text && h('p', { className: 'raw text' }, h('b', {}, 'Heard: '), it.raw),
+        it.cleaned && h('p', { className: 'raw text' }, h('b', {}, 'Cleanup had (not pasted): '), it.cleaned, ' ', cleanedCopy(it.cleaned)),
         h('span', { className: 'timing' },
           h('span', {}, `Speech ${it.stt_ms} ms${it.stt_provider ? ` (${it.stt_provider})` : ''}`),
           it.cleanup_provider && h('span', {}, `Cleanup ${it.cleanup_ms} ms (${it.cleanup_provider})`)),
@@ -1064,6 +1074,29 @@ function fixSuggestions(before, after) {
   }
   return out;
 }
+
+function cleanedCopy(text) {
+  const b = h('button', { className: 'btn quiet', type: 'button' }, 'Copy');
+  b.onclick = () => copyText(text, b);
+  return b;
+}
+
+// Re-run last dictation: the clip Echotype still holds in memory, with one thing changed. The result
+// is copied and shown on the pill, and lands here as a new entry.
+let rerunPending = false;
+async function renderRerun() {
+  const sel = $('#rerunLast');
+  const opts = await invoke('rerun_options').catch(() => []);
+  sel.replaceChildren(h('option', { value: '' }, 'Re-run last dictation…'), ...opts.map(o => h('option', { value: o.id }, o.label)));
+  sel.hidden = !opts.length;
+}
+$('#rerunLast').addEventListener('change', e => {
+  const id = e.target.value;
+  e.target.value = '';
+  if (!id) return;
+  rerunPending = true;
+  invoke('rerun', { id }).catch(err => { rerunPending = false; dictation = { state: 'error', error: String(err) }; renderHero(); });
+});
 
 const confirmClear = on => { $('#clearHistory').hidden = on; $('#clearConfirm').hidden = !on; (on ? $('#clearCancel') : $('#clearHistory')).focus(); };
 $('#clearHistory').addEventListener('click', () => confirmClear(true));
@@ -2048,6 +2081,7 @@ listen('dictation-state', ({ payload }) => {
     renderRecent();
   }
   if (payload.state === 'done' || payload.state === 'error') { refreshCloud(); refreshLastApp(); } // words used went up; the app it went to
+  if (rerunPending && (payload.state === 'done' || payload.state === 'error')) { rerunPending = false; renderHistory(); }
   if (payload.state !== 'recording') muted = false;
   obDictation(payload);
 });

@@ -144,7 +144,7 @@ fn said(s: &DictationState) -> String {
     let main = match s.state {
         "error" => s.error.as_deref().unwrap_or("Something went wrong").lines().next().unwrap_or_default().to_string(),
         "hint" => s.message.clone().unwrap_or_default(),
-        "done" if s.card => {
+        "done" if s.card && s.cleaned.is_none() => {
             let t = s.text.as_deref().unwrap_or_default().lines().next().unwrap_or_default();
             if t.chars().count() > 60 { format!("{}…", t.chars().take(59).collect::<String>()) } else { t.to_string() }
         }
@@ -251,7 +251,8 @@ impl Pill {
                 // a whole transcript and a button.
                 let linger = Duration::from_millis(if s.offer.is_some() { OFFER_FOR } else if s.card { CARD_FOR } else if s.chip.is_some() { 2500 } else { 1200 });
                 // Wide characters (CJK, emoji) count double: about two Latin letters each.
-                let chars = if s.card { s.text.as_deref().unwrap_or_default().chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum() } else { chars };
+                // The guard's card shows the cleaned version instead of what was pasted.
+                let chars = if s.card { s.cleaned.as_deref().or(s.text.as_deref()).unwrap_or_default().chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum() } else { chars };
                 Some(Active { recording: false, chars, notice: Some((r, now + linger)), card: s.card })
             }
         };
@@ -262,8 +263,8 @@ impl Pill {
             "idle" => self.said.take().filter(|t| t.sticks()),
             "recording" => None,
             "transcribing" | "cleaning" => Some(Said { text: said(s), rank: 0, card: false }),
-            // An offer's card has no transcript, so the menu offers no copy for it.
-            _ => Some(Said { text: said(s), rank: rank(s), card: s.card && s.offer.is_none() }),
+            // An offer's card has no transcript, and the guard's was pasted, so the menu offers no copy for them.
+            _ => Some(Said { text: said(s), rank: rank(s), card: s.card && s.offer.is_none() && s.cleaned.is_none() }),
         };
         true
     }
@@ -985,6 +986,29 @@ const LANGS: [(&str, &str); 28] = [
     ("es", "Spanish"), ("ta", "Tamil"), ("te", "Telugu"), ("tr", "Turkish"), ("uk", "Ukrainian"), ("ur", "Urdu"), ("vi", "Vietnamese"),
 ];
 
+/// Re-run last's choices, in menu order: each of several languages alone, or Auto-detect when
+/// languages are set; each other downloaded speech model; no cleanup when cleanup would run.
+/// Nothing is offered that is what the last run used already.
+pub fn rerun_options(s: &Settings, downloaded: impl Fn(&str) -> bool) -> Vec<(crate::Rerun, String)> {
+    use crate::Rerun;
+    let name = |code: &str| LANGS.iter().find(|(c, _)| *c == code).map_or(code.to_string(), |(_, n)| n.to_string());
+    let mut out = vec![];
+    if s.languages.len() > 1 {
+        out.extend(s.languages.iter().map(|c| (Rerun::Lang(c.clone()), format!("In {}", name(c)))));
+    }
+    if !s.languages.is_empty() {
+        out.push((Rerun::Lang("auto".into()), "Auto-detect language".into()));
+    }
+    let current = (s.stt.provider == "local").then(|| crate::stt::model_id(&crate::stt::local_model(s)));
+    for m in crate::stt::MODELS.iter().filter(|m| downloaded(m.id) && current.as_deref() != Some(m.id)) {
+        out.push((Rerun::Model(m.id.into()), format!("With {}", m.label)));
+    }
+    if s.cleanup.enabled && s.cleanup.style != "verbatim" {
+        out.push((Rerun::NoCleanup, "Without cleanup".into()));
+    }
+    out
+}
+
 /// The idle pill's right-click menu, native and handled here, so the overlay needs no settings commands (F3).
 pub fn show_menu(app: &AppHandle, win: &WebviewWindow) -> tauri::Result<()> {
     let mics: Vec<String> = crate::audio::input_devices().into_iter().map(|d| d.name).collect();
@@ -1029,12 +1053,26 @@ pub fn menu(app: &AppHandle, mics: &[String], bar: Option<Bar>) -> tauri::Result
         langs.append(&CheckMenuItem::with_id(app, format!("pill-lang:{code}"), name, true, on, None::<&str>)?)?;
     }
     let has_last = lock(&state(app).last_output).is_some();
+    let options = rerun_options(&s, |id| crate::stt::model_file(id).is_some());
+    let rerun = Submenu::with_id(app, "pill-rerun", "Re-run last dictation", lock(&state(app).last_clip).is_some() && !options.is_empty())?;
+    let mut group = None;
+    for (r, label) in options {
+        let g = std::mem::discriminant(&r);
+        if group.is_some_and(|p| p != g) {
+            rerun.append(&PredefinedMenuItem::separator(app)?)?;
+        }
+        group = Some(g);
+        rerun.append(&MenuItem::with_id(app, format!("pill-rerun:{}", r.id()), label, true, None::<&str>)?)?;
+    }
     menu.append_items(&[
         &list,
         &langs,
         &PredefinedMenuItem::separator(app)?,
         &MenuItem::with_id(app, "pill-paste", "Paste last transcript", has_last, None::<&str>)?,
+        &rerun,
         &MenuItem::with_id(app, "pill-history", "History…", true, None::<&str>)?,
+        // Only after the guard pasted the words as spoken.
+        &MenuItem::with_id(app, "pill-cleaned", "Copy cleaned version", lock(&state(app).last_cleaned).is_some(), None::<&str>)?,
         &MenuItem::with_id(app, "pill-meeting", crate::meeting::menu_label(), true, None::<&str>)?,
         &PredefinedMenuItem::separator(app)?,
     ])?;
@@ -1052,6 +1090,8 @@ pub fn on_menu(app: &AppHandle, id: &str) {
     if let Some(name) = id.strip_prefix("pill-mic:") {
         let name = name.to_string();
         set(app, move |s| s.input_device = (!name.is_empty()).then_some(name));
+    } else if let Some(r) = id.strip_prefix("pill-rerun:").and_then(crate::Rerun::parse) {
+        crate::rerun_last(app, r);
     } else if let Some(code) = id.strip_prefix("pill-lang:") {
         let code = code.to_string();
         set(app, move |s| crate::settings::toggle_language(&mut s.languages, &code));
@@ -1064,6 +1104,10 @@ pub fn on_menu(app: &AppHandle, id: &str) {
                 }
             }
             "pill-history" => crate::open_page(app, "history"),
+            "pill-cleaned" => crate::emit_state(app, match crate::copy_cleaned(app) {
+                Ok(()) => crate::hint(format!("Copied the cleaned version, {} to paste", crate::platform::PASTE_KEYS), None),
+                Err(e) => crate::hint(e, None),
+            }),
             "pill-meeting" => crate::meeting::toggle(app),
             "pill-settings" => crate::open_page(app, "settings"),
             "pill-hide" => hide_for_hour(app),
@@ -1437,6 +1481,28 @@ mod tests {
         let list = js.split("const LANGS = [").nth(1).unwrap().split("];").next().unwrap();
         let codes: Vec<&str> = list.split("['").skip(1).map(|e| e.split('\'').next().unwrap()).collect();
         assert_eq!(codes, LANGS.map(|(c, _)| c).to_vec());
+    }
+
+    #[test]
+    fn rerun_offers_only_what_would_change_the_result() {
+        use crate::Rerun;
+        let ids = |s: &Settings| rerun_options(s, |id| ["small", "medium", "tiny.en"].contains(&id)).into_iter().map(|(r, l)| (r.id(), l)).collect::<Vec<_>>();
+        let mut s = Settings { advanced: true, ..Settings::default() };
+        s.stt.local_model = "small".into();
+        s.cleanup.enabled = true;
+        s.languages = vec!["en".into(), "hi".into()];
+        assert_eq!(ids(&s), [("lang:en", "In English"), ("lang:hi", "In Hindi"), ("lang:auto", "Auto-detect language"), ("model:medium", "With Medium"), ("model:tiny.en", "With Tiny (English)"), ("raw", "Without cleanup")].map(|(a, b)| (a.to_string(), b.to_string())));
+        s.languages = vec!["hi".into()];
+        s.cleanup.style = "verbatim".into();
+        assert_eq!(ids(&s).iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>(), ["lang:auto", "model:medium", "model:tiny.en"], "one language is what ran; verbatim has no cleanup to skip");
+        s.languages.clear();
+        s.cleanup.enabled = false;
+        s.stt.provider = "groq".into();
+        assert_eq!(ids(&s).iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>(), ["model:medium", "model:small", "model:tiny.en"], "a cloud transcript can be re-run on any local model");
+        for (r, _) in rerun_options(&Settings { languages: vec!["en".into(), "fr".into()], ..s.clone() }, |_| true) {
+            assert_eq!(Rerun::parse(&r.id()), Some(r), "the menu id comes back as the same choice");
+        }
+        assert_eq!(Rerun::parse("model"), None);
     }
 
     #[test]

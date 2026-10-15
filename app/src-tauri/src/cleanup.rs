@@ -226,6 +226,9 @@ pub struct Output {
     /// Cleanup did not run because it is off or its provider has no key (shown as "No cleanup").
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub no_cleanup: bool,
+    /// The cleanup the guard rejected (`text` is the words as spoken): "Use cleaned version" copies it.
+    #[serde(skip)]
+    pub cleaned: Option<String>,
 }
 
 /// `verbatim` keeps the recognizer's words and skips the LLM entirely.
@@ -430,11 +433,11 @@ pub fn run(s: &Settings, pcm: &[f32], dictated: bool, on_cleaning: impl FnOnce()
 #[allow(clippy::too_many_arguments)]
 fn after_stt(s: &Settings, raw: String, stt_ms: u64, mut warning: Option<String>, keyless: bool, dictated: bool, on_cleaning: impl FnOnce(), llm: impl Fn(&Settings, &str) -> Result<String, String>) -> Output {
     if !has_speech(&raw) {
-        return Output { raw: String::new(), text: String::new(), stt_ms, cleanup_ms: 0, warning, no_cleanup: false };
+        return Output { raw: String::new(), text: String::new(), stt_ms, cleanup_ms: 0, warning, no_cleanup: false, cleaned: None };
     }
     let replaced = apply_replacements(&raw, &s.replacements);
     let mut text = if dictated { spoken_breaks(&replaced) } else { replaced };
-    let mut cleanup_ms = 0;
+    let (mut cleanup_ms, mut cleaned) = (0, None);
     // "No cleanup": switched off, or on with no key to call the provider. Verbatim is a choice, not raw.
     let no_cleanup = !s.cleanup.enabled || keyless;
     if !keyless && wants_cleanup(s, &text) {
@@ -442,7 +445,7 @@ fn after_stt(s: &Settings, raw: String, stt_ms: u64, mut warning: Option<String>
         let t = Instant::now();
         match llm(s, &text) {
             Ok(c) if !c.is_empty() => match rejected(s, &text, &c) {
-                Some(w) => warning = Some(w.into()),
+                Some(w) => (warning, cleaned) = (Some(w.into()), Some(c)),
                 None => text = c,
             },
             // The Echotype model was trained to answer filler-only input with nothing: no speech.
@@ -457,7 +460,7 @@ fn after_stt(s: &Settings, raw: String, stt_ms: u64, mut warning: Option<String>
         }
         cleanup_ms = t.elapsed().as_millis() as u64;
     }
-    Output { raw, text, stt_ms, cleanup_ms, warning, no_cleanup }
+    Output { raw, text, stt_ms, cleanup_ms, warning, no_cleanup, cleaned }
 }
 
 #[cfg(test)]
@@ -654,7 +657,10 @@ mod tests {
         let raw = "Don't forget to not include the tax.";
         let o = after_stt(&s, raw.into(), 1, None, false, true, || {}, |_, _| Ok("Don't forget to include the tax.".into()));
         assert_eq!(o.text, raw, "the words as spoken");
+        assert_eq!(o.cleaned.as_deref(), Some("Don't forget to include the tax."), "kept for Use cleaned version");
         assert!(o.warning.is_some_and(|w| w.contains("not")));
+        let used = after_stt(&s, raw.into(), 1, None, false, true, || {}, |_, _| Ok("Don't forget to not include the tax!".into()));
+        assert_eq!((used.text.as_str(), used.cleaned), ("Don't forget to not include the tax!", None), "an accepted cleanup has no alternative");
     }
 
     #[test]
