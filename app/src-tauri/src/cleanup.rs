@@ -267,6 +267,82 @@ pub fn lost_a_number(raw: &str, cleaned: &str) -> bool {
     })
 }
 
+/// Why a cleanup must not be pasted, if it changed what the speaker said: the words as spoken
+/// are pasted instead. Owner tests on 2026-10-16 (history.jsonl) caught the 1.5B model turning
+/// "don't forget to not include the tax" into "...to include the tax", "never not worth asking"
+/// into "never worth asking", "I was" into "I'll be", and finishing a cut-off "The only thing I'd..."
+/// with a sentence nobody said.
+fn rejected(s: &Settings, raw: &str, cleaned: &str) -> Option<&'static str> {
+    if lost_a_number(raw, cleaned) {
+        return Some("Cleanup left out a number you said, so Echotype pasted your words as spoken.");
+    }
+    if negations(cleaned) < negations(raw) {
+        return Some("Cleanup dropped a \"not\" you said, so Echotype pasted your words as spoken.");
+    }
+    // A translation is all new words; only its negations can be checked.
+    if !s.translate_to_english && added_words(raw, cleaned, &s.dictionary) {
+        return Some("Cleanup added words you did not say, so Echotype pasted your words as spoken.");
+    }
+    None
+}
+
+/// Lower-case words, with contractions spelled out ("don't" -> "do not", "I'll" -> "I will") so
+/// that contracting or expanding one is not a change. Hyphens split ("non-members" -> "non").
+fn words(text: &str) -> Vec<String> {
+    let sep = |c: char| c.is_whitespace() || (c.is_ascii_punctuation() && c != '\'') || "“”…—–।॥«»¿¡".contains(c);
+    let mut out = vec![];
+    for w in text.to_lowercase().replace(['’', '‘'], "'").split(sep).map(|w| w.trim_matches('\'')).filter(|w| !w.is_empty()) {
+        let Some((stem, tail)) = w.split_once('\'') else {
+            match w {
+                "gonna" => out.extend(["going".into(), "to".into()]),
+                "wanna" => out.extend(["want".into(), "to".into()]),
+                "gotta" => out.extend(["got".into(), "to".into()]),
+                "okay" => out.push("ok".into()),
+                _ => out.push(w.to_string()),
+            }
+            continue;
+        };
+        match tail {
+            "t" => {
+                out.push(match stem {
+                    "won" => "will".into(),
+                    "can" => "can".into(),
+                    "ain" => "is".into(),
+                    _ => stem.strip_suffix('n').unwrap_or(stem).to_string(),
+                });
+                out.push("not".into());
+            }
+            "ll" | "re" | "ve" | "m" | "d" => {
+                out.push(stem.to_string());
+                out.push(match tail { "ll" => "will", "re" => "are", "ve" => "have", "m" => "am", _ => "would" }.into());
+            }
+            _ => out.push(stem.to_string()), // 's: possessive, is or has; the stem is the word
+        }
+    }
+    out
+}
+
+/// How many times the text says no. "No" that starts a spoken correction ("Tuesday, no wait,
+/// Thursday") is not a negation: cleanup rightly removes it with the words it corrects.
+// ponytail: English and Hindi/Hinglish word list; add a language's negations when it gets tested.
+fn negations(text: &str) -> usize {
+    const NEG: [&str; 21] = ["not", "no", "never", "nor", "none", "nothing", "nobody", "nowhere", "neither", "cannot", "non", "nahi", "nahin", "nai", "mat", "na", "नहीं", "नही", "मत", "ना", "न"];
+    const CORRECTION: [&str; 8] = ["wait", "sorry", "actually", "i", "scratch", "hold", "make", "no"];
+    let w = words(text);
+    (0..w.len()).filter(|&i| NEG.contains(&w[i].as_str()) && !(w[i] == "no" && w.get(i + 1).is_some_and(|n| CORRECTION.contains(&n.as_str())))).count()
+}
+
+/// True when the cleanup holds a word the speaker never said and the Dictionary does not name.
+/// Numbers in digits or words, list punctuation, articles and small prepositions ("open on two
+/// sides") may appear.
+// ponytail: a new number word slips through (lost_a_number only guards against dropped ones).
+fn added_words(raw: &str, cleaned: &str, dictionary: &[String]) -> bool {
+    const FREE: [&str; 11] = ["a", "an", "the", "and", "is", "on", "in", "of", "to", "for", "at"];
+    const NUMBER_WORDS: [&str; 33] = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety", "hundred", "thousand", "million", "dozen", "half"];
+    let said: std::collections::HashSet<String> = words(raw).into_iter().chain(dictionary.iter().flat_map(|d| words(d))).collect();
+    words(cleaned).iter().any(|w| !said.contains(w) && !FREE.contains(&w.as_str()) && !NUMBER_WORDS.contains(&w.as_str()) && !w.starts_with(|c: char| c.is_ascii_digit()))
+}
+
 /// What whisper writes for noise or silence ("Thank you.", "Thanks for watching!"): its training
 /// subtitles. Dropped only when the clip also had no voice in it (lib.rs NOISE_SNR_DB).
 pub fn whisper_filler(text: &str) -> bool {
@@ -355,10 +431,10 @@ fn after_stt(s: &Settings, raw: String, stt_ms: u64, mut warning: Option<String>
         on_cleaning();
         let t = Instant::now();
         match llm(s, &text) {
-            Ok(c) if !c.is_empty() && lost_a_number(&text, &c) => {
-                warning = Some("Cleanup left out a number you said, so Echotype pasted your words as spoken.".into());
-            }
-            Ok(c) if !c.is_empty() => text = c,
+            Ok(c) if !c.is_empty() => match rejected(s, &text, &c) {
+                Some(w) => warning = Some(w.into()),
+                None => text = c,
+            },
             // The Echotype model was trained to answer filler-only input with nothing: no speech.
             // It also drops some one-word answers ("No.", "Yes.", "Nope."), so real words are kept.
             Ok(_) if s.cleanup.provider == "echotype" && only_filler(&text) => text.clear(),
@@ -462,7 +538,7 @@ mod tests {
     }
 
     fn post(s: &Settings, raw: &str) -> Output {
-        after_stt(s, raw.into(), 1, None, false, true, || {}, |_, t| Ok(format!("clean:{t}")))
+        after_stt(s, raw.into(), 1, None, false, true, || {}, |_, t| Ok(format!("«{t}»")))
     }
 
     #[test]
@@ -476,7 +552,7 @@ mod tests {
             assert_eq!((o.text.as_str(), o.raw.as_str(), o.no_cleanup), ("", "", false), "{noise:?}");
         }
         for kept in ["a.", "2", "नमस्ते"] {
-            assert!(post(&s, kept).text.starts_with("clean:"), "{kept}");
+            assert!(post(&s, kept).text.starts_with('«'), "{kept}");
         }
     }
 
@@ -519,6 +595,49 @@ mod tests {
         let o = after_stt(&s, raw.into(), 1, None, false, true, || {}, |_, _| Ok("1. Blueberries".into()));
         assert_eq!(o.text, raw, "the words as spoken");
         assert!(o.warning.is_some_and(|w| w.contains("number")));
+    }
+
+    // Raw whisper text and the 1.5B model's cleanup, from the owner's history.jsonl on 2026-10-16.
+    #[test]
+    fn a_cleanup_that_changes_the_meaning_is_not_used() {
+        let mut s = Settings::default();
+        s.dictionary = ["Arnav", "Xoxoday", "IP whitelist", "Midhun", "Remotify"].map(String::from).to_vec();
+        let bad = [
+            ("Don't forget to not include the tax in the final invoice.", "Don't forget to include the tax in the final invoice.", "\"not\""),
+            ("It's never not worth asking.", "It's never worth asking.", "\"not\""),
+            ("Invite everyone, members and non-members.", "Invite everyone.", "\"not\""),
+            ("The only thing I'd...", "The only thing I'd say is that we need to work on improving our IP.", "added"),
+            ("In five minutes, I was in a new world.", "In five minutes, I'll be in a new world.", "added"),
+            ("Ping Arnav about the Zozo Day thing.", "Ping Arnav about the Xoxoday launch.", "added"),
+        ];
+        for (raw, cleaned, why) in bad {
+            assert!(rejected(&s, raw, cleaned).is_some_and(|w| w.contains(why)), "{raw:?} -> {cleaned:?}");
+        }
+        let good = [
+            ("In 5 minutes I was in a new world.", "In 5 minutes, I was in a new world."),
+            ("The meeting has three agenda items. First, budget. Second, hiring. Third, the launch date.", "The meeting has three agenda items:\n1. Budget\n2. Hiring\n3. The launch date"),
+            ("Let's meet on Tuesday. No wait Thursday at 3. Actually make it 4.", "Let's meet on Thursday at 4:00."),
+            ("Things to buy, um, eggs, uh, milk, two loaves of bread, and like, a dozen bananas.", "Things to buy:\n- Eggs\n- Milk\n- Two loaves of bread\n- A dozen bananas"),
+            ("Ping Arnav and Midan about the Zozo Day thing on remotify.", "Ping Arnav and Midan about the Xoxoday thing on Remotify."),
+            ("Kal meeting nahi hogi. Parsa hogi. Teen baje call karo. Not 4.", "Kal meeting nahi hogi, Parsa hogi. 3 baje call karo. Not 4."),
+            ("कल मीटिंग नहीं होगी, परसो होगी।", "कल मीटिंग नहीं होगी, परसो होगी."),
+            ("I am gonna do it, I do not know when", "I'm going to do it, I don't know when."),
+            ("Yeah okay.", "OK."),
+            ("No.", "No."),
+        ];
+        for (raw, cleaned) in good {
+            assert_eq!(rejected(&s, raw, cleaned), None, "{raw:?} -> {cleaned:?}");
+        }
+        s.translate_to_english = true;
+        assert_eq!(rejected(&s, "Kal meeting nahi hogi.", "There is no meeting tomorrow."), None, "a translation may use new words");
+        assert!(rejected(&s, "Kal meeting nahi hogi.", "There is a meeting tomorrow.").is_some(), "but keeps its negation");
+
+        s.translate_to_english = false;
+        s.cleanup.enabled = true;
+        let raw = "Don't forget to not include the tax.";
+        let o = after_stt(&s, raw.into(), 1, None, false, true, || {}, |_, _| Ok("Don't forget to include the tax.".into()));
+        assert_eq!(o.text, raw, "the words as spoken");
+        assert!(o.warning.is_some_and(|w| w.contains("not")));
     }
 
     #[test]
