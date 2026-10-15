@@ -32,7 +32,11 @@ pub struct Settings {
     /// "hold" (push-to-talk) or "toggle".
     pub mode: String,
     pub input_device: Option<String>,
-    /// Whisper language code, or "auto".
+    /// Whisper language codes the user speaks, up to 3; empty is auto-detect (any language). One is
+    /// transcribed as that language; with two or three, each clip goes to the likeliest of them.
+    pub languages: Vec<String>,
+    /// Builds before 2026-10-16 saved one code or "auto" here; migrate() moves it into `languages`.
+    #[serde(skip_serializing)]
     pub language: String,
     pub translate_to_english: bool,
     pub local_api: LocalApi,
@@ -171,7 +175,8 @@ impl Default for Settings {
             hotkey: "Alt+Space".into(),
             mode: "hold".into(),
             input_device: None,
-            language: "auto".into(),
+            languages: vec![],
+            language: String::new(),
             translate_to_english: false,
             local_api: LocalApi::default(),
             stt: Stt::default(),
@@ -273,6 +278,16 @@ impl Settings {
 
     /// Fixes values older builds wrote, and keeps settings off providers this build hides.
     pub(crate) fn migrate(&mut self) {
+        let old = std::mem::take(&mut self.language);
+        if self.languages.is_empty() && !matches!(old.as_str(), "" | "auto") {
+            self.languages = vec![old];
+        }
+        let mut seen = vec![];
+        self.languages.retain(|l| !matches!(l.as_str(), "" | "auto") && !seen.contains(l) && {
+            seen.push(l.clone());
+            true
+        });
+        self.languages.truncate(3);
         if !matches!(self.look.as_str(), "system" | "light" | "dark") {
             self.look = "system".into(); // the Classic, Ink and Foundry looks are gone: follow macOS
         }
@@ -317,6 +332,21 @@ impl Settings {
     pub fn save(&self) -> Result<(), String> {
         std::fs::create_dir_all(config_dir()).map_err(|e| e.to_string())?;
         write_atomic(&Self::path(), &serde_json::to_string_pretty(self).map_err(|e| e.to_string())?)
+    }
+}
+
+/// A language picked from a menu: "auto" clears the list; a listed code leaves it; another joins
+/// it, and a fourth replaces the oldest (Echotype listens for up to 3).
+pub fn toggle_language(languages: &mut Vec<String>, code: &str) {
+    if code == "auto" {
+        languages.clear();
+    } else if let Some(i) = languages.iter().position(|l| l == code) {
+        languages.remove(i);
+    } else {
+        if languages.len() == 3 {
+            languages.remove(0);
+        }
+        languages.push(code.to_string());
     }
 }
 
@@ -565,8 +595,10 @@ mod tests {
             "local_api":{"enabled":true,"port":7811},"stt":{"provider":"local","local_model":"large-v3-turbo-q5_0","model":"whisper-large-v3-turbo","base_url":""},
             "cleanup":{"enabled":true,"provider":"ollama","model":"gemma3:1b","base_url":"","style":"default","custom_instructions":""},
             "dictionary":["Arnav"],"replacements":[],"restore_clipboard":true,"history_enabled":true,"onboarded":true}"#;
-        let s: Settings = serde_json::from_str(old).unwrap();
+        let mut s: Settings = serde_json::from_str(old).unwrap();
+        s.migrate(); // as load() does
         assert!(s.onboarded && s.mode == "toggle" && s.local_api.enabled);
+        assert!(s.languages.is_empty(), "\"auto\" loads as auto-detect");
         assert_eq!((s.paste_last_hotkey.as_str(), s.copy_last_hotkey.as_str()), ("", ""), "upgraders get no new global shortcuts");
         assert!(!s.autostart, "upgraders are offered launch at login, not opted in");
         assert_eq!(s.talk_key, "accelerator");
@@ -583,6 +615,29 @@ mod tests {
         assert!(s.pill_follow_cursor && s.pill_screen.is_none(), "...on the screen they are using");
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn languages_carry_over_and_stay_at_three() {
+        let mut hi: Settings = serde_json::from_str(r#"{"language":"hi"}"#).unwrap();
+        hi.migrate();
+        assert_eq!(hi.languages, ["hi"], "one saved language carries over");
+        let mut auto: Settings = serde_json::from_str(r#"{"language":"auto"}"#).unwrap();
+        auto.migrate();
+        assert!(auto.languages.is_empty(), "auto is the empty list");
+        assert!(!serde_json::to_string(&hi).unwrap().contains("\"language\""), "the old field is not written back");
+        let mut many: Settings = serde_json::from_str(r#"{"languages":["en","hi","en","","auto","fr","de"]}"#).unwrap();
+        many.migrate();
+        assert_eq!(many.languages, ["en", "hi", "fr"], "deduplicated, at most 3");
+        let mut l: Vec<String> = vec![];
+        for c in ["en", "hi", "fr", "de"] {
+            toggle_language(&mut l, c);
+        }
+        assert_eq!(l, ["hi", "fr", "de"], "a fourth replaces the oldest");
+        toggle_language(&mut l, "fr");
+        assert_eq!(l, ["hi", "de"]);
+        toggle_language(&mut l, "auto");
+        assert!(l.is_empty());
     }
 
     #[test]

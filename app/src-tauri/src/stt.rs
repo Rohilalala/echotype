@@ -457,11 +457,11 @@ pub fn clean_text(s: &str) -> String {
 
 /// `vad`: the Silero speech detector. With it, a clip with no speech in it (taps, a snap, the
 /// room) comes back empty instead of whisper's "Thank you." or "I'm going to go to the next one."
-pub fn transcribe_local(model: &Path, pcm: &[f32], language: Option<&str>, translate: bool, prompt: &str, vad: Option<&Path>) -> Result<String, String> {
+pub fn transcribe_local(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, vad: Option<&Path>) -> Result<String, String> {
     if pcm.is_empty() || vad.is_some_and(|v| !has_voice(v, pcm)) {
         return Ok(String::new());
     }
-    run_local(model, pcm, language, translate, prompt, false, vad, |state| {
+    run_local(model, pcm, languages, translate, prompt, false, vad, |state| {
         let mut text = String::new();
         for i in 0..state.full_n_segments() {
             if let Some(seg) = state.get_segment(i) {
@@ -484,11 +484,11 @@ pub struct Word {
 /// starts a word). Meeting notes use the times to cut overlapping chunks and to line words up
 /// with speaker turns.
 /// `vad`: a Silero model; whisper then transcribes only the speech it finds.
-pub fn transcribe_words(model: &Path, pcm: &[f32], language: Option<&str>, prompt: &str, vad: Option<&Path>) -> Result<Vec<Word>, String> {
+pub fn transcribe_words(model: &Path, pcm: &[f32], languages: &[String], prompt: &str, vad: Option<&Path>) -> Result<Vec<Word>, String> {
     if pcm.is_empty() {
         return Ok(vec![]);
     }
-    run_local(model, pcm, language, false, prompt, true, vad, |state| {
+    run_local(model, pcm, languages, false, prompt, true, vad, |state| {
         let mut words: Vec<Word> = vec![];
         for i in 0..state.full_n_segments() {
             let Some(seg) = state.get_segment(i) else { continue };
@@ -518,8 +518,23 @@ pub fn transcribe_words(model: &Path, pcm: &[f32], language: Option<&str>, promp
     })
 }
 
+/// whisper.cpp's own thread count (min(4, cores)), for the language check before a run.
+const THREADS: usize = 4;
+
+/// The likeliest of `codes` by whisper's language scores; the first one on a tie or an unknown code.
+fn likeliest(probs: &[f32], codes: &[String]) -> Option<String> {
+    let score = |c: &str| whisper_rs::get_lang_id(c).and_then(|i| probs.get(i as usize).copied()).unwrap_or(f32::MIN);
+    let mut best = codes.first()?;
+    for c in &codes[1..] {
+        if score(c) > score(best) {
+            best = c;
+        }
+    }
+    Some(best.clone())
+}
+
 #[allow(clippy::too_many_arguments)]
-fn run_local<T>(model: &Path, pcm: &[f32], language: Option<&str>, translate: bool, prompt: &str, timestamps: bool, vad: Option<&Path>, read: impl FnOnce(&WhisperState) -> Result<T, String>) -> Result<T, String> {
+fn run_local<T>(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, timestamps: bool, vad: Option<&Path>, read: impl FnOnce(&WhisperState) -> Result<T, String>) -> Result<T, String> {
     let mut g = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
     if g.as_ref().is_none_or(|e| e.path != model) {
         *g = None; // free the old model before loading the next one
@@ -540,7 +555,17 @@ fn run_local<T>(model: &Path, pcm: &[f32], language: Option<&str>, translate: bo
     engine.vad |= vad.is_some();
     let state = &mut engine.state;
     let mut p = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    let lang = language.map(|l| l.replace('\0', ""));
+    let lang = match languages {
+        [] => None, // whisper detects among all 99
+        [one] => Some(one.replace('\0', "")),
+        several => {
+            // Whisper's own detection, scored over the first 30 s, read only for the user's languages:
+            // a short Hindi clip once came out as Tibetan under auto.
+            state.pcm_to_mel(pcm, THREADS).map_err(|e| format!("Language detection failed: {e}"))?;
+            let (_, probs) = state.lang_detect(0, THREADS).map_err(|e| format!("Language detection failed: {e}"))?;
+            likeliest(&probs, several)
+        }
+    };
     p.set_language(lang.as_deref());
     p.set_translate(translate);
     p.set_print_progress(false);
@@ -575,7 +600,7 @@ pub fn warm_up(s: &Settings) {
         return;
     }
     let t = Instant::now();
-    match transcribe_local(&path, &vec![0.0; 16_000], Some("en"), false, "", None) {
+    match transcribe_local(&path, &vec![0.0; 16_000], &["en".into()], false, "", None) {
         Ok(_) => eprintln!("echotype: warmed up {} in {} ms", path.display(), t.elapsed().as_millis()),
         Err(e) => eprintln!("echotype: warm-up failed: {e}"),
     }
@@ -594,8 +619,9 @@ pub fn transcribe_remote(s: &Settings, pcm: &[f32], prompt: &str) -> Result<Stri
     let endpoint = if s.translate_to_english { "audio/translations" } else { "audio/transcriptions" };
     let file = reqwest::blocking::multipart::Part::bytes(crate::audio::wav_bytes(pcm)).file_name("audio.wav").mime_str("audio/wav").map_err(|e| e.to_string())?;
     let mut form = reqwest::blocking::multipart::Form::new().part("file", file).text("model", model).text("response_format", "json");
-    if !s.translate_to_english && s.language != "auto" && !s.language.is_empty() {
-        form = form.text("language", s.language.clone());
+    // An upload names at most one language: with two or three the provider detects among all.
+    if let (false, [one]) = (s.translate_to_english, s.languages.as_slice()) {
+        form = form.text("language", one.clone());
     }
     if !prompt.is_empty() {
         form = form.text("prompt", prompt.to_string());
@@ -645,8 +671,8 @@ mod tests {
         }
         // Text with no letter or digit ("." or "...") is no speech to the app (cleanup::has_speech).
         let nothing = |pcm: &[f32], what: &str| {
-            eprintln!("{what} without Silero: {:?}", transcribe_local(model, pcm, None, false, "", None));
-            let t = transcribe_local(model, pcm, None, false, "", Some(&vad)).unwrap();
+            eprintln!("{what} without Silero: {:?}", transcribe_local(model, pcm, &[], false, "", None));
+            let t = transcribe_local(model, pcm, &[], false, "", Some(&vad)).unwrap();
             assert!(!crate::cleanup::has_speech(&t), "{what} is not speech: {t:?}");
         };
         nothing(&pcm, "knocks");
@@ -660,10 +686,37 @@ mod tests {
             let t = Instant::now();
             assert!(has_voice(&vad, &speech));
             eprintln!("Silero on {:.1} s of speech: {} ms", speech.len() as f32 / 16_000.0, t.elapsed().as_millis());
-            let text = transcribe_local(model, &speech, None, false, "", Some(&vad)).unwrap();
+            let text = transcribe_local(model, &speech, &[], false, "", Some(&vad)).unwrap();
             eprintln!("speech with Silero: {text}");
             assert!(text.split_whitespace().count() >= 3, "speech still comes through: {text:?}");
         }
+    }
+
+    /// A Hindi clip with the user's languages set to English + Hindi comes out in Devanagari.
+    /// `ECHOTYPE_TEST_MODEL=<ggml file> ECHOTYPE_TEST_HINDI=<hindi wav> cargo test --release hindi_among_mine -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn hindi_among_mine() {
+        let (Ok(model), Ok(wav)) = (std::env::var("ECHOTYPE_TEST_MODEL"), std::env::var("ECHOTYPE_TEST_HINDI")) else { return eprintln!("skipped") };
+        let pcm = crate::audio::decode(std::fs::read(&wav).unwrap(), Some("wav")).unwrap();
+        let mine = ["en".to_string(), "hi".to_string()];
+        let text = transcribe_local(Path::new(&model), &pcm, &mine, false, "", None).unwrap();
+        eprintln!("en+hi: {text}");
+        assert!(text.chars().any(|c| ('\u{0900}'..='\u{097F}').contains(&c)), "Devanagari expected: {text:?}");
+    }
+
+    #[test]
+    fn the_likeliest_of_the_users_languages_wins() {
+        let mut probs = vec![0.0f32; whisper_rs::get_lang_max_id() as usize + 1];
+        let id = |c: &str| whisper_rs::get_lang_id(c).unwrap() as usize;
+        probs[id("bo")] = 0.6; // Tibetan, which a short Hindi clip once came out as
+        probs[id("hi")] = 0.3;
+        probs[id("en")] = 0.1;
+        let codes = |c: &[&str]| c.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(likeliest(&probs, &codes(&["en", "hi"])).as_deref(), Some("hi"));
+        assert_eq!(likeliest(&probs, &codes(&["en", "fr"])).as_deref(), Some("en"), "unscored French loses to English");
+        assert_eq!(likeliest(&probs, &codes(&["xx", "en"])).as_deref(), Some("en"), "an unknown code never wins");
+        assert_eq!(likeliest(&probs, &[]), None);
     }
 
     #[test]

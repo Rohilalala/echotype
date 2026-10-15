@@ -7,7 +7,7 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
 const now = Date.now();
 
 const settings = {
-  hotkey: 'Alt+Space', mode: 'hold', input_device: null, language: 'auto', translate_to_english: false,
+  hotkey: 'Alt+Space', mode: 'hold', input_device: null, languages: [], translate_to_english: false,
   local_api: { enabled: false, port: 7811 },
   stt: { provider: 'local', local_model: q.has('onboarding') ? '' : 'large-v3-turbo-q5_0', model: '', base_url: '' },
   cleanup: { enabled: !q.has('nocleanup'), provider: 'ollama', model: 'gemma3:4b', base_url: '', style: 'default', custom_instructions: '' },

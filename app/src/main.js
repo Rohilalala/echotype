@@ -130,6 +130,7 @@ function changed(p) {
   if (p === 'input_device') renderMicNote();
   if (p === 'cleanup.enabled') renderRaw();
   if (p === 'translate_to_english') renderLangNote();
+  if (p === 'languages') { renderLanguages(); if (obStep === 4 && !$('#onboard').hidden) obLangRender(); }
   if (p === 'cleanup.enabled') { setCleanupInert(); renderCloud(); refreshCloud(); }
   if (p.startsWith('local_api')) refreshApi();
   if (p === 'history_enabled') renderHistory();
@@ -368,7 +369,7 @@ const STYLE_LABEL = { default: 'Default style', casual: 'Casual', formal: 'Forma
 function renderChips() {
   const local = S.stt.provider === 'local';
   $('#chipModel').textContent = local ? sttModel()?.label ?? 'No model' : preset(S.stt.provider)?.label ?? S.stt.provider;
-  const lang = LANGS.find(([v]) => v === S.language)?.[1] ?? S.language;
+  const lang = S.languages.length ? S.languages.map(langName).join(', ') : 'Auto-detect';
   $('#chipLang').textContent = S.translate_to_english ? `${lang} to English` : lang;
   $('#chipStyle').textContent = noCleanup() ? 'No cleanup' : STYLE_LABEL[S.cleanup.style] ?? S.cleanup.style;
   for (const b of $$('[data-go]')) b.ariaLabel = `${b.title}: ${b.textContent}`; // the chip opens that page
@@ -835,7 +836,45 @@ window.addEventListener('focus', () => S && renderRecent()); // relative times m
 
 // ---------- language ----------
 const LANGS = [['auto', 'Auto-detect'], ['en', 'English'], ['hi', 'Hindi'], ['ar', 'Arabic'], ['bn', 'Bengali'], ['zh', 'Chinese'], ['nl', 'Dutch'], ['fr', 'French'], ['de', 'German'], ['gu', 'Gujarati'], ['id', 'Indonesian'], ['it', 'Italian'], ['ja', 'Japanese'], ['kn', 'Kannada'], ['ko', 'Korean'], ['ml', 'Malayalam'], ['mr', 'Marathi'], ['pa', 'Punjabi'], ['pl', 'Polish'], ['pt', 'Portuguese'], ['ru', 'Russian'], ['es', 'Spanish'], ['ta', 'Tamil'], ['te', 'Telugu'], ['tr', 'Turkish'], ['uk', 'Ukrainian'], ['ur', 'Urdu'], ['vi', 'Vietnamese']];
-$('#language').append(...LANGS.map(([v, l]) => h('option', { value: v }, l)));
+
+// Languages: detect any, or listen for up to 3 (each clip goes to the likeliest of them).
+const LANG_MAX = 3;
+const langName = c => LANGS.find(([v]) => v === c)?.[1] ?? c;
+let langFull = false; // a 4th was tapped: say why nothing happened
+function langToggle(code) {
+  const i = S.languages.indexOf(code);
+  langFull = i < 0 && S.languages.length >= LANG_MAX;
+  if (i >= 0) S.languages.splice(i, 1);
+  else if (!langFull) S.languages.push(code);
+  if (!langFull) save();
+  changed('languages');
+}
+// Onboarding's card fits the most spoken ones (plus any already picked); Settings lists them all.
+const OB_LANGS = ['en', 'hi', 'es', 'fr', 'de', 'pt', 'zh', 'ja', 'ar', 'bn', 'ta', 'te'];
+function langChips(box, only) {
+  const list = LANGS.filter(([v]) => v !== 'auto' && (!only || only.includes(v) || S.languages.includes(v)));
+  box.replaceChildren(...list.map(([v, l]) => h('button', { type: 'button', 'aria-pressed': String(S.languages.includes(v)), 'data-v': v }, l)));
+}
+function langDesc() {
+  return langFull ? `Up to ${LANG_MAX}. Tap one of yours to swap it out.`
+    : S.languages.length ? 'Each dictation is typed in whichever of these you spoke.'
+    : `Up to ${LANG_MAX}. Picking yours stops short clips coming out in another language.`;
+}
+function renderLanguages() {
+  $('#langAuto').checked = !S.languages.length;
+  langChips($('#langChips'));
+  $('#langPickDesc').textContent = langDesc();
+  $('#langPickDesc').classList.toggle('warn', langFull);
+}
+$('#langChips').addEventListener('click', e => { const b = e.target.closest('button'); if (b) langToggle(b.dataset.v); });
+$('#langAuto').addEventListener('change', e => {
+  langFull = false;
+  // Off with nothing picked: start from this Mac's language, so "off" means something.
+  const mine = LANGS.find(([v]) => v !== 'auto' && navigator.language?.toLowerCase().startsWith(v))?.[0] ?? 'en';
+  S.languages = e.target.checked ? [] : S.languages.length ? S.languages : [mine];
+  save();
+  changed('languages');
+});
 
 function renderLangNote() {
   const note = $('#translateNote');
@@ -1100,7 +1139,7 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
 const local = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { return null; } };
 let obStep = 1, orb = null, obPoll = 0, obSeq = 0;
 const obT = {}; // timers by name
-const ob = { cleanHow: 'off', mic: null, heard: 0, checked: false, quiet: false, paused: false, ax: null, axSince: 0, asked: false, pressed: false, offerClick: false, watched: false, recAt: 0, secs: 0, hinglish: false };
+const ob = { cleanHow: 'off', mic: null, heard: 0, checked: false, quiet: false, paused: false, ax: null, axSince: 0, asked: false, pressed: false, offerClick: false, watched: false, recAt: 0, secs: 0, hinglish: false, mine: false };
 const later = (name, ms, fn) => { clearTimeout(obT[name]); obT[name] = setTimeout(fn, ms); };
 // Show something that appears within a step with a short rise.
 function pop(el, on = true) {
@@ -1510,7 +1549,12 @@ function obPrefsRender() {
   $('#obName').value = S.display_name || '';
   obHello();
   // Hindi among the Mac's languages: Hinglish is likely, so it starts selected (once).
-  if (local('ob-lang') == null && !(S.language === 'hi' && S.translate_to_english) && navigator.languages?.some(l => /^hi\b/i.test(l))) obLang('hinglish');
+  if (local('ob-lang') == null && !(S.languages.includes('hi') && S.translate_to_english) && navigator.languages?.some(l => /^hi\b/i.test(l))) {
+    if (!S.languages.includes('hi')) S.languages = ['en', 'hi'];
+    ob.mine = true;
+    save();
+    obLang('hinglish');
+  }
   obLangRender();
   obCleanRender();
   // Back from the recap lands on the last question.
@@ -1546,14 +1590,15 @@ function obQShow(i, first = false) {
   if (!first) q.querySelector('.ob-tile[tabindex="0"], input').focus({ preventScroll: true });
 }
 
-const obHinglishOn = () => ob.hinglish || (S.language === 'hi' && S.translate_to_english);
+const obHinglishOn = () => ob.hinglish || (S.languages.includes('hi') && S.translate_to_english);
+const obMine = () => ob.mine || S.languages.length > 0;
 const obVal = (t, key) => ({ true: true, false: false })[t.dataset.v] ?? (key === 'ball_size' ? Number(t.dataset.v) : t.dataset.v);
 function obTilesRender() {
   for (const g of $$('.ob-q .ob-tiles')) {
     const key = g.dataset.key, q = g.closest('.ob-q').dataset.q, v = t => t.dataset.v;
     const on = t => key === 'ball_size' ? Math.abs(S.ball_size - obVal(t, key)) < 0.1
       : key ? S[key] === obVal(t, key)
-      : q === 'lang' ? v(t) === (obHinglishOn() ? 'hinglish' : 'en')
+      : q === 'lang' ? v(t) === (obMine() ? 'mine' : 'auto')
       : q === 'clean' ? (v(t) === 'yes' ? obCleanOn() : !obCleanOn() && !S.cleanup.enabled)
       : v(t) === (S.sounds ? S.sound_pack : 'off'); // sound
     const ts = [...g.children];
@@ -1566,7 +1611,7 @@ function obTilesRender() {
 function obPick(g, t) {
   const key = g.dataset.key, q = g.closest('.ob-q').dataset.q, v = obVal(t, key);
   if (key) { S[key] = v; save(); syncBound(); changed(key); }
-  else if (q === 'lang') obLang(v);
+  else if (q === 'lang') obLangPick(v);
   else if (q === 'clean') obCleanPick(v === 'yes');
   else { // sound: tapping one plays it, again if it's already the one
     S.sounds = v !== 'off';
@@ -1618,13 +1663,41 @@ function obLang(v) {
   ob.hinglish = v === 'hinglish';
   const m = obHinglishModel();
   if (ob.hinglish && m) { if (m.downloaded) obModelLanded(m.id); else obFetch(m.id); }
-  if (!ob.hinglish && S.language === 'hi' && S.translate_to_english) { S.language = 'auto'; S.translate_to_english = false; syncBound(); save(); renderLangNote(); }
+  if (!ob.hinglish && S.translate_to_english) { S.translate_to_english = false; syncBound(); save(); renderLangNote(); }
   obLangRender();
 }
+// "Any language" clears the list; "My languages" opens the chips, starting from this Mac's
+// languages (up to 3, else English).
+function obLangPick(v) {
+  ob.mine = v === 'mine';
+  langFull = false;
+  if (!ob.mine) {
+    S.languages = [];
+    if (obHinglishOn()) obLang('en');
+  } else if (!S.languages.length) {
+    const mac = (navigator.languages ?? []).map(l => LANGS.find(([c]) => c !== 'auto' && l.toLowerCase().startsWith(c))?.[0]).filter(Boolean);
+    S.languages = [...new Set(mac)].slice(0, LANG_MAX);
+    if (!S.languages.length) S.languages = ['en'];
+  }
+  save();
+  changed('languages');
+}
+$('#obLangChips').addEventListener('click', e => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  langToggle(b.dataset.v);
+  if (!S.languages.includes('hi') && obHinglishOn()) obLang('en'); // Hinglish needs Hindi
+});
+$('#obHinglish').addEventListener('change', e => obLang(e.target.checked ? 'hinglish' : 'en'));
 function obLangRender() {
   obTilesRender();
+  $('#obLangChips').hidden = !obMine();
+  if (obMine()) langChips($('#obLangChips'), OB_LANGS);
+  $('#obHinglishRow').hidden = !S.languages.includes('hi');
+  $('#obHinglish').checked = obHinglishOn();
   const m = obHinglishModel();
-  $('#obLangDesc').textContent = !obHinglishOn() ? ''
+  $('#obLangDesc').classList.toggle('warn', langFull);
+  $('#obLangDesc').textContent = !obHinglishOn() ? (obMine() ? `${langDesc()} More in Settings → Language.` : '')
     : !m ? 'Hinglish needs the Medium model, and this Mac is short of memory for it right now.'
     : m.downloaded ? `Typed in English, with ${m.label}.`
     : `Typed in English, once ${m.label} (${fmtMB(m.size_mb)}) has downloaded.`;
@@ -1753,7 +1826,7 @@ function obStartModel() {
 function obModelLanded(id) {
   const m = obHinglishModel();
   if (ob.hinglish && m?.id === id && m.downloaded) {
-    S.language = 'hi';
+    if (!S.languages.includes('hi')) S.languages = [...S.languages.slice(0, LANG_MAX - 1), 'hi'];
     S.translate_to_english = true;
     syncBound();
     save();
@@ -1933,6 +2006,7 @@ function renderAll() {
   renderCleanup();
   renderCloud();
   renderLangNote();
+  renderLanguages();
   renderDict();
   renderAdvanced();
 }

@@ -1025,7 +1025,8 @@ pub fn menu(app: &AppHandle, mics: &[String], bar: Option<Bar>) -> tauri::Result
     }
     let langs = Submenu::with_id(app, "pill-langs", "Language", true)?;
     for (code, name) in LANGS {
-        langs.append(&CheckMenuItem::with_id(app, format!("pill-lang:{code}"), name, true, s.language == code, None::<&str>)?)?;
+        let on = if code == "auto" { s.languages.is_empty() } else { s.languages.iter().any(|l| l == code) };
+        langs.append(&CheckMenuItem::with_id(app, format!("pill-lang:{code}"), name, true, on, None::<&str>)?)?;
     }
     let has_last = lock(&state(app).last_output).is_some();
     menu.append_items(&[
@@ -1053,7 +1054,7 @@ pub fn on_menu(app: &AppHandle, id: &str) {
         set(app, move |s| s.input_device = (!name.is_empty()).then_some(name));
     } else if let Some(code) = id.strip_prefix("pill-lang:") {
         let code = code.to_string();
-        set(app, move |s| s.language = code);
+        set(app, move |s| crate::settings::toggle_language(&mut s.languages, &code));
     } else {
         match id {
             "pill-paste" => crate::paste_last(app, true),

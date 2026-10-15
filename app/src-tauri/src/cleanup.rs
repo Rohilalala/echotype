@@ -417,8 +417,7 @@ pub fn run(s: &Settings, pcm: &[f32], dictated: bool, on_cleaning: impl FnOnce()
     let prompt = stt::prompt(&s.dictionary);
     let (raw, warning) = if s.stt.provider == "local" {
         let (model, warning) = stt::pick_local_model(s)?;
-        let lang = (s.language != "auto" && !s.language.is_empty()).then_some(s.language.as_str());
-        (stt::transcribe_local(&model, pcm, lang, s.translate_to_english, &prompt, crate::speakers::vad().as_deref())?, warning)
+        (stt::transcribe_local(&model, pcm, &s.languages, s.translate_to_english, &prompt, crate::speakers::vad().as_deref())?, warning)
     } else {
         (stt::transcribe_remote(s, pcm, &prompt)?, None)
     };

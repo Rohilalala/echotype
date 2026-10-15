@@ -129,7 +129,9 @@ async fn transcribe(State(st): State<ApiState>, req: Request) -> Response {
     };
     let mut settings = crate::current_settings(&st.app);
     if let Some(l) = language.filter(|l| !l.is_empty()) {
-        settings.language = l;
+        // One code, "auto", or up to 3 codes separated by commas ("en,hi").
+        settings.languages = l.split(',').map(|c| c.trim().to_string()).collect();
+        settings.migrate();
     }
     if let Some(p) = prompt.filter(|p| !p.is_empty()) {
         settings.dictionary.push(p);

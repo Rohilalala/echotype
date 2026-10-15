@@ -676,8 +676,8 @@ fn transcriber(s: &Settings) -> Result<Transcribe, String> {
     let prompt = stt::prompt(&s.dictionary);
     if s.stt.provider == "local" {
         let (model, _) = stt::pick_local_model(&s)?;
-        let lang = (s.language != "auto" && !s.language.is_empty()).then(|| s.language.clone());
-        Ok(Box::new(move |pcm| stt::transcribe_words(&model, pcm, lang.as_deref(), &prompt, speakers::vad().as_deref())))
+        let langs = s.languages.clone();
+        Ok(Box::new(move |pcm| stt::transcribe_words(&model, pcm, &langs, &prompt, speakers::vad().as_deref())))
     } else {
         Ok(Box::new(move |pcm| Ok(spread(&stt::transcribe_remote(&s, pcm, &prompt)?, pcm.len() as f32 / RATE as f32))))
     }
