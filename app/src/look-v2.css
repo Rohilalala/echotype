@@ -160,7 +160,6 @@
 }
 :root[data-look="v2"] .chip { border-radius: var(--r-ctl); background: var(--card); }
 :root[data-look="v2"] .ob-foot .btn.primary { border-radius: var(--r-ctl); }
-:root[data-look="v2"] .ob-chips span { border-radius: var(--r-ctl); }
 
 /* The accent at the moment that matters: the live waveform while you speak, the current step. */
 :root[data-look="v2"] .meter i { background: var(--accent); }

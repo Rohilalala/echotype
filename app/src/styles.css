@@ -645,7 +645,7 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 /* Top-aligned, so a status or tip line appearing below never moves what's above it. */
 .ob-step.split { display: grid; grid-template-columns: 136px minmax(0, 1fr); column-gap: 28px; align-content: start; align-items: start; padding-top: clamp(8px, 7vh, 64px); }
 .ob-step.split .ob-orb { width: 104px; height: 104px; justify-self: center; margin-top: 2px; }
-.ob-step[data-step="4"] { align-content: center; padding-top: 0; }
+.ob-step[data-step="4"] { padding-top: clamp(8px, 6vh, 48px); }
 /* The footer's "Finish and relaunch" is the relaunch here. */
 #obTalkStatus .btn.primary { display: none; }
 .ob-body { min-width: 0; padding: 2px; margin: -2px; }
@@ -699,21 +699,89 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 #obAxTry .ob-say { font-size: 14.5px; line-height: 22px; color: var(--fg-2); margin: 0 0 10px; }
 #obAxTry .btn { margin-top: 12px; }
 
-/* Steps 4-5: settings rows inside the card. */
+/* Step 4: one question at a time, answered with one big control. */
+.ob-count { margin: 0 0 6px; font-size: 12px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.ob-q .lede { max-width: 46ch; }
+.ob-q .lede:empty { display: none; }
+/* The name is typed straight onto the card in display type: no box, just the caret, and a
+   hairline that grows in from the left while it has focus. */
+.ob-q .ob-name {
+  all: unset;
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 2px 0 8px;
+  font: 300 44px/1.2 var(--font);
+  letter-spacing: -0.025em;
+  color: var(--fg);
+  caret-color: var(--fg-2);
+  background: linear-gradient(var(--outline), var(--outline)) no-repeat left bottom / 0 1px;
+  transition: background-size 420ms var(--ob-ease);
+}
+.ob-q .ob-name:focus-visible { box-shadow: none; }
+.ob-q .ob-name:focus { background-size: 100% 1px; }
+.ob-q .ob-name::placeholder { color: var(--fg-3); opacity: 0.5; transition: opacity 240ms ease; }
+.ob-q .ob-name:focus::placeholder { opacity: 0.32; }
+.ob-hello { min-height: 22px; margin: 14px 0 0; font-size: 15px; color: var(--fg-2); opacity: 0; transform: translateY(4px); transition: opacity 320ms ease, transform 320ms var(--ob-ease); }
+.ob-hello.on { opacity: 1; transform: none; }
+.ob-tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 4px; }
+.ob-tiles.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.ob-tile {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  min-height: 64px;
+  padding: 12px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-card);
+  background: var(--pane);
+  cursor: default;
+  transition: background-color var(--dur) ease, border-color var(--dur) ease, box-shadow var(--dur) ease, transform 120ms ease;
+}
+.ob-tile b { font-size: 15px; font-weight: var(--fw-med); color: var(--fg); }
+.ob-tile span { font-size: 12.5px; line-height: 1.35; color: var(--fg-2); }
+.ob-tile:hover { background: var(--hover); border-color: var(--outline-hover); }
+.ob-tile:active { transform: scale(0.98); }
+.ob-tile[aria-checked="true"] { border-color: var(--fg); box-shadow: inset 0 0 0 1px var(--fg); }
+.ob-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* The orb, colour and ball questions: heading on top, the orb large in the middle (orb.js follows
+   .ob-centre), the choices in one row along the bottom. The left column's slot stays, unseen. */
+.ob-step[data-step="4"].ob-wide { grid-template-rows: minmax(0, 1fr); align-content: stretch; padding-bottom: 14px; }
+.ob-wide > .ob-orb { visibility: hidden; grid-row: 1; grid-column: 1; }
+.ob-wide > .ob-body { grid-column: 1 / -1; grid-row: 1; align-self: stretch; display: flex; flex-direction: column; text-align: center; }
+.ob-wide .ob-q:not([hidden]) { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; }
+.ob-wide .ob-q .lede { margin-bottom: 0; }
+.ob-centre { flex: 1 1 0; align-self: stretch; min-height: 72px; max-height: 210px; margin: 8px 0; }
+.ob-wide .ob-tiles { width: 100%; margin-top: auto; }
+.ob-wide .ob-tile { align-items: center; text-align: center; min-height: 48px; padding: 10px 8px; }
+.ob-tiles.six { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
+.ob-wide .ob-tiles.three { max-width: 420px; }
+/* Colours: round swatches (.swatch, larger) with the name under; the chosen one gets a fine ring. */
+.ob-tiles.ob-colors { grid-template-columns: repeat(6, 64px); justify-content: center; gap: 12px; }
+.ob-colors .ob-tile, .ob-colors .ob-tile:hover { gap: 8px; padding: 2px 0; min-height: 0; border: 0; background: none; box-shadow: none; }
+.ob-colors i { width: 44px; height: 44px; border-radius: 50%; background: radial-gradient(circle, var(--c) 0 8px, transparent 8.5px), #1d1e22; transition: box-shadow var(--dur) ease, transform 160ms var(--ob-ease); }
+.ob-colors .ob-tile:hover i { transform: scale(1.06); }
+.ob-colors .ob-tile[aria-checked="true"] i { box-shadow: 0 0 0 2px var(--pane), 0 0 0 3px var(--fg); }
+.ob-colors .ob-tile span { color: var(--fg); }
+.ob-colors .ob-tile:focus-visible { outline: none; }
+.ob-colors .ob-tile:focus-visible i { outline: 2px solid var(--accent); outline-offset: 4px; }
+.ob-link { all: unset; display: inline-block; margin-top: 12px; font-size: 12.5px; color: var(--fg-2); text-decoration: underline; text-underline-offset: 2px; }
+.ob-link:hover { color: var(--fg); }
+.ob-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+/* The next question rises in like a step's children; going back, it comes down. A question runs
+   only its own enter, not the step's stagger (which would delay it by its place in the list). */
+.ob-step.enter > .ob-body > .ob-q { animation: none; }
+.ob-q.enter > * { animation: ob-in 240ms var(--ob-ease) both; animation-delay: calc(30ms + var(--i, 0) * 35ms); }
+:root.ob-back .ob-q.enter > * { animation-name: ob-in-back; }
+
+/* Step 5: settings rows inside the card. */
 .ob-group { width: 100%; text-align: left; }
 .ob-group .row { min-height: 40px; padding: 8px 12px; gap: 12px; }
 .ob-group .row + .row::before { left: 12px; right: 12px; }
-.ob-group input[type="text"] { width: 168px; }
 .ob-group select { width: 200px; }
-.ob-hello { min-height: 1.4em; }
-.ob-chips { display: flex; flex-wrap: wrap; gap: 4px; flex: none; }
-.ob-chips label { position: relative; }
-.ob-chips input { position: absolute; inset: 0; opacity: 0; margin: 0; }
-.ob-chips span { display: block; padding: 3px 9px; border-radius: 12px; border: 1px solid var(--outline); font-size: 12px; color: var(--fg-2); transition: background-color var(--dur) ease, color var(--dur) ease, border-color var(--dur) ease; }
-.ob-chips label:hover span { background: var(--hover); }
-.ob-chips input:checked + span { background: var(--solid); border-color: transparent; color: var(--solid-ink); }
-.ob-chips input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 1px; }
-#obSoundRow { flex-wrap: wrap; }
 .ob-recap { list-style: none; display: grid; grid-template-columns: repeat(2, minmax(0, auto)); justify-content: center; gap: 8px 28px; margin: 6px 0 18px; padding: 0; font-size: 13px; color: var(--fg-2); text-align: left; }
 .ob-recap li { display: flex; align-items: center; gap: 10px; }
 .ob-recap .keys { min-width: 64px; justify-content: flex-end; color: var(--fg); }
@@ -766,6 +834,8 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
   .ob-result { min-height: 40px; padding: 9px 12px; }
   .ob-ax-demo { margin-bottom: 8px; }
   .ob-group .row { min-height: 36px; padding: 6px 12px; }
+  .ob-tile { min-height: 56px; padding: 10px 14px; }
+  .ob-q .ob-name { font-size: 36px; }
   .ob-recap { margin-bottom: 12px; gap: 6px 24px; }
 }
 @media (max-width: 620px) {
@@ -798,7 +868,7 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
   *, *::before, *::after { transition: none !important; }
   .working::after { animation: none; border-top-color: var(--line-strong); }
   /* Onboarding: 150 ms fades only; no rise, stagger, word reveal, pulse or looping switch. */
-  .ob-card.intro, .ob-step.enter > *, .ob-step.enter > .ob-body > *, .ob-note, .ob-watch.pulse, .ob-pop { animation: ob-fade 150ms ease both !important; }
+  .ob-card.intro, .ob-step.enter > *, .ob-step.enter > .ob-body > *, .ob-q.enter > *, .ob-note, .ob-watch.pulse, .ob-pop { animation: ob-fade 150ms ease both !important; }
   .ob-step.leave, .ob-result .w { animation: none !important; }
   .ob-ax-switch, .ob-ax-switch::before { animation: none; }
   .ob-ax-switch { background: var(--accent); }
@@ -806,6 +876,7 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
   .ob-card { transition: opacity 150ms ease !important; }
   .ob-card.bye { transform: none; }
   .ob-keys.down kbd { transform: none; }
+  .ob-tile:active { transform: none; }
 }
 @keyframes ob-fade { from { opacity: 0; } }
 
