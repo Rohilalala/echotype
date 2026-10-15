@@ -737,6 +737,19 @@ fn show_main(app: &AppHandle) {
     }
 }
 
+/// Light, dark or the system's appearance for the settings window. The page's light/dark styles
+/// follow the window's appearance, so this is all it takes.
+fn apply_theme(app: &AppHandle, s: &Settings) {
+    let theme = match s.look.as_str() {
+        "light" => Some(tauri::Theme::Light),
+        "dark" => Some(tauri::Theme::Dark),
+        _ => None,
+    };
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.set_theme(theme);
+    }
+}
+
 /// Opens the settings window on `page` (pill menu, notice actions).
 fn open_page(app: &AppHandle, page: &str) {
     show_main(app);
@@ -836,6 +849,9 @@ fn commit_settings(app: &AppHandle, change: impl FnOnce(&Settings) -> Settings) 
     }
     if new.talk_key != old.talk_key {
         apply_talk_key(app, &new);
+    }
+    if new.look != old.look {
+        apply_theme(app, &new);
     }
     let _ = app.emit("settings-changed", &new);
     let _ = state(app).pill_wake.send(());
@@ -1550,6 +1566,7 @@ pub fn run() {
                 recording: AtomicBool::new(false),
             });
             create_tray(app)?;
+            apply_theme(app.handle(), &s);
             let h = app.handle().clone();
             app.listen_any("main-page", move |e| {
                 let st = state(&h);

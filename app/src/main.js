@@ -138,7 +138,6 @@ function changed(p) {
   if (p === 'sounds') $('#soundPackRow').hidden = !S.sounds;
   if (p === 'greetings' || p === 'display_name') renderGreeting();
   if (p === 'sound_pack') invoke('preview_sounds', { pack: S.sound_pack }).catch(() => {}); // hear it as you pick it
-  if (p === 'look') applyLook();
   if (p === 'advanced' || p === 'cleaner_memory') { renderAdvanced(); renderStt(); fillRemote('cleanup'); renderLangNote(); renderHero(); }
   renderChips();
 }
@@ -1887,12 +1886,6 @@ S.dismissed ??= [];
 base = clone(S);
 recent = await invoke('get_history', { limit: 3 }).catch(() => []);
 
-// Ink (look-v2.css) applies under <html data-look="v2">; anything else is Classic.
-function applyLook() {
-  if (S.look === 'v2') document.documentElement.dataset.look = 'v2';
-  else delete document.documentElement.dataset.look;
-}
-
 // Large windows: the whole window a step larger (the webview's page zoom, like the pill's), so
 // it doesn't sit tiny on a big screen. From the window's own width, which zoom doesn't change.
 const zoomFor = w => (w >= 2000 ? 1.3 : w >= 1600 ? 1.2 : w >= 1300 ? 1.1 : 1);
@@ -1924,7 +1917,6 @@ function renderGreeting() {
 }
 
 function renderAll() {
-  applyLook();
   renderGreeting();
   renderHotkey();
   renderPill();

@@ -71,7 +71,7 @@ pub struct Settings {
     pub pill_hidden_until: u64,
     /// Let screenshots and screen sharing see the pill. Off = content protection (best effort).
     pub pill_in_recordings: bool,
-    /// Settings window look: "classic" (the default) or "v2" (Ink).
+    /// The settings window's appearance: "system" (follows macOS, the default), "light" or "dark".
     pub look: String,
     /// Where the pill was dropped on each display (macOS): its window's top-left as a fraction
     /// of the room it has in that display's visible frame, keyed by the display's name. A display
@@ -193,7 +193,7 @@ impl Default for Settings {
             pill_idle: true,
             pill_hidden_until: 0,
             pill_in_recordings: false,
-            look: "classic".into(),
+            look: "system".into(),
             pill_positions: BTreeMap::new(),
             pill_screen: None,
             pill_follow_cursor: true,
@@ -273,8 +273,8 @@ impl Settings {
 
     /// Fixes values older builds wrote, and keeps settings off providers this build hides.
     pub(crate) fn migrate(&mut self) {
-        if self.look == "foundry" {
-            self.look = "classic".into(); // the Foundry look is gone
+        if !matches!(self.look.as_str(), "system" | "light" | "dark") {
+            self.look = "system".into(); // the Classic, Ink and Foundry looks are gone: follow macOS
         }
         if self.local_api.port < MIN_PORT {
             self.local_api.port = LocalApi::default().port; // older builds saved 0 from a cleared field
@@ -572,10 +572,13 @@ mod tests {
         assert_eq!(s.talk_key, "accelerator");
         assert!(s.sounds && s.dismissed.is_empty());
         assert!(s.pill_idle && s.pill_hidden_until == 0 && !s.pill_in_recordings, "the idle pill is on for upgraders, hidden from capture");
-        assert_eq!(s.look, "classic", "upgraders keep the classic look");
+        assert_eq!(s.look, "system", "upgraders follow the system appearance");
         let mut f: Settings = serde_json::from_str(r#"{"look":"foundry","look_chosen":true}"#).unwrap();
         f.migrate();
-        assert_eq!(f.look, "classic", "a saved Foundry look loads as Classic");
+        assert_eq!(f.look, "system", "a saved Foundry look loads as System");
+        let mut ink: Settings = serde_json::from_str(r#"{"look":"v2"}"#).unwrap();
+        ink.migrate();
+        assert_eq!(ink.look, "system", "a saved Ink look loads as System");
         assert!(s.pill_positions.is_empty() && s.show_in == "pill", "upgraders keep the pill, bottom-centre");
         assert!(s.pill_follow_cursor && s.pill_screen.is_none(), "...on the screen they are using");
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();

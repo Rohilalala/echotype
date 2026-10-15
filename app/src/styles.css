@@ -577,7 +577,7 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 #cloudAccount input { width: 200px; }
 #cloudAccount input.code { width: 96px; font-variant-numeric: tabular-nums; }
 
-/* First run: one card on the window's own backdrop (the vibrancy in the app, Ink's desk), five
+/* First run: one card on the window's own backdrop (the vibrancy in the app), five
    steps inside it and the orb (orb.js) on a canvas over everything, so it can move between the
    steps' slots and drop out of the card at the end. Motion: things that enter use --ob-ease;
    UI moves within 300 ms; reduced motion keeps only short fades (end of this file). */

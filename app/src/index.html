@@ -8,7 +8,6 @@
   <link rel="icon" href="icon.svg" />
   <link rel="stylesheet" href="styles.css" />
   <link rel="stylesheet" href="stats.css" />
-  <link rel="stylesheet" href="look-v2.css" />
   <script type="module" src="main.js"></script>
 </head>
 <body>
@@ -332,10 +331,11 @@
 
       <h2 class="group-title">Appearance</h2>
       <div class="group">
-        <div class="row"><span class="row-text"><span class="row-title" id="lookLabel">Look</span><span class="row-desc">Ink swaps the grays for deep blue ink on warm paper. Both follow the system's light or dark setting.</span></span>
+        <div class="row"><span class="row-text"><span class="row-title" id="lookLabel">Theme</span><span class="row-desc">System follows your Mac's light or dark setting.</span></span>
           <span class="seg" role="radiogroup" aria-labelledby="lookLabel">
-            <label><input type="radio" name="look" value="classic" data-bind="look" /><span>Classic</span></label>
-            <label><input type="radio" name="look" value="v2" data-bind="look" /><span>Ink</span></label>
+            <label><input type="radio" name="look" value="system" data-bind="look" /><span>System</span></label>
+            <label><input type="radio" name="look" value="light" data-bind="look" /><span>Light</span></label>
+            <label><input type="radio" name="look" value="dark" data-bind="look" /><span>Dark</span></label>
           </span></div>
       </div>
 
@@ -537,10 +537,11 @@
             </div>
 
             <div class="ob-q" data-q="look" hidden>
-              <h2 id="obQLook" tabindex="-1">Which look?</h2>
+              <h2 id="obQLook" tabindex="-1">Light or dark?</h2>
               <div class="ob-tiles" role="radiogroup" aria-labelledby="obQLook" data-key="look">
-                <button type="button" class="ob-tile" role="radio" data-v="classic"><b>Classic</b><span>Quiet grays</span></button>
-                <button type="button" class="ob-tile" role="radio" data-v="v2"><b>Ink</b><span>Deep blue ink on warm paper</span></button>
+                <button type="button" class="ob-tile" role="radio" data-v="system"><b>System</b><span>Follows your Mac</span></button>
+                <button type="button" class="ob-tile" role="radio" data-v="light"><b>Light</b><span>Always light</span></button>
+                <button type="button" class="ob-tile" role="radio" data-v="dark"><b>Dark</b><span>Always dark</span></button>
               </div>
             </div>
 

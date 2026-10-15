@@ -21,7 +21,7 @@ const settings = {
   copy_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+C',
   autostart: !q.has('upgrade'), sounds: true, sound_pack: 'classic', pill_fade: true, orb_listen: 'listening', orb_think: 'working', orb_detail: 1, orb_color: '#eef1ff', pill_size: 1.5, ball_size: 1,
   advanced: q.has('advanced'), cleaner_memory: 'ready', cleaner_idle_unload: false, cleaner_idle_minutes: 10, cleaner_context: 1024, greetings: true, detect_meetings: true, meeting_end: 'ask', cloud_moved: q.has('moved'),
-  look: q.get('look') === 'v2' ? 'v2' : 'classic',
+  look: 'system',
   pill_idle: !q.has('pilloff'), pill_hidden_until: q.has('pillhidden') ? now + 42 * 60000 : 0, pill_in_recordings: false,
   pill_positions: {}, pill_screen: null, pill_follow_cursor: true, show_in: q.has('menubar') ? 'menubar' : 'pill',
   dismissed: q.has('upgrade') || q.has('onboarding') ? [] : ['upgrade_offer'],
