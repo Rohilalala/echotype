@@ -1142,14 +1142,14 @@ function startOnboarding(step) {
 let film = null, filmHome = null;
 const filming = () => document.documentElement.classList.contains('film');
 const filmDrag = [];
-// The pill's ball on screen, in this page's px (the stage sits at the display's origin, unzoomed).
+// The pill's ball in this page's px (the stage is unzoomed; Rust knows where the stage is).
 async function homeSpot() {
   const h = await invoke('film_home').catch(() => null);
-  return h ? { x: h[0] - window.screenX, y: h[1] - window.screenY, r: h[2] } : null;
+  return h ? { x: h[0], y: h[1], r: h[2] } : null;
 }
 function filmHit(on = true) {
   const r = $('.ob-card').getBoundingClientRect();
-  invoke('film_hit', { rect: on ? [window.screenX + r.left, window.screenY + r.top, r.width, r.height] : null }).catch(() => {});
+  invoke('film_hit', { rect: on ? [r.left, r.top, r.width, r.height] : null }).catch(() => {});
 }
 // The card's orb in or out over ms, as the film's dots hand over to it (and back).
 function orbFade(from, to, ms) {
@@ -1233,6 +1233,7 @@ function obShow(n, first = false) {
 function obEnter(n) {
   const to = $(`.ob-step[data-step="${n}"]`);
   if (S.onboard_step !== n) { S.onboard_step = n; save(true); } // a relaunch resumes here
+  if (filming()) invoke('film_float', { on: n !== 3 }).catch(() => {}); // step 3 brings System Settings and TextEdit in front
   $$('#obDots li').forEach((li, i) => { li.className = i + 1 === n ? 'on' : i + 1 < n ? 'done' : ''; });
   $('#obDots').ariaLabel = `Setup, step ${n} of 5`;
   orb.slot(to.querySelector('.ob-orb'));

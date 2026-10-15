@@ -703,8 +703,7 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .ob-count { margin: 0 0 6px; font-size: 12px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
 .ob-q .lede { max-width: 46ch; }
 .ob-q .lede:empty { display: none; }
-/* The name is typed straight onto the card in display type: no box, just the caret, and a
-   hairline that grows in from the left while it has focus. */
+/* The name is typed straight onto the card in display type: no box, no line, just the caret. */
 .ob-q .ob-name {
   all: unset;
   display: block;
@@ -715,11 +714,8 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
   letter-spacing: -0.025em;
   color: var(--fg);
   caret-color: var(--fg-2);
-  background: linear-gradient(var(--outline), var(--outline)) no-repeat left bottom / 0 1px;
-  transition: background-size 420ms var(--ob-ease);
 }
 .ob-q .ob-name:focus-visible { box-shadow: none; }
-.ob-q .ob-name:focus { background-size: 100% 1px; }
 .ob-q .ob-name::placeholder { color: var(--fg-3); opacity: 0.5; transition: opacity 240ms ease; }
 .ob-q .ob-name:focus::placeholder { opacity: 0.32; }
 .ob-hello { min-height: 22px; margin: 14px 0 0; font-size: 15px; color: var(--fg-2); opacity: 0; transform: translateY(4px); transition: opacity 320ms ease, transform 320ms var(--ob-ease); }
@@ -934,7 +930,7 @@ html.film .onboard { background: transparent; }
 html.film .ob-card { background: transparent !important; border-color: transparent !important; box-shadow: none !important; animation: none; }
 .film-shell { display: none; }
 html.film .film-shell { display: block; position: fixed; z-index: 0; opacity: 0; pointer-events: none; background: var(--pane); border: 1px solid var(--line-strong); box-shadow: var(--shadow-float), 0 24px 48px -28px rgba(0, 0, 0, 0.22); }
-.film-welcome { position: absolute; left: 0; right: 0; top: calc(40% + 76px); margin: 0; text-align: center; font-size: 28px; line-height: 1.18; letter-spacing: -0.02em; color: var(--fg); opacity: 0; }
+.film-welcome { position: absolute; left: 0; right: 0; top: calc(40% + 76px); margin: 0; text-align: center; font: 600 28px/1.18 var(--font); letter-spacing: -0.015em; color: var(--fg); opacity: 0; }
 html.film .ob-top, html.film .ob-stage, html.film .ob-foot, html.film .ob-model { transition: opacity 450ms ease; }
 html.film-pre :is(.ob-top, .ob-stage, .ob-foot, .ob-model), html.film-out :is(.ob-top, .ob-stage, .ob-foot, .ob-model) { opacity: 0; pointer-events: none; }
 .film-canvas { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 20; transition: opacity 300ms ease; }

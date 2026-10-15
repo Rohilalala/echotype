@@ -35,6 +35,7 @@ const COMMANDS: &[&str] = &[
     "film_window",
     "film_hit",
     "film_home",
+    "film_float",
     "cloud_start_login",
     "cloud_verify",
     "cloud_account",

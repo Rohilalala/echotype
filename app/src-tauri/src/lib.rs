@@ -1313,6 +1313,7 @@ async fn film_window(app: AppHandle, on: bool, show: bool) -> R<()> {
             e(w.set_min_size(None::<LogicalSize<f64>>))?;
             e(w.set_size(LogicalSize::new(size.width, size.height)))?;
             e(w.set_position(LogicalPosition::new(pos.x, pos.y)))?;
+            e(w.set_always_on_top(true))?; // over other apps' windows until setup needs them (film_float)
             *lock(&st.film_hit) = None;
             e(w.set_ignore_cursor_events(true))?;
             if !st.film.swap(true, Ordering::SeqCst) {
@@ -1326,6 +1327,7 @@ async fn film_window(app: AppHandle, on: bool, show: bool) -> R<()> {
                         let now = matches!((hit, pill::cursor_now(&h)), (Some(r), Some(c)) if r.contains(c));
                         if now != over {
                             over = now;
+                            eprintln!("echotype: film card {}", if over { "takes clicks" } else { "lets clicks through" });
                             if let Some(w) = h.get_webview_window("main") {
                                 let _ = w.set_ignore_cursor_events(!over);
                             }
@@ -1344,6 +1346,7 @@ async fn film_window(app: AppHandle, on: bool, show: bool) -> R<()> {
             std::thread::sleep(Duration::from_millis(150));
             e(w.hide())?;
             e(w.set_ignore_cursor_events(false))?;
+            e(w.set_always_on_top(false))?;
             e(w.set_decorations(true))?;
             e(w.set_title_bar_style(TitleBarStyle::Overlay))?;
             e(w.set_shadow(true))?;
@@ -1363,17 +1366,38 @@ async fn film_window(app: AppHandle, on: bool, show: bool) -> R<()> {
     Ok(())
 }
 
-/// The film's card, in screen points, or None while nothing on the stage takes clicks.
+/// The stage floats over other apps' windows, except while setup needs them in front
+/// (Accessibility in System Settings, a real paste in TextEdit).
 #[tauri::command]
-async fn film_hit(app: AppHandle, rect: Option<[f64; 4]>) -> R<()> {
-    *lock(&state(&app).film_hit) = rect.map(|[x, y, w, h]| pill::Rect { x, y, w, h });
+async fn film_float(app: AppHandle, on: bool) -> R<()> {
+    let w = app.get_webview_window("main").ok_or("no settings window")?;
+    if state(&app).film.load(Ordering::SeqCst) {
+        w.set_always_on_top(on).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
-/// Where the film's dots land: the idle ball's centre and radius on screen (points).
+/// The stage's top-left on screen (points). The page can't tell: WebKit's window.screenY counts
+/// from the bottom of the screen, so the card's rect and the pill's place go through here.
+fn film_origin(app: &AppHandle) -> (f64, f64) {
+    app.get_webview_window("main")
+        .and_then(|w| Some(w.outer_position().ok()?.to_logical::<f64>(w.scale_factor().ok()?)))
+        .map_or((0.0, 0.0), |p| (p.x, p.y))
+}
+
+/// The film's card in page px, or None while nothing on the stage takes clicks.
 #[tauri::command]
-async fn film_home() -> R<Option<[f64; 3]>> {
-    Ok(lock(&pill::HOME).map(|(x, y, r)| [x, y, r]))
+async fn film_hit(app: AppHandle, rect: Option<[f64; 4]>) -> R<()> {
+    let (ox, oy) = film_origin(&app);
+    *lock(&state(&app).film_hit) = rect.map(|[x, y, w, h]| pill::Rect { x: ox + x, y: oy + y, w, h });
+    Ok(())
+}
+
+/// Where the film's dots land: the idle ball's centre and radius in the stage's page px.
+#[tauri::command]
+async fn film_home(app: AppHandle) -> R<Option<[f64; 3]>> {
+    let (ox, oy) = film_origin(&app);
+    Ok(lock(&pill::HOME).map(|(x, y, r)| [x - ox, y - oy, r]))
 }
 
 /// Onboarding's Quit, before there is a pill or a reason to stay in the menu bar.
@@ -1655,6 +1679,7 @@ pub fn run() {
             film_window,
             film_hit,
             film_home,
+            film_float,
             cloud_start_login,
             cloud_verify,
             cloud_account,
