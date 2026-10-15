@@ -370,17 +370,20 @@ static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
 /// transcribes a clip it finds no speech in (silence came back "Thank you." with it on).
 static SILERO: Mutex<Option<whisper_rs::WhisperVadContext>> = Mutex::new(None);
 
-/// True when Silero finds speech in the clip. A detector that fails to load or run says yes, so
-/// a broken file never swallows dictation.
-pub fn has_voice(vad: &Path, pcm: &[f32]) -> bool {
+/// The language the last dictation came out in, when the user listens for several: dictation runs
+/// in one language for a while, so a close call leans to it (likeliest). Process memory only.
+static LAST_LANG: Mutex<Option<String>> = Mutex::new(None);
+
+/// The speech Silero finds in the clip, as (start, end) seconds; empty when there is none. None
+/// when the detector fails to load or run, so a broken file never swallows dictation.
+pub fn speech(vad: &Path, pcm: &[f32]) -> Option<Vec<(f32, f32)>> {
     let mut g = SILERO.lock().unwrap_or_else(|e| e.into_inner());
     if g.is_none() {
-        let Some(path) = vad.to_str() else { return true };
-        match whisper_rs::WhisperVadContext::new(path, whisper_rs::WhisperVadContextParams::new()) {
+        match whisper_rs::WhisperVadContext::new(vad.to_str()?, whisper_rs::WhisperVadContextParams::new()) {
             Ok(ctx) => *g = Some(ctx),
             Err(e) => {
                 eprintln!("echotype: Silero did not load ({e}); transcribing without it");
-                return true;
+                return None;
             }
         }
     }
@@ -389,7 +392,22 @@ pub fn has_voice(vad: &Path, pcm: &[f32]) -> bool {
     // 0.2, a TTS whisper at -55 dBFS is cut at 0.4. Re-check on owner-recorded taps and whispers.
     let mut params = whisper_rs::WhisperVadParams::new();
     params.set_threshold(0.3);
-    ctx.segments_from_samples(params, pcm).map_or(true, |s| s.num_segments() > 0)
+    ctx.segments_from_samples(params, pcm).ok().map(|s| s.map(|s| (s.start / 100.0, s.end / 100.0)).collect())
+}
+
+/// Slack around Silero's speech, in seconds, before a whisper segment counts as outside it. In
+/// TTS probes whisper's segment ends ran 0.2-0.35 s ahead of Silero's speech end, so 0.5 keeps a
+/// real last segment whose start whisper places a little late.
+const SPEECH_PAD_S: f32 = 0.5;
+
+/// Whether a whisper segment [t0, t1] (seconds) touches the speech Silero heard. Whisper fills
+/// silence with its training subtitles ("Thank you.", see SILERO); after the last word, or before
+/// the first, that lands in a segment of its own outside the speech. No speech spans: keep it.
+// ponytail: whole segments; an invented ending inside the last real segment survives. Token
+// timestamps (as transcribe_words reads them) could cut there if one is seen.
+fn heard(t0: f32, t1: f32, speech: &[(f32, f32)]) -> bool {
+    let (Some(first), Some(last)) = (speech.first(), speech.last()) else { return true };
+    t0 <= last.1 + SPEECH_PAD_S && t1 >= first.0 - SPEECH_PAD_S
 }
 
 struct Engine {
@@ -468,6 +486,56 @@ pub fn prompt(dictionary: &[String]) -> String {
     if words.is_empty() { String::new() } else { format!("{}.", words.join(", ")) }
 }
 
+pub fn norm(w: &str) -> String {
+    w.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+/// Whisper stuck in a loop on noise ("the top of the top of the top of the top"): a long
+/// sentence that is mostly the same few words again.
+pub fn looped(text: &str) -> bool {
+    let words: Vec<String> = text.split_whitespace().map(norm).filter(|w| !w.is_empty()).collect();
+    words.len() >= 8 && words.iter().collect::<std::collections::HashSet<_>>().len() * 2 <= words.len()
+}
+
+/// Longest phrase, in words, checked for a repeat.
+// ponytail: a looped sentence longer than 10 words survives; raise it if one shows up.
+const LOOP_MAX_WORDS: usize = 10;
+
+/// Whisper repeating itself in dictation ("I'm a little, little, little.", "the the the the"):
+/// three or more copies of a word or phrase in a row become one, ending in the last copy's
+/// punctuation. Two copies ("very very") are speech, and so is a sentence that is one word said
+/// over ("Hello, hello, hello." as a mic test, "No, no, no.") unless it is a long loop (looped).
+pub fn collapse_loops(text: &str) -> String {
+    let toks: Vec<&str> = text.split_whitespace().collect();
+    let keys: Vec<String> = toks.iter().map(|t| norm(t)).collect();
+    let ends = |t: &str| t.ends_with(['.', '?', '!', '\u{0964}']); // । ends a Hindi sentence
+    let stem = |t: &str| t.trim_end_matches(|c: char| !c.is_alphanumeric()).len();
+    let (mut out, mut i, mut changed) = (Vec::<String>::new(), 0, false);
+    while i < toks.len() {
+        let run = (1..=LOOP_MAX_WORDS).find_map(|n| {
+            let copy = |c: usize| (0..n).all(|j| keys.get(i + c * n + j).is_some_and(|k| !k.is_empty() && *k == keys[i + j]));
+            let copies = 1 + (1..).take_while(|&c| copy(c)).count();
+            (copies >= 3).then_some((n, i + n * copies))
+        });
+        let Some((n, end)) = run else {
+            out.push(toks[i].to_string());
+            i += 1;
+            continue;
+        };
+        let sentence = (i == 0 || ends(toks[i - 1])) && (end == toks.len() || ends(toks[end - 1]));
+        if n == 1 && sentence && !looped(&toks[i..end].join(" ")) {
+            out.extend(toks[i..end].iter().map(|t| t.to_string()));
+        } else {
+            out.extend(toks[i..i + n - 1].iter().map(|t| t.to_string()));
+            let (first, last) = (toks[i + n - 1], toks[end - 1]);
+            out.push(format!("{}{}", &first[..stem(first)], &last[stem(last)..]));
+            changed = true;
+        }
+        i = end;
+    }
+    if changed { out.join(" ") } else { text.to_string() }
+}
+
 /// Drops whisper's non-speech tags such as "[BLANK_AUDIO]" and trims.
 pub fn clean_text(s: &str) -> String {
     let mut out = String::new();
@@ -485,14 +553,21 @@ pub fn clean_text(s: &str) -> String {
 
 /// `vad`: the Silero speech detector. With it, a clip with no speech in it (taps, a snap, the
 /// room) comes back empty instead of whisper's "Thank you." or "I'm going to go to the next one."
+/// Segments wholly outside Silero's speech are dropped (heard).
 pub fn transcribe_local(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, vad: Option<&Path>) -> Result<String, String> {
-    if pcm.is_empty() || vad.is_some_and(|v| !has_voice(v, pcm)) {
+    if pcm.is_empty() {
         return Ok(String::new());
     }
-    run_local(model, pcm, languages, translate, prompt, false, vad, |state| {
+    let spans = vad.and_then(|v| speech(v, pcm));
+    if spans.as_ref().is_some_and(Vec::is_empty) {
+        return Ok(String::new());
+    }
+    run_local(model, pcm, languages, translate, prompt, false, true, vad, |state| {
         let mut text = String::new();
         for i in 0..state.full_n_segments() {
-            if let Some(seg) = state.get_segment(i) {
+            let Some(seg) = state.get_segment(i) else { continue };
+            let (t0, t1) = (seg.start_timestamp() as f32 / 100.0, seg.end_timestamp() as f32 / 100.0);
+            if spans.as_deref().is_none_or(|s| heard(t0, t1, s)) {
                 text.push_str(&seg.to_str_lossy().map_err(|e| e.to_string())?);
             }
         }
@@ -516,7 +591,7 @@ pub fn transcribe_words(model: &Path, pcm: &[f32], languages: &[String], prompt:
     if pcm.is_empty() {
         return Ok(vec![]);
     }
-    run_local(model, pcm, languages, false, prompt, true, vad, |state| {
+    run_local(model, pcm, languages, false, prompt, true, false, vad, |state| {
         let mut words: Vec<Word> = vec![];
         for i in 0..state.full_n_segments() {
             let Some(seg) = state.get_segment(i) else { continue };
@@ -549,8 +624,16 @@ pub fn transcribe_words(model: &Path, pcm: &[f32], languages: &[String], prompt:
 /// whisper.cpp's own thread count (min(4, cores)), for the language check before a run.
 const THREADS: usize = 4;
 
-/// The likeliest of `codes` by whisper's language scores; the first one on a tie or an unknown code.
-fn likeliest(probs: &[f32], codes: &[String]) -> Option<String> {
+/// How many times `last`'s score another language must beat to take over from it. Measured with
+/// en+hi on 40 FLEURS English and 40 Hindi clips: full-length clips never change (the loser's share
+/// of the pair stays under 0.2); on their first 2 s (26/40 Hindi right), 2x fixes 1 or breaks 2
+/// depending on `last`, 4x fixes 3 or breaks 7. Hinglish "Report bhej do, main dekh lunga" scores
+/// hi 0.44 / en 0.34: a coin toss that 2x settles to the language already in use.
+const LEAN: f32 = 2.0;
+
+/// The likeliest of `codes` by whisper's language scores; the first one on a tie or an unknown
+/// code. `last` (one of `codes`, the previous dictation's) wins unless beaten LEAN times over.
+fn likeliest(probs: &[f32], codes: &[String], last: Option<&str>) -> Option<String> {
     let score = |c: &str| whisper_rs::get_lang_id(c).and_then(|i| probs.get(i as usize).copied()).unwrap_or(f32::MIN);
     let mut best = codes.first()?;
     for c in &codes[1..] {
@@ -558,11 +641,15 @@ fn likeliest(probs: &[f32], codes: &[String]) -> Option<String> {
             best = c;
         }
     }
-    Some(best.clone())
+    match last.and_then(|l| codes.iter().find(|c| *c == l)) {
+        Some(l) if score(l) * LEAN >= score(best) => Some(l.clone()),
+        _ => Some(best.clone()),
+    }
 }
 
+/// `sticky`: lean to, and remember, the language of the last such run (LAST_LANG); dictation only.
 #[allow(clippy::too_many_arguments)]
-fn run_local<T>(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, timestamps: bool, vad: Option<&Path>, read: impl FnOnce(&WhisperState) -> Result<T, String>) -> Result<T, String> {
+fn run_local<T>(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, timestamps: bool, sticky: bool, vad: Option<&Path>, read: impl FnOnce(&WhisperState) -> Result<T, String>) -> Result<T, String> {
     let mut g = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
     if g.as_ref().is_none_or(|e| e.path != model) {
         *g = None; // free the old model before loading the next one
@@ -591,7 +678,12 @@ fn run_local<T>(model: &Path, pcm: &[f32], languages: &[String], translate: bool
             // a short Hindi clip once came out as Tibetan under auto.
             state.pcm_to_mel(pcm, THREADS).map_err(|e| format!("Language detection failed: {e}"))?;
             let (_, probs) = state.lang_detect(0, THREADS).map_err(|e| format!("Language detection failed: {e}"))?;
-            likeliest(&probs, several)
+            let mut last = LAST_LANG.lock().unwrap_or_else(|e| e.into_inner());
+            let pick = likeliest(&probs, several, last.as_deref().filter(|_| sticky));
+            if sticky {
+                last.clone_from(&pick);
+            }
+            pick
         }
     };
     p.set_language(lang.as_deref());
@@ -685,18 +777,7 @@ mod tests {
     fn no_speech_no_text() {
         let Ok(model) = std::env::var("ECHOTYPE_TEST_MODEL") else { return eprintln!("skipped: no ECHOTYPE_TEST_MODEL") };
         let (model, vad) = (Path::new(&model), crate::speakers::vad().expect("Silero downloaded (speakers::ensure_vad)"));
-        let mut seed = 1u32;
-        let mut pcm: Vec<f32> = (0..16_000 * 8)
-            .map(|_| {
-                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                (seed >> 8) as f32 / (1u32 << 24) as f32 * 0.002 - 0.001 // about -60 dBFS of hiss
-            })
-            .collect();
-        for knock in (4_000..pcm.len() - 800).step_by(9_600) {
-            for (i, x) in pcm[knock..knock + 480].iter_mut().enumerate() {
-                *x += 0.6 * (-(i as f32) / 60.0).exp() * if i % 2 == 0 { 1.0 } else { -1.0 };
-            }
-        }
+        let pcm = knocks(8);
         // Text with no letter or digit ("." or "...") is no speech to the app (cleanup::has_speech).
         let nothing = |pcm: &[f32], what: &str| {
             eprintln!("{what} without Silero: {:?}", transcribe_local(model, pcm, &[], false, "", None));
@@ -712,12 +793,83 @@ mod tests {
         if let Ok(wav) = std::env::var("ECHOTYPE_TEST_WAV") {
             let speech = crate::audio::decode(std::fs::read(&wav).unwrap(), Some("wav")).unwrap();
             let t = Instant::now();
-            assert!(has_voice(&vad, &speech));
+            assert!(super::speech(&vad, &speech).is_some_and(|s| !s.is_empty()));
             eprintln!("Silero on {:.1} s of speech: {} ms", speech.len() as f32 / 16_000.0, t.elapsed().as_millis());
             let text = transcribe_local(model, &speech, &[], false, "", Some(&vad)).unwrap();
             eprintln!("speech with Silero: {text}");
             assert!(text.split_whitespace().count() >= 3, "speech still comes through: {text:?}");
         }
+    }
+
+    /// `secs` of a quiet room with a knock every 600 ms.
+    fn knocks(secs: usize) -> Vec<f32> {
+        let mut seed = 1u32;
+        let mut pcm: Vec<f32> = (0..16_000 * secs)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed >> 8) as f32 / (1u32 << 24) as f32 * 0.002 - 0.001 // about -60 dBFS of hiss
+            })
+            .collect();
+        for knock in (4_000..pcm.len() - 800).step_by(9_600) {
+            for (i, x) in pcm[knock..knock + 480].iter_mut().enumerate() {
+                *x += 0.6 * (-(i as f32) / 60.0).exp() * if i % 2 == 0 { 1.0 } else { -1.0 };
+            }
+        }
+        pcm
+    }
+
+    /// Speech, then knocks until the hotkey is let go 40 s later, through the real model. Without
+    /// trimming whisper invented "Yes, that works. Thank you." and "Send the report to Priya by the
+    /// end of the day. The report to Priya by the end of the day is the end of the day."; trimmed to
+    /// Silero's speech, the clip reads as the speech alone. (3-8 s of silence, hiss, brown noise,
+    /// clicks or knocks after 9 TTS clips, 84 runs, never made it invent anything.)
+    /// `ECHOTYPE_TEST_MODEL=<ggml file> ECHOTYPE_TEST_WAV=<speech> cargo test --release speech_then_knocks -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn speech_then_knocks_keeps_only_the_speech() {
+        let (Ok(model), Ok(wav)) = (std::env::var("ECHOTYPE_TEST_MODEL"), std::env::var("ECHOTYPE_TEST_WAV")) else { return eprintln!("skipped") };
+        let (model, vad) = (Path::new(&model), crate::speakers::vad().expect("Silero downloaded (speakers::ensure_vad)"));
+        let mut pcm = knocks(1)[..8_000].to_vec();
+        pcm.extend(crate::audio::decode(std::fs::read(&wav).unwrap(), Some("wav")).unwrap());
+        let alone = transcribe_local(model, &pcm, &[], false, "", Some(&vad)).unwrap();
+        pcm.extend(knocks(40));
+        let all = transcribe_local(model, &pcm, &[], false, "", None).unwrap();
+        let kept = transcribe_local(model, &pcm, &[], false, "", Some(&vad)).unwrap();
+        eprintln!("speech alone: {alone}\nuntrimmed:    {all}\ntrimmed:      {kept}");
+        assert!(alone.split_whitespace().count() >= 3, "speech comes through: {alone:?}");
+        assert_eq!(kept, alone);
+    }
+
+    #[test]
+    fn segments_outside_the_speech_are_dropped() {
+        let speech = [(1.0, 2.0), (3.0, 5.8)];
+        assert!(heard(0.0, 5.4, &speech), "whisper's first segment starts at 0 s");
+        assert!(heard(2.1, 2.9, &speech), "a pause between spans is not trimmed");
+        assert!(heard(6.2, 7.0, &speech), "within the pad after the last word");
+        assert!(!heard(6.4, 8.0, &speech), "\"Thank you.\" in the silence after");
+        assert!(!heard(0.0, 0.4, &speech), "\"Thank you.\" over the taps before the first word");
+        assert!(heard(0.0, 0.6, &speech), "within the pad before it");
+        assert!(heard(9.0, 9.5, &[]), "no spans: keep everything");
+    }
+
+    #[test]
+    fn three_repeats_collapse_and_speech_survives() {
+        let c = collapse_loops;
+        assert_eq!(c("- I'm a little, little, little."), "- I'm a little."); // owner history
+        assert_eq!(c("so the the the the plan is"), "so the plan is");
+        assert_eq!(c("The, the, the meeting"), "The meeting");
+        assert_eq!(c("We went to the top of the top of the top of the hill."), "We went to the top of the hill.");
+        assert_eq!(c("Ship it. I said ship it. I said ship it. I said ship it."), "Ship it. I said ship it.");
+        assert_eq!(c("the the the the the the the the the the"), "the", "a whole-text loop collapses too");
+        // Speech: doubles, a sentence that is one word said over, words that only look alike.
+        for keep in ["It was very very good.", "Hello, hello, hello. Mic test, hello.", "No, no, no.", "It is what it is.", "1 1 2 3 5 8", "line\nbreaks stay"] {
+            assert_eq!(c(keep), keep);
+        }
+        // Devanagari: the vowel signs are letters (Other_Alphabetic), so का की के stay distinct.
+        assert_eq!(c("मैं बहुत बहुत बहुत खुश हूँ।"), "मैं बहुत खुश हूँ।");
+        assert_eq!(c("यह का की के लिए है"), "यह का की के लिए है");
+        assert_eq!(c("वो बहुत बहुत अच्छा है।"), "वो बहुत बहुत अच्छा है।");
+        assert_eq!(c("नहीं, नहीं, नहीं।"), "नहीं, नहीं, नहीं।");
     }
 
     /// A Hindi clip with the user's languages set to English + Hindi comes out in Devanagari.
@@ -750,10 +902,29 @@ mod tests {
         probs[id("hi")] = 0.3;
         probs[id("en")] = 0.1;
         let codes = |c: &[&str]| c.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(likeliest(&probs, &codes(&["en", "hi"])).as_deref(), Some("hi"));
-        assert_eq!(likeliest(&probs, &codes(&["en", "fr"])).as_deref(), Some("en"), "unscored French loses to English");
-        assert_eq!(likeliest(&probs, &codes(&["xx", "en"])).as_deref(), Some("en"), "an unknown code never wins");
-        assert_eq!(likeliest(&probs, &[]), None);
+        assert_eq!(likeliest(&probs, &codes(&["en", "hi"]), None).as_deref(), Some("hi"));
+        assert_eq!(likeliest(&probs, &codes(&["en", "fr"]), None).as_deref(), Some("en"), "unscored French loses to English");
+        assert_eq!(likeliest(&probs, &codes(&["xx", "en"]), None).as_deref(), Some("en"), "an unknown code never wins");
+        assert_eq!(likeliest(&probs, &[], None), None);
+    }
+
+    #[test]
+    fn a_close_call_leans_to_the_last_language() {
+        let mut probs = vec![0.0f32; whisper_rs::get_lang_max_id() as usize + 1];
+        let id = |c: &str| whisper_rs::get_lang_id(c).unwrap() as usize;
+        let codes = |c: &[&str]| c.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let pick = |probs: &[f32], c: &[&str], last| likeliest(probs, &codes(c), last);
+        probs[id("hi")] = 0.444; // "Report bhej do, main dekh lunga." (TTS, Lekha)
+        probs[id("en")] = 0.337;
+        assert_eq!(pick(&probs, &["en", "hi"], None).as_deref(), Some("hi"));
+        assert_eq!(pick(&probs, &["en", "hi"], Some("en")).as_deref(), Some("en"), "close: stays in English");
+        assert_eq!(pick(&probs, &["en", "hi"], Some("hi")).as_deref(), Some("hi"));
+        probs[id("en")] = 0.2;
+        assert_eq!(pick(&probs, &["en", "hi"], Some("en")).as_deref(), Some("hi"), "more than twice as likely: Hindi");
+        assert_eq!(pick(&probs, &["en", "hi", "fr"], Some("fr")).as_deref(), Some("hi"), "unscored last language loses");
+        assert_eq!(pick(&probs, &["en", "hi"], Some("de")).as_deref(), Some("hi"), "a last language no longer chosen is ignored");
+        probs[id("en")] = 0.25;
+        assert_eq!(pick(&probs, &["hi", "en", "fr"], Some("en")).as_deref(), Some("en"), "three languages, exactly 2x: last wins");
     }
 
     #[test]
