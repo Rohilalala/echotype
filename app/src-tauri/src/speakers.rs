@@ -53,6 +53,16 @@ pub fn path(m: &SpeakerModel) -> PathBuf {
     crate::stt::models_dir().join("speakers").join(m.file)
 }
 
+/// Fetches the Silero speech detector if it is missing: dictation uses it too, so whisper only
+/// runs on clips with speech in them.
+pub fn ensure_vad() -> Result<(), String> {
+    let m = &MODELS[2];
+    if path(m).is_file() {
+        return Ok(());
+    }
+    crate::stt::fetch(m.url, &path(m), m.sha256, |_, _| {})
+}
+
 /// Fetches whichever model is missing. `progress(file, done, total)`.
 pub fn ensure(mut progress: impl FnMut(&str, u64, Option<u64>)) -> Result<(), String> {
     for m in MODELS.iter().filter(|m| !path(m).is_file()) {

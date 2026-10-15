@@ -863,7 +863,7 @@ fn run(app: AppHandle, mut session: Session, rx: mpsc::Receiver<Piece>, stopped:
     impl Drop for Done {
         fn drop(&mut self) {
             lock(&LIVE).take();
-            stt::free_vad(); // the Silero detector is for meetings only
+            stt::free_vad(); // its long-meeting state goes; dictation reloads the detector
         }
     }
     let _done = Done;

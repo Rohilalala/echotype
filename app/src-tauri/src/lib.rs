@@ -1649,6 +1649,9 @@ pub fn run() {
             }
             calls::run(app.handle().clone());
             std::thread::spawn(move || {
+                if s.stt.provider == "local" {
+                    let _ = speakers::ensure_vad(); // for installs from before dictation used it
+                }
                 stt::warm_up(&s);
                 llm::apply(&s);
             });

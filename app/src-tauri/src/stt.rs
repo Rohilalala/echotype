@@ -268,7 +268,9 @@ fn ready_with(s: &Settings, has_key: impl Fn(&str, &str) -> bool) -> Result<(), 
 pub fn download(id: &str, progress: impl FnMut(u64, Option<u64>)) -> Result<(), String> {
     let want = catalog(id)?.sha256;
     let url = format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/{HF_COMMIT}/ggml-{id}.bin");
-    fetch(&url, &models_dir().join(format!("ggml-{id}.bin")), want, progress)
+    fetch(&url, &models_dir().join(format!("ggml-{id}.bin")), want, progress)?;
+    let _ = crate::speakers::ensure_vad(); // 1 MB; dictation works without it, just less guarded
+    Ok(())
 }
 
 /// Downloads `url` to `dest` through a .part file, kept only if its SHA-256 is `want`.
@@ -336,11 +338,37 @@ pub fn delete(id: &str) -> Result<(), String> {
 // ponytail: one model resident at a time; a translate run swaps turbo for medium and back. Keep two slots if users flip often.
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
 
+/// Silero on its own, loaded on first use (1 MB, CPU): whisper.cpp's built-in VAD still
+/// transcribes a clip it finds no speech in (silence came back "Thank you." with it on).
+static SILERO: Mutex<Option<whisper_rs::WhisperVadContext>> = Mutex::new(None);
+
+/// True when Silero finds speech in the clip. A detector that fails to load or run says yes, so
+/// a broken file never swallows dictation.
+pub fn has_voice(vad: &Path, pcm: &[f32]) -> bool {
+    let mut g = SILERO.lock().unwrap_or_else(|e| e.into_inner());
+    if g.is_none() {
+        let Some(path) = vad.to_str() else { return true };
+        match whisper_rs::WhisperVadContext::new(path, whisper_rs::WhisperVadContextParams::new()) {
+            Ok(ctx) => *g = Some(ctx),
+            Err(e) => {
+                eprintln!("echotype: Silero did not load ({e}); transcribing without it");
+                return true;
+            }
+        }
+    }
+    let ctx = g.as_mut().expect("loaded above");
+    // ponytail: 0.3 (Silero's default is 0.5) from synthetic clips: macOS clicks and pops pass at
+    // 0.2, a TTS whisper at -55 dBFS is cut at 0.4. Re-check on owner-recorded taps and whispers.
+    let mut params = whisper_rs::WhisperVadParams::new();
+    params.set_threshold(0.3);
+    ctx.segments_from_samples(params, pcm).map_or(true, |s| s.num_segments() > 0)
+}
+
 struct Engine {
     path: PathBuf,
     ctx: WhisperContext,
     state: WhisperState,
-    /// whisper.cpp keeps the Silero model inside the state once a call used it (meetings only).
+    /// whisper.cpp keeps the Silero model inside the state once a call used it.
     vad: bool,
 }
 
@@ -351,8 +379,8 @@ fn unload_if(path: &Path) {
     }
 }
 
-/// Frees the Silero speech detector a meeting loaded into the whisper state, keeping the model
-/// loaded for dictation. Called when a meeting ends, however it ends.
+/// Frees the Silero speech detector loaded into the whisper state, keeping the model loaded.
+/// Called when a meeting ends, however it ends; the next dictation loads it again (1 MB).
 pub fn free_vad() {
     let mut g = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(e) = g.as_mut().filter(|e| e.vad) {
@@ -427,11 +455,13 @@ pub fn clean_text(s: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-pub fn transcribe_local(model: &Path, pcm: &[f32], language: Option<&str>, translate: bool, prompt: &str) -> Result<String, String> {
-    if pcm.is_empty() {
+/// `vad`: the Silero speech detector. With it, a clip with no speech in it (taps, a snap, the
+/// room) comes back empty instead of whisper's "Thank you." or "I'm going to go to the next one."
+pub fn transcribe_local(model: &Path, pcm: &[f32], language: Option<&str>, translate: bool, prompt: &str, vad: Option<&Path>) -> Result<String, String> {
+    if pcm.is_empty() || vad.is_some_and(|v| !has_voice(v, pcm)) {
         return Ok(String::new());
     }
-    run_local(model, pcm, language, translate, prompt, false, None, |state| {
+    run_local(model, pcm, language, translate, prompt, false, vad, |state| {
         let mut text = String::new();
         for i in 0..state.full_n_segments() {
             if let Some(seg) = state.get_segment(i) {
@@ -545,7 +575,7 @@ pub fn warm_up(s: &Settings) {
         return;
     }
     let t = Instant::now();
-    match transcribe_local(&path, &vec![0.0; 16_000], Some("en"), false, "") {
+    match transcribe_local(&path, &vec![0.0; 16_000], Some("en"), false, "", None) {
         Ok(_) => eprintln!("echotype: warmed up {} in {} ms", path.display(), t.elapsed().as_millis()),
         Err(e) => eprintln!("echotype: warm-up failed: {e}"),
     }
@@ -591,6 +621,50 @@ pub fn transcribe_remote(s: &Settings, pcm: &[f32], prompt: &str) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A quiet room with a knock every 600 ms (owner report: tapping the laptop typed "Thank you.",
+    /// a finger snap "I'm going to go to the next one."), through the real model: with Silero,
+    /// nothing comes back; speech still does.
+    /// `ECHOTYPE_TEST_MODEL=<ggml file> ECHOTYPE_TEST_WAV=<speech> [ECHOTYPE_TEST_NOISE=<wav:wav>] cargo test --release no_speech_no_text -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn no_speech_no_text() {
+        let Ok(model) = std::env::var("ECHOTYPE_TEST_MODEL") else { return eprintln!("skipped: no ECHOTYPE_TEST_MODEL") };
+        let (model, vad) = (Path::new(&model), crate::speakers::vad().expect("Silero downloaded (speakers::ensure_vad)"));
+        let mut seed = 1u32;
+        let mut pcm: Vec<f32> = (0..16_000 * 8)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed >> 8) as f32 / (1u32 << 24) as f32 * 0.002 - 0.001 // about -60 dBFS of hiss
+            })
+            .collect();
+        for knock in (4_000..pcm.len() - 800).step_by(9_600) {
+            for (i, x) in pcm[knock..knock + 480].iter_mut().enumerate() {
+                *x += 0.6 * (-(i as f32) / 60.0).exp() * if i % 2 == 0 { 1.0 } else { -1.0 };
+            }
+        }
+        // Text with no letter or digit ("." or "...") is no speech to the app (cleanup::has_speech).
+        let nothing = |pcm: &[f32], what: &str| {
+            eprintln!("{what} without Silero: {:?}", transcribe_local(model, pcm, None, false, "", None));
+            let t = transcribe_local(model, pcm, None, false, "", Some(&vad)).unwrap();
+            assert!(!crate::cleanup::has_speech(&t), "{what} is not speech: {t:?}");
+        };
+        nothing(&pcm, "knocks");
+        nothing(&vec![0.0; 16_000 * 5], "silence");
+        // Recorded non-speech: taps, clicks, a snap (`ECHOTYPE_TEST_NOISE=a.wav:b.wav`).
+        for f in std::env::var("ECHOTYPE_TEST_NOISE").unwrap_or_default().split(':').filter(|f| !f.is_empty()) {
+            nothing(&crate::audio::decode(std::fs::read(f).unwrap(), Some("wav")).unwrap(), f);
+        }
+        if let Ok(wav) = std::env::var("ECHOTYPE_TEST_WAV") {
+            let speech = crate::audio::decode(std::fs::read(&wav).unwrap(), Some("wav")).unwrap();
+            let t = Instant::now();
+            assert!(has_voice(&vad, &speech));
+            eprintln!("Silero on {:.1} s of speech: {} ms", speech.len() as f32 / 16_000.0, t.elapsed().as_millis());
+            let text = transcribe_local(model, &speech, None, false, "", Some(&vad)).unwrap();
+            eprintln!("speech with Silero: {text}");
+            assert!(text.split_whitespace().count() >= 3, "speech still comes through: {text:?}");
+        }
+    }
 
     #[test]
     fn translate_capability_by_id() {
