@@ -38,9 +38,11 @@ const presets = [
   { id: 'custom', label: 'Custom', stt: true, cleanup: true, base_url: '', default_stt_model: '', default_cleanup_model: '', needs_key: false },
 ];
 // The same catalog, sizes and notes as stt.rs MODELS.
+const cancelled = new Set(); // cancel_download: download_model stops at its next step
 const models = [
   { id: 'large-v3-turbo-q5_0', label: 'Large v3 Turbo (Q5)', size_mb: 547, ram_mb: 761, downloaded: !q.has('onboarding') || q.get('model') === 'ready', note: 'Best default: near-large accuracy, fast, 99 languages. Cannot translate.' },
   { id: 'large-v3-turbo', label: 'Large v3 Turbo', size_mb: 1624, ram_mb: 1840, downloaded: false, note: 'Full-precision turbo. Slightly more accurate, twice the size. Cannot translate.' },
+  { id: 'large-v3-q5_0', label: 'Large v3 (Q5)', size_mb: 1031, ram_mb: 1608, downloaded: false, note: 'Most accurate, best for Hindi and other languages. Several times slower than Turbo; translates.' },
   { id: 'medium', label: 'Medium', size_mb: 1533, ram_mb: 1869, downloaded: false, note: 'Multilingual and translates to English (Hinglish → English).' },
   { id: 'small', label: 'Small', size_mb: 488, ram_mb: 717, downloaded: false, note: 'Multilingual, translates; lighter and less accurate than medium.' },
   { id: 'base.en', label: 'Base (English)', size_mb: 148, ram_mb: 316, downloaded: !q.has('onboarding'), note: 'English only. For low-memory machines.' },
@@ -51,7 +53,7 @@ const low = q.get('ram') === '8';
 const sys = { total_ram_gb: low ? 8 : 24, available_ram_gb: low ? 3.2 : 5.1, os: 'macos', arch: 'aarch64', can_autostart: q.get('appdir') !== '0', low_ram: low, cloud: q.has('cloud'),
   echotype_model_installed: true, echotype_model_mb: 940,
   cleaners: [{ id: 'echotype-clean', label: 'Echotype 1.5B', size_mb: 940, ram_mb: 1113, installed: true, automatic: true, warning: null }] };
-for (const m of models) Object.assign(m, { english_only: m.id.endsWith('.en'), translates: ['medium', 'small'].includes(m.id), fits: m.ram_mb + 2048 <= sys.available_ram_gb * 1024 });
+for (const m of models) Object.assign(m, { english_only: m.id.endsWith('.en'), translates: ['medium', 'small', 'large-v3-q5_0'].includes(m.id), fits: m.ram_mb + 2048 <= sys.available_ram_gb * 1024 });
 const rec = models.find(m => m.id === (low ? 'small' : 'large-v3-turbo-q5_0'));
 rec.recommended = true;
 // Automatic: the recommendation once downloaded, else the downloaded model closest in RAM (stt.rs auto_model).
@@ -104,12 +106,14 @@ const commands = {
     for (let i = 1; i <= steps; i++) {
       await wait(ms);
       if (q.get('dl') === 'stuck' && i > steps / 3) return new Promise(() => {});
+      if (cancelled.delete(id)) { emit('model-download', { id, downloaded: 0, total, done: true, error: 'Download cancelled' }); throw 'Download cancelled'; }
       emit('model-download', { id, downloaded: (total * i) / steps, total, done: false });
     }
     m.downloaded = true;
     emit('model-download', { id, downloaded: total, total, done: true });
     return null;
   },
+  cancel_download: ({ id }) => { cancelled.add(id); return null; },
   delete_model: ({ id }) => { models.find(x => x.id === id).downloaded = false; return null; },
   list_input_devices: () => [
     { name: 'MacBook Pro Microphone', bluetooth: false, default: true },

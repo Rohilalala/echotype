@@ -649,7 +649,7 @@ async function download(id) {
   progress[id] = 0;
   renderModels();
   try { await invoke('download_model', { id }); }
-  catch (e) { delete progress[id]; modelErr[id] = String(e); renderModels(); }
+  catch (e) { delete progress[id]; if (String(e) !== 'Download cancelled') modelErr[id] = String(e); renderModels(); }
 }
 
 function useModel(id) {
@@ -1556,6 +1556,7 @@ function obPrefsRender() {
     obLang('hinglish');
   }
   obLangRender();
+  renderObSpeed();
   obCleanRender();
   // Back from the recap lands on the last question.
   obQShow(document.documentElement.classList.contains('ob-back') ? obQs().length - 1 : 0, true);
@@ -1795,6 +1796,62 @@ async function finishOnboarding(page, away = false) {
 // ----- the speech model -----
 // The model onboarding waits for: Automatic's pick for this Mac, or the manual pick (advanced).
 const obWanted = () => (S.advanced ? models.find(m => m.id === S.stt.local_model) : models.find(m => m.recommended));
+
+// The speed slider: the speech models from quickest to most accurate (Medium is left to Settings:
+// it is for translating). Nothing is disabled; each stop says whether this Mac can run it.
+const OB_SPEED = ['tiny.en', 'base.en', 'small', 'large-v3-turbo-q5_0', 'large-v3-turbo', 'large-v3-q5_0'];
+const obSpeedModels = () => OB_SPEED.map(id => models.find(m => m.id === id)).filter(Boolean);
+const gb = mb => `${(mb / 1024).toFixed(1).replace(/\.0$/, '')} GB`;
+function obSpeedFit(m) {
+  const total = sys.total_ram_gb * 1024, free = sys.available_ram_gb * 1024;
+  if (m.fits) return ['ok', `Runs comfortably on this Mac (${gb(free)} free).`];
+  if (m.ram_mb + 2048 <= total) return ['warn', `Fits this Mac's ${Math.round(sys.total_ram_gb)} GB, but close some apps first: ${gb(free)} is free now.`];
+  return ['bad', `This Mac has ${Math.round(sys.total_ram_gb)} GB of memory and this needs about ${gb(m.ram_mb)}: it may slow everything down or not load.`];
+}
+function renderObSpeed(at) {
+  const list = obSpeedModels();
+  if (!list.length) return;
+  const slider = $('#obSpeed');
+  slider.max = list.length - 1;
+  if (at == null) at = Math.max(0, list.findIndex(m => m.id === obWanted()?.id));
+  slider.value = at;
+  const m = list[at];
+  slider.setAttribute('aria-valuetext', m.label);
+  $('#obSpeedName').textContent = m.label;
+  $('#obSpeedRec').hidden = !m.recommended;
+  $('#obSpeedNote').textContent = m.note;
+  $('#obSpeedMem').textContent = `${fmtMB(m.size_mb)} download · about ${gb(m.ram_mb)} of memory while you dictate${m.downloaded ? ' · already on this Mac' : ''}`;
+  let [tone, fit] = obSpeedFit(m);
+  if (m.english_only && S.languages.some(l => l !== 'en')) [tone, fit] = ['warn', `${fit} English only: it can't type your other languages.`];
+  $('#obSpeedFit').dataset.tone = tone;
+  $('#obSpeedFit').textContent = fit;
+}
+// Picking a stop: Automatic's own pick keeps Automatic; any other is a manual pick (advanced),
+// with Automatic's cleaner choices copied over so only the speech model changes. A download of a
+// model no longer chosen stops (tiny.en, the practice model, keeps going).
+function obSpeedPick(i) {
+  const m = obSpeedModels()[i], auto = models.find(x => x.recommended);
+  if (!m) return;
+  if (m.id === auto?.id) S.advanced = false;
+  else {
+    if (!S.advanced) {
+      S.cleaner_memory = sys.total_ram_gb * 1024 <= 8192 ? 'save' : 'ready';
+      const c = sys.cleaners?.find(x => x.automatic);
+      if (c) S.cleanup.model = S.cleanup.provider === 'echotype' ? c.id : S.cleanup.model;
+    }
+    S.advanced = true;
+    S.stt.local_model = m.id;
+  }
+  save();
+  for (const x of models) if (progress[x.id] != null && x.id !== m.id && x.id !== 'tiny.en') invoke('cancel_download', { id: x.id }).catch(() => {});
+  obQueue = obQueue.filter(id => id === 'tiny.en' || id === m.id);
+  obStartModel();
+  changed('advanced');
+  renderObSpeed(i);
+  renderObModel();
+}
+$('#obSpeed').addEventListener('input', e => renderObSpeed(+e.target.value)); // preview while sliding
+$('#obSpeed').addEventListener('change', e => obSpeedPick(+e.target.value));
 const obReady = () => S.stt.provider !== 'local' || !!sttModel()?.downloaded;
 const obDownloading = () => models.find(m => progress[m.id] != null);
 let obQueue = [], obFetching = false;
@@ -1832,7 +1889,10 @@ function obModelLanded(id) {
     save();
     renderLangNote();
   }
-  if (obStep === 4 && !$('#onboard').hidden) obLangRender();
+  if (obStep === 4 && !$('#onboard').hidden) {
+    obLangRender();
+    if (document.activeElement !== $('#obSpeed')) renderObSpeed(); // "already on this Mac", not mid-drag
+  }
   obDropTiny();
 }
 // tiny.en was only for the first practice run: once the real model is here and onboarding is
@@ -1907,6 +1967,7 @@ listen('audio-level', ({ payload }) => {
 });
 
 listen('model-download', ({ payload: p }) => {
+  if (p.error === 'Download cancelled') { delete progress[p.id]; renderModels(); renderObModel(); return; } // the slider moved on
   if (p.error) { delete progress[p.id]; modelErr[p.id] = p.error; renderModels(); renderObModel(); return; }
   if (p.done) {
     delete progress[p.id];

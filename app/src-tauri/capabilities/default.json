@@ -26,6 +26,7 @@
     "allow-list-models",
     "allow-download-model",
     "allow-delete-model",
+    "allow-cancel-download",
     "allow-list-input-devices",
     "allow-get-history",
     "allow-clear-history",

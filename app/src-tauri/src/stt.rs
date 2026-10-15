@@ -29,6 +29,7 @@ const HF_COMMIT: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
 pub const MODELS: &[Model] = &[
     Model { id: "large-v3-turbo-q5_0", label: "Large v3 Turbo (Q5)", size_mb: 547, note: "Best default: near-large accuracy, fast, 99 languages. Cannot translate.", sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2" },
     Model { id: "large-v3-turbo", label: "Large v3 Turbo", size_mb: 1624, note: "Full-precision turbo. Slightly more accurate, twice the size. Cannot translate.", sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69" },
+    Model { id: "large-v3-q5_0", label: "Large v3 (Q5)", size_mb: 1031, note: "Most accurate, best for Hindi and other languages. Several times slower than Turbo; translates.", sha256: "d75795ecff3f83b5faa89d1900604ad8c780abd5739fae406de19f23ecd98ad1" },
     Model { id: "medium", label: "Medium", size_mb: 1533, note: "Multilingual and translates to English (Hinglish → English).", sha256: "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208" },
     Model { id: "small", label: "Small", size_mb: 488, note: "Multilingual, translates; lighter and less accurate than medium.", sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b" },
     Model { id: "base.en", label: "Base (English)", size_mb: 148, note: "English only. For low-memory machines.", sha256: "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002" },
@@ -45,6 +46,9 @@ pub const MODELS: &[Model] = &[
 pub const RAM_MB: &[(&str, u64)] = &[
     ("large-v3-turbo-q5_0", 761),
     ("large-v3-turbo", 1840),
+    // 2026-10-16, same CLI run as the rest (peak footprint 1,608 MB, max RSS 1,579 MB); turbo-q5 read
+    // 806 MB in that session, so this machine's numbers had not drifted.
+    ("large-v3-q5_0", 1608),
     ("medium", 1869),
     ("small", 717),
     ("base.en", 316),
@@ -274,8 +278,26 @@ pub fn download(id: &str, progress: impl FnMut(u64, Option<u64>)) -> Result<(), 
 }
 
 /// Downloads `url` to `dest` through a .part file, kept only if its SHA-256 is `want`.
+/// Downloads the user called off (onboarding's speed slider moved past a model mid-download);
+/// fetch stops at its next chunk and deletes the .part file.
+static CANCELLED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+pub const DOWNLOAD_CANCELLED: &str = "Download cancelled";
+
+pub fn cancel_download(id: &str) {
+    CANCELLED.lock().unwrap_or_else(|e| e.into_inner()).push(models_dir().join(format!("ggml-{id}.bin")));
+}
+
+/// True once, for a download that was called off.
+fn take_cancel(dest: &Path) -> bool {
+    let mut c = CANCELLED.lock().unwrap_or_else(|e| e.into_inner());
+    let was = c.iter().any(|p| p == dest);
+    c.retain(|p| p != dest);
+    was
+}
+
 pub fn fetch(url: &str, dest: &Path, want: &str, mut progress: impl FnMut(u64, Option<u64>)) -> Result<(), String> {
     std::fs::create_dir_all(dest.parent().ok_or("bad model path")?).map_err(|e| e.to_string())?;
+    take_cancel(dest); // a cancel from an earlier attempt does not stop this one
     let part = dest.with_extension("part");
     let client = reqwest::blocking::Client::builder().timeout(None::<Duration>).connect_timeout(Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
     let mut resp = client.get(url).send().and_then(|r| r.error_for_status()).map_err(|e| format!("Download failed: {e}"))?;
@@ -289,6 +311,9 @@ pub fn fetch(url: &str, dest: &Path, want: &str, mut progress: impl FnMut(u64, O
             let n = resp.read(&mut buf).map_err(|e| format!("Download interrupted: {e}"))?;
             if n == 0 {
                 break;
+            }
+            if take_cancel(dest) {
+                return Err(DOWNLOAD_CANCELLED.to_string());
             }
             f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
             hasher.update(&buf[..n]);
@@ -703,6 +728,15 @@ mod tests {
         let text = transcribe_local(Path::new(&model), &pcm, &mine, false, "", None).unwrap();
         eprintln!("en+hi: {text}");
         assert!(text.chars().any(|c| ('\u{0900}'..='\u{097F}').contains(&c)), "Devanagari expected: {text:?}");
+    }
+
+    #[test]
+    fn a_cancelled_download_stops_once() {
+        let dest = models_dir().join("ggml-cancel-test.bin");
+        cancel_download("cancel-test");
+        assert!(take_cancel(&dest) && !take_cancel(&dest), "a cancel stops one download, not the next");
+        assert!(MODELS.iter().any(|m| m.id == "large-v3-q5_0" && translates(m.id)) && ram_of("large-v3-q5_0") > ram_of("large-v3-turbo-q5_0"));
+        assert_eq!(recommended(16 * 1024), "large-v3-turbo-q5_0", "adding large-v3 leaves Automatic's pick alone");
     }
 
     #[test]

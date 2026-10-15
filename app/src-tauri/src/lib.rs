@@ -921,6 +921,11 @@ async fn download_model(app: AppHandle, id: String) -> R<()> {
 }
 
 #[tauri::command]
+fn cancel_download(id: String) {
+    stt::cancel_download(&id);
+}
+
+#[tauri::command]
 async fn delete_model(id: String) -> R<()> {
     stt::delete(&id)
 }
@@ -1680,6 +1685,7 @@ pub fn run() {
             list_models,
             download_model,
             delete_model,
+            cancel_download,
             list_input_devices,
             get_history,
             clear_history,

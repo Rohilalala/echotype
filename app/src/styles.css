@@ -778,6 +778,17 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .ob-wide .ob-tile { align-items: center; text-align: center; min-height: 48px; padding: 10px 8px; }
 .ob-tiles.six { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
 
+/* Onboarding's speed slider: one speech model per stop, quicker to more accurate. */
+.ob-speed { width: 100%; margin: 6px 0 0; accent-color: var(--fg); }
+.ob-speed-ends { display: flex; justify-content: space-between; font-size: 12px; color: var(--fg-3); margin-top: 2px; }
+.ob-speed-info { margin-top: 14px; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: var(--r-card); background: var(--pane); display: grid; gap: 4px; font-size: 13px; color: var(--fg-2); }
+.ob-speed-info p { margin: 0; }
+.ob-speed-info + .lede { margin-top: 12px; }
+.ob-speed-name { display: flex; align-items: center; gap: 8px; color: var(--fg); font-size: 14px; }
+.ob-speed-fit[data-tone="ok"] { color: var(--ok); }
+.ob-speed-fit[data-tone="warn"] { color: var(--warn); }
+.ob-speed-fit[data-tone="bad"] { color: var(--bad); }
+
 /* Languages: toggle chips, up to 3 pressed (Settings → Language and onboarding). */
 .lang-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 14px 14px; }
 .ob-q .lang-chips { padding: 12px 0 0; }
