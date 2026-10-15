@@ -16,6 +16,8 @@
   body[data-bg="dark"] .card { background: rgba(30,31,34,.97); color: #ececee; }
   body[data-bg="light"] .card { background: rgba(252,252,253,.98); color: #1d1d1f; box-shadow: 0 30px 80px rgba(0,0,0,.18), 0 0 0 1px rgba(0,0,0,.08); }
   .card .content { position: absolute; left: 330px; right: 48px; top: 50%; transform: translateY(-50%); }
+  .card .welcome { position: absolute; left: 0; right: 0; top: 64%; text-align: center; font-size: 28px; font-weight: 600; letter-spacing: -.015em; opacity: 0; }
+  .card { overflow: hidden; }
   .card .content > * { opacity: 0; transform: translateY(10px); }
   .card h1 { font-size: 26px; font-weight: 600; letter-spacing: -.01em; margin: 0 0 10px; }
   .card p { margin: 0 0 22px; opacity: .72; }
@@ -35,7 +37,7 @@
 <div class="win"><i style="top:80px"></i><i style="top:104px;right:45%"></i><i style="top:128px"></i><i style="top:176px;right:38%"></i></div>
 <div class="veil" id="veil"></div>
 <div class="disc" id="disc"></div>
-<div class="card" id="card"><div class="dots"><i></i><i></i><i></i><i></i><i></i></div><div class="content"><h1>Hold a key. Talk. Let go.</h1><p>Echotype types what you say, in any app. First it needs your microphone. It listens only while you hold the key, and your voice never leaves this Mac.</p><button>Continue</button></div></div>
+<div class="card" id="card"><div class="welcome" id="welcome">Welcome to Echotype</div><div class="dots"><i></i><i></i><i></i><i></i><i></i></div><div class="content"><h1>Hold a key. Talk. Let go.</h1><p>Echotype types what you say, in any app. First it needs your microphone. It listens only while you hold the key, and your voice never leaves this Mac.</p><button>Continue</button></div></div>
 <canvas id="c"></canvas>
 <canvas id="a3"></canvas>
 <script type="module">
@@ -48,7 +50,11 @@ const veil = document.getElementById('veil'), strength = q.has('veil') ? Number(
 const card = document.getElementById('card'), items = [...card.querySelectorAll('.content > *')];
 // The setup window: centred, 680 x 420, the orb in its left column.
 const layout = (W, H) => { const w = Math.min(680, W - 80), h = 420, x = (W - w) / 2, y = (H - h) / 2; return { card: { x, y, w, h, r: 18 }, orb: { x: x + 165, y: y + h / 2, size: 150 } }; };
-const act3 = createAct3(document.getElementById('a3'), { dpr: Number(q.get('dpr')) || undefined, layout, light: document.body.dataset.bg === 'light' });
+// The pill's place: bottom centre, where the idle ball lives (10 px at the app's 1.5x zoom).
+const home = (W, H) => ({ x: W / 2, y: H - 34, r: 7.5 });
+const act3 = createAct3(document.getElementById('a3'), { dpr: Number(q.get('dpr')) || undefined, layout, home, light: document.body.dataset.bg === 'light' });
+const welcome = document.getElementById('welcome');
+const fadeIn = (t, a, d = 0.35) => { const k = Math.min(1, Math.max(0, (t - a) / d)); return 1 - (1 - k) ** 3; };
 const disc = document.getElementById('disc');
 const placeDisc = () => { const b = intro.ballAt(); Object.assign(disc.style, { left: b.x + 'px', top: b.y + 'px', width: b.r * 2.3 + 'px', height: b.r * 2.3 + 'px' }); };
 placeDisc();
@@ -56,16 +62,21 @@ window.__draw = t => {
   // The film until the ball has formed; from then on the live Act 3, from the same dots.
   if (t < ACT3.take) intro.draw(t); else intro.draw(-100);
   const a = act3.draw(t);
-  const L = layout(innerWidth, innerHeight);
-  Object.assign(card.style, { left: L.card.x + 'px', top: L.card.y + 'px', width: L.card.w + 'px', height: L.card.h + 'px', opacity: a.fill });
-  items.forEach((el, i) => { const k = Math.min(1, Math.max(0, (t - ACT3.content - i * 0.06) / 0.3)); const e = 1 - (1 - k) ** 3; el.style.opacity = e; el.style.transform = `translateY(${10 * (1 - e)}px)`; });
+  const R = a.rect || layout(innerWidth, innerHeight).card;
+  Object.assign(card.style, { left: R.x + 'px', top: R.y + 'px', width: R.w + 'px', height: R.h + 'px', borderRadius: (R.r || 18) + 'px', opacity: a.fill });
+  // "Welcome to Echotype" under the orb, until the orb moves left; then screen 1, until setup ends.
+  const w = fadeIn(t, ACT3.welcome, 0.5) * (1 - fadeIn(t, ACT3.left, 0.3));
+  welcome.style.opacity = w;
+  welcome.style.transform = `translateY(${8 * (1 - fadeIn(t, ACT3.welcome, 0.5))}px)`;
+  const gone = 1 - fadeIn(t, ACT3.finish, 0.25);
+  items.forEach((el, i) => { const e = fadeIn(t, ACT3.content + i * 0.06, 0.3); el.style.opacity = e * gone; el.style.transform = `translateY(${10 * (1 - e)}px)`; });
   veil.style.opacity = veilAt(t, intro.timeline.formed) * strength;
   const f = intro.timeline.formed;
   disc.style.opacity = t < ACT3.take ? Math.min(1, Math.max(0, (t - f + 0.5) / 0.7)) : 0;
 };
 if (q.has('t')) window.__draw(Number(q.get('t')));
 // Plays on a loop (10 s) so it can be watched over and over; click to restart.
-else { let t0 = performance.now(); addEventListener('click', () => (t0 = performance.now())); const loop = () => { window.__draw(((performance.now() - t0) / 1000) % 14); requestAnimationFrame(loop); }; loop(); }
+else { let t0 = performance.now(); addEventListener('click', () => (t0 = performance.now())); const loop = () => { window.__draw(((performance.now() - t0) / 1000) % 19.5); requestAnimationFrame(loop); }; loop(); }
 </script>
 </body>
 </html>
