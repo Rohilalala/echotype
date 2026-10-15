@@ -1243,7 +1243,7 @@ dependencies = [
  "cpal",
  "dirs 6.0.0",
  "enigo",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "keyring",
  "libc",
  "reqwest 0.12.28",
