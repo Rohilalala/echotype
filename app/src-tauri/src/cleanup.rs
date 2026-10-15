@@ -192,6 +192,12 @@ pub fn apply_replacements(text: &str, reps: &[Replacement]) -> String {
 }
 
 fn replace_word(text: &str, from: &str, to: &str) -> String {
+    replace_word_by(text, from, |_, _| Some(to.to_string()))
+}
+
+/// replace_word with the replacement chosen per hit from the matched text and what follows it
+/// (None keeps the hit as it was).
+fn replace_word_by(text: &str, from: &str, to: impl Fn(&[char], &[char]) -> Option<String>) -> String {
     let t: Vec<char> = text.chars().collect();
     let f: Vec<char> = from.chars().collect();
     let eq = |a: char, b: char| a == b || a.to_lowercase().eq(b.to_lowercase());
@@ -202,13 +208,69 @@ fn replace_word(text: &str, from: &str, to: &str) -> String {
             && t[i..i + f.len()].iter().zip(&f).all(|(a, b)| eq(*a, *b))
             && boundary(if i == 0 { None } else { t.get(i - 1) })
             && boundary(t.get(i + f.len()));
-        if hit {
-            out.push_str(to);
+        if let Some(r) = hit.then(|| to(&t[i..i + f.len()], &t[i + f.len()..])).flatten() {
+            out.push_str(&r);
             i += f.len();
         } else {
             out.push(t[i]);
             i += 1;
         }
+    }
+    out
+}
+
+/// Contractions both styles swap, long form first. `true`: the short form needs a word after it
+/// ("Yes, I am." is not "Yes, I'm.").
+const CONTRACTIONS: [(&str, &str, bool); 18] = [
+    ("do not", "don't", false), ("does not", "doesn't", false), ("did not", "didn't", false),
+    ("is not", "isn't", false), ("are not", "aren't", false), ("was not", "wasn't", false),
+    ("were not", "weren't", false), ("have not", "haven't", false), ("has not", "hasn't", false),
+    ("had not", "hadn't", false), ("will not", "won't", false), ("would not", "wouldn't", false),
+    ("could not", "couldn't", false), ("should not", "shouldn't", false), ("cannot", "can't", false),
+    ("can not", "can't", false), ("I am", "I'm", true), ("let us", "let's", true),
+];
+
+/// Casual or formal for the built-in model, which was trained on one short prompt and copies an
+/// added "Style:" line into its output (bench v1, REPORT.md §9). Only swaps that keep the meaning:
+/// contractions and the full stop. Casual: "do not" → "don't", and a one-line message under 13
+/// words loses its full stop, as in chat. Formal: "don't" → "do not", "gonna" → "going to", a
+/// capital first letter and a closing full stop.
+// ponytail: fixed word lists, English only; "'s"/"'d" are left alone (is or has, would or had).
+pub fn restyle(text: &str, style: &str) -> String {
+    let cap = |s: &str, like: &[char]| match (like.first().is_some_and(|c| c.is_uppercase()), s.chars().next()) {
+        (true, Some(c)) => c.to_uppercase().chain(s.chars().skip(1)).collect(),
+        _ => s.to_string(),
+    };
+    let word_next = |rest: &[char]| rest.first() == Some(&' ') && rest.get(1).is_some_and(|c| c.is_alphabetic());
+    let mut out = text.to_string();
+    match style {
+        "casual" => {
+            for (long, short, needs_word) in CONTRACTIONS {
+                out = replace_word_by(&out, long, |hit, rest| (!needs_word || word_next(rest)).then(|| cap(short, hit)));
+            }
+            if let Some(body) = out.trim_end().strip_suffix('.') {
+                let one_line = !body.contains(['.', '!', '?', '\n']); // also not "..."
+                if one_line && body.split_whitespace().count() < 13 {
+                    out = body.to_string();
+                }
+            }
+        }
+        "formal" => {
+            let slang = [("gonna", "going to"), ("wanna", "want to"), ("gotta", "have to"), ("kinda", "kind of")];
+            let long = CONTRACTIONS.iter().filter(|(l, ..)| *l != "can not").map(|(l, s, _)| (*s, *l));
+            for (short, long) in long.chain(slang) {
+                for short in [short.to_string(), short.replace('\'', "’")] {
+                    out = replace_word_by(&out, &short, |hit, _| Some(cap(long, hit)));
+                }
+            }
+            if let Some(c) = out.chars().next().filter(|c| c.is_lowercase()) {
+                out = c.to_uppercase().chain(out.chars().skip(1)).collect();
+            }
+            if !out.contains('\n') && out.trim_end().ends_with(|c: char| c.is_alphanumeric()) {
+                out = format!("{}.", out.trim_end());
+            }
+        }
+        _ => {}
     }
     out
 }
@@ -447,7 +509,8 @@ fn after_stt(s: &Settings, raw: String, stt_ms: u64, mut warning: Option<String>
         match llm(s, &text) {
             Ok(c) if !c.is_empty() => match rejected(s, &text, &c) {
                 Some(w) => (warning, cleaned) = (Some(w.into()), Some(c)),
-                None => text = c,
+                // The built-in model ignores the style in its prompt (see restyle); others follow it.
+                None => text = if s.cleanup.provider == "echotype" { restyle(&c, &s.cleanup.style) } else { c },
             },
             // The Echotype model was trained to answer filler-only input with nothing: no speech.
             // It also drops some one-word answers ("No.", "Yes.", "Nope."), so real words are kept.
@@ -617,6 +680,32 @@ mod tests {
         let o = after_stt(&s, raw.into(), 1, None, false, true, || {}, |_, _| Ok("1. Blueberries".into()));
         assert_eq!(o.text, raw, "the words as spoken");
         assert!(o.warning.is_some_and(|w| w.contains("number")));
+    }
+
+    #[test]
+    fn styles_swap_contractions_and_the_full_stop_only() {
+        assert_eq!(restyle("I do not think I am coming. It is not ready.", "casual"), "I don't think I'm coming. It isn't ready.");
+        assert_eq!(restyle("Do not forget the invoice.", "casual"), "Don't forget the invoice", "a short chat line loses its full stop");
+        assert_eq!(restyle("Yes, I am.", "casual"), "Yes, I am", "no contraction at the end of a clause");
+        assert_eq!(restyle("We cannot ship. Let us wait.", "casual"), "We can't ship. Let's wait.", "two sentences keep their stops");
+        assert_eq!(restyle("Groceries:\n- Eggs\n- Milk", "casual"), "Groceries:\n- Eggs\n- Milk");
+        assert_eq!(restyle("don't forget, I'm gonna send it", "formal"), "Do not forget, I am going to send it.");
+        assert_eq!(restyle("We can’t ship and won't wait.", "formal"), "We cannot ship and will not wait.", "curly apostrophes too");
+        assert_eq!(restyle("It's done and I'd go.", "formal"), "It's done and I'd go.", "'s and 'd are ambiguous: left alone");
+        assert_eq!(restyle("कल मीटिंग नहीं होगी.", "casual"), "कल मीटिंग नहीं होगी");
+        for t in ["Don't stop.", "do not", "Hello."] {
+            assert_eq!(restyle(t, "default"), t);
+            assert_eq!(restyle(t, "verbatim"), t);
+        }
+        let mut s = Settings::default();
+        s.cleanup.enabled = true;
+        s.cleanup.style = "formal".into();
+        s.cleanup.provider = "echotype".into();
+        let o = after_stt(&s, "don't forget the invoice".into(), 1, None, false, true, || {}, |_, _| Ok("Don't forget the invoice.".into()));
+        assert_eq!(o.text, "Do not forget the invoice.", "the built-in model's cleanup is restyled");
+        s.cleanup.provider = "groq".into();
+        let o = after_stt(&s, "don't forget the invoice".into(), 1, None, false, true, || {}, |_, _| Ok("Don't forget the invoice.".into()));
+        assert_eq!(o.text, "Don't forget the invoice.", "other providers style it from the prompt");
     }
 
     // Raw whisper text and the 1.5B model's cleanup, from the owner's history.jsonl on 2026-10-16.
