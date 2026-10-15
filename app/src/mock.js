@@ -10,7 +10,8 @@ const settings = {
   hotkey: 'Alt+Space', mode: 'hold', input_device: null, languages: [], translate_to_english: false,
   local_api: { enabled: false, port: 7811 },
   stt: { provider: 'local', local_model: q.has('onboarding') ? '' : 'large-v3-turbo-q5_0', model: '', base_url: '' },
-  cleanup: { enabled: !q.has('nocleanup'), provider: 'ollama', model: 'gemma3:4b', base_url: '', style: 'default', custom_instructions: '' },
+  cleanup: { enabled: !q.has('nocleanup'), provider: 'ollama', model: 'gemma3:4b', base_url: '', style: 'default', custom_instructions: '',
+    match_app: q.has('apps'), app_styles: q.has('apps') ? [{ id: 'com.apple.Terminal', name: 'Terminal', style: '' }, { id: 'com.google.Chrome', name: 'Google Chrome', style: 'casual' }] : [] },
   dictionary: ['Echotype', 'Tauri', 'Hinglish', 'Supabase'],
   replacements: [{ from: 'my email', to: 'aditya@example.com' }],
   restore_clipboard: true, history_enabled: true,
@@ -130,6 +131,8 @@ const commands = {
       needs_relaunch: talk && im && relaunch, unregistered_shortcuts: q.has('shortcutfail') && settings.hotkey === 'Alt+Space' ? ['hotkey'] : [], key_label: '⌥ Space' };
   },
   relaunch: () => null,
+  // ?apps turns on "Match the app you're typing in", with a last dictation into Slack.
+  last_app: () => (q.has('apps') ? { id: 'com.tinyspeck.slackmacgap', name: 'Slack', style: 'casual' } : null),
   get_history: ({ limit }) => (settings.history_enabled ? history.slice(0, limit) : []),
   update_history: ({ ts, text }) => {
     const e = history.find(x => x.ts === ts);

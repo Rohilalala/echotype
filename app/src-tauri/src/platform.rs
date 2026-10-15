@@ -273,8 +273,15 @@ pub fn request_microphone() {
     mac::request_microphone();
 }
 
-/// The name of the app in front, unless it is Echotype itself. Asked on the main thread.
-pub fn frontmost_app(app: &AppHandle) -> Option<String> {
+/// The app in front: its bundle id ("" when it has none) and name.
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct FrontApp {
+    pub id: String,
+    pub name: String,
+}
+
+/// The app in front, unless it is Echotype itself. Asked on the main thread.
+pub fn frontmost_app(app: &AppHandle) -> Option<FrontApp> {
     #[cfg(target_os = "macos")]
     {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -471,9 +478,9 @@ mod mac {
         }
     }
 
-    /// [[NSWorkspace sharedWorkspace] frontmostApplication].localizedName, unless it is this process.
-    /// Main thread only (the result is autoreleased into the main run loop's pool).
-    pub fn frontmost_app() -> Option<String> {
+    /// [[NSWorkspace sharedWorkspace] frontmostApplication]'s bundleIdentifier and localizedName,
+    /// unless it is this process. Main thread only (the result is autoreleased into the main run loop's pool).
+    pub fn frontmost_app() -> Option<super::FrontApp> {
         // SAFETY: each objc_msgSend cast matches its selector (no arguments; returning an object, an
         // NSInteger-sized pid_t or a C string); every returned pointer is checked for null.
         unsafe {
@@ -491,13 +498,13 @@ mod mac {
             if pid(front, sel(c"processIdentifier")) == std::process::id() as i32 {
                 return None;
             }
-            let name = msg0(front, sel(c"localizedName"));
-            if name.is_null() {
-                return None;
-            }
             let utf8: extern "C" fn(*const c_void, *const c_void) -> *const c_char = std::mem::transmute(objc_msgSend as *const ());
-            let p = utf8(name, sel(c"UTF8String"));
-            (!p.is_null()).then(|| std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned())
+            let text = |s: *const c_void| {
+                let p = if s.is_null() { std::ptr::null() } else { utf8(s, sel(c"UTF8String")) };
+                (!p.is_null()).then(|| std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned())
+            };
+            let name = text(msg0(front, sel(c"localizedName")))?;
+            Some(super::FrontApp { id: text(msg0(front, sel(c"bundleIdentifier"))).unwrap_or_default(), name })
         }
     }
 
