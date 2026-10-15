@@ -29,7 +29,6 @@ const COMMANDS: &[&str] = &[
     "focus_main",
     "mic_check",
     "play_sound",
-    "open_textedit",
     "reset_accessibility",
     "quit_app",
     "film_window",

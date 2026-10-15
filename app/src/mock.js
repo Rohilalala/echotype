@@ -184,7 +184,6 @@ const commands = {
   },
   focus_main: () => 'TextEdit',
   play_sound: () => null,
-  open_textedit: () => null,
   quit_app: () => null,
   cloud_start_login: async ({ email }) => {
     await wait(500);

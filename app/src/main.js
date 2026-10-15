@@ -1233,7 +1233,7 @@ function obShow(n, first = false) {
 function obEnter(n) {
   const to = $(`.ob-step[data-step="${n}"]`);
   if (S.onboard_step !== n) { S.onboard_step = n; save(true); } // a relaunch resumes here
-  if (filming()) invoke('film_float', { on: n !== 3 }).catch(() => {}); // step 3 brings System Settings and TextEdit in front
+  if (filming()) invoke('film_float', { on: n !== 3 }).catch(() => {}); // step 3 brings System Settings in front
   $$('#obDots li').forEach((li, i) => { li.className = i + 1 === n ? 'on' : i + 1 < n ? 'done' : ''; });
   $('#obDots').ariaLabel = `Setup, step ${n} of 5`;
   orb.slot(to.querySelector('.ob-orb'));
@@ -1403,7 +1403,6 @@ function obMicRender() {
 function renderObKeys() {
   $('#obSay').replaceChildren(`${verb()} `, h('span', { className: 'keys' }, talkCaps()), ' and say: ', h('q', {}, SAY));
   $('#obKeys').replaceChildren(...talkCaps().map(k => { k.classList.toggle('wide', k.textContent.length > 2); return k; }));
-  $('#obTryKeys').replaceChildren(verb().toLowerCase(), ' ', h('span', { className: 'keys' }, talkCaps()));
   $('#obTip').replaceChildren('Tip: tap ', h('span', { className: 'keys' }, talkCaps()), ' twice to keep talking hands-free.');
 }
 // The model line counts the download; the orb wears a ring until a model is ready.
@@ -1422,7 +1421,6 @@ listen('hotkey-state', ({ payload: down }) => {
 function obDictation(p) {
   if ($('#onboard').hidden) return;
   if (obStep === 2) obPractice(p);
-  else if (obStep === 3 && ob.ax) obRealPaste(p);
   else return;
   if (p.state !== 'recording') orb.level(0);
   obFoot();
@@ -1473,7 +1471,8 @@ function obReveal(text) {
   $('#obResult').replaceChildren(...words.flatMap((w, i) => [i ? ' ' : '', h('span', { className: 'w', style: `--d:${Math.round(i * step)}ms` }, w)]));
 }
 
-// ----- 3: Accessibility, then a real paste -----
+// ----- 3: Accessibility -----
+// Once it's on, the step says so and moves on by itself; no trial paste in another app.
 function obAxStatus(on) {
   const was = ob.ax;
   ob.ax = on;
@@ -1484,15 +1483,13 @@ function obAxStatus(on) {
     invoke('play_sound', { name: 'lock' }).catch(() => {});
     orb.set('check');
     later('orb', 1400, () => obStep === 3 && !BUSY.includes(dictation.state) && orb.set('orb'));
-    $('#obPasteState').textContent = 'Pasting is on.';
-    $('#obPasteState').dataset.tone = 'ok';
+    later('adv', 1600, () => obStep === 3 && obShow(4));
   }
   obAxRender();
 }
 function obAxRender() {
   $('#obAxAsk').hidden = !!ob.ax;
   pop($('#obAxTry'), !!ob.ax);
-  $('#obTextEdit').hidden = !isMac;
   $('#obAxState').textContent = ob.asked ? 'Switch on Echotype in the list. This page carries on by itself.' : 'Without it, your words wait on the clipboard for you to paste.';
   obFoot();
 }
@@ -1503,28 +1500,6 @@ $('#obReset').addEventListener('click', async () => {
   try { await invoke('reset_accessibility'); $('#obAxState').textContent = 'Asked again. Switch on Echotype in the list.'; }
   catch (e) { $('#obAxState').textContent = String(e); }
 });
-$('#obTextEdit').addEventListener('click', () => invoke('open_textedit').catch(e => ($('#obPasteState').textContent = String(e))));
-
-async function obRealPaste(p) {
-  const st = $('#obPasteState');
-  st.dataset.tone = '';
-  if (p.state === 'recording') { orb.set('orb'); st.textContent = 'Listening…'; return; }
-  if (p.state === 'transcribing' || p.state === 'cleaning') { orb.set('think'); st.textContent = 'Writing it down…'; return; }
-  if (p.state === 'hint' || p.state === 'error') { orb.set('orb'); st.textContent = p.state === 'hint' ? obHint(p.message) : p.error || ''; return; }
-  if (p.state !== 'done' || !p.text) return;
-  orb.set('orb');
-  if (p.card) { st.textContent = 'Nothing had the cursor, so your words are on the pill. Click into a text box first.'; return; }
-  if (p.copied) { st.textContent = 'That went to the clipboard, because Echotype was in front. Click into another app’s text box first.'; return; }
-  // Pasted for real: the orb pulses, then, once the text has landed, the window comes back and says where.
-  orb.set('check');
-  orb.burst(0.5);
-  st.textContent = 'Typed where your cursor was.';
-  st.dataset.tone = 'ok';
-  await wait(700);
-  const app = await invoke('focus_main').catch(() => null);
-  if (app && obStep === 3) st.textContent = `Typed into ${app}.`;
-  later('adv', 1800, () => obStep === 3 && obShow(4));
-}
 
 // ----- 4: make it yours -----
 // One question at a time (.ob-q). A tile saves as it's picked and, a beat later, the next question

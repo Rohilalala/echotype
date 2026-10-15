@@ -1271,16 +1271,6 @@ async fn play_sound(app: AppHandle, name: String) -> R<()> {
     Ok(())
 }
 
-/// "Open TextEdit": a blank document to try a real paste in.
-#[tauri::command]
-async fn open_textedit(app: AppHandle) -> R<()> {
-    let path = std::env::temp_dir().join("Try Echotype.txt");
-    if !path.exists() {
-        std::fs::write(&path, "").map_err(|e| e.to_string())?;
-    }
-    app.opener().open_path(path.to_string_lossy(), Some("TextEdit")).map_err(|e| e.to_string())
-}
-
 /// "Reset and ask again": drops a stale Accessibility entry, asks again and opens the pane.
 #[tauri::command]
 async fn reset_accessibility(app: AppHandle) -> R<()> {
@@ -1673,7 +1663,6 @@ pub fn run() {
             focus_main,
             mic_check,
             play_sound,
-            open_textedit,
             reset_accessibility,
             quit_app,
             film_window,
