@@ -43,6 +43,7 @@
 <script type="module">
 import { createIntro, veilAt } from './intro.js';
 import { createAct3, ACT3 } from './intro-act3.js';
+import { createScore } from './intro-score.js';
 const q = new URLSearchParams(location.search);
 document.body.dataset.bg = q.get('bg') || 'dark';
 const intro = createIntro(document.getElementById('c'), { dpr: Number(q.get('dpr')) || undefined });
@@ -75,8 +76,18 @@ window.__draw = t => {
   disc.style.opacity = t < ACT3.take ? Math.min(1, Math.max(0, (t - f + 0.5) / 0.7)) : 0;
 };
 if (q.has('t')) window.__draw(Number(q.get('t')));
-// Plays on a loop (10 s) so it can be watched over and over; click to restart.
-else { let t0 = performance.now(); addEventListener('click', () => (t0 = performance.now())); const loop = () => { window.__draw(((performance.now() - t0) / 1000) % 19.5); requestAnimationFrame(loop); }; loop(); }
+// Plays on a loop (19.5 s) so it can be watched over and over; click to restart with sound
+// (browsers only allow audio after a click).
+else {
+  const score = createScore(); let t0 = performance.now(), sound = false, lap = 0;
+  addEventListener('click', () => { t0 = performance.now(); lap = 0; sound = !q.has('mute'); if (sound) score.start(); });
+  const loop = () => {
+    const s = (performance.now() - t0) / 1000, l = Math.floor(s / 19.5);
+    if (l !== lap) { lap = l; if (sound) score.start(); }
+    window.__draw(s % 19.5); requestAnimationFrame(loop);
+  };
+  loop();
+}
 </script>
 </body>
 </html>
