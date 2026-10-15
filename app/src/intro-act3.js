@@ -2,9 +2,9 @@
 // the ball has formed, from exactly the same dot positions, so there is no cut. The ball hops and
 // twirls, flows into the orb where it is, the setup window grows out from behind it and says
 // welcome, then the orb's dots move to the window's left column under real physics (each dot a
-// mass on a spring, released in a ripple). At the end of setup the dots stream back to the centre,
-// the window shrinks away behind them, and they fall under gravity to the pill's place at the
-// bottom of the screen, bounce, and settle into the idle ball.
+// mass on a critically damped spring following a gliding target, released in a ripple). At the end
+// of setup the dots glide back to the centre, the window shrinks away behind them, and they fall
+// under gravity to the pill's place at the bottom of the screen and settle into the idle ball.
 //
 // Physics needs history, so the simulation steps at a fixed 240 Hz from Act 3's start to the
 // requested time (and starts over when asked for an earlier one): any frame can be drawn.
@@ -16,6 +16,7 @@ const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
 const ease = x => x * x * (3 - 2 * x);
 const out3 = x => 1 - (1 - x) ** 3;
 const inOut = x => (x < 0.5 ? 4 * x * x * x : 1 - (-2 * x + 2) ** 3 / 2);
+const glide = x => (1 - Math.cos(Math.PI * x)) / 2;
 const span = (t, a, b) => clamp((t - a) / (b - a));
 const lerp = (a, b, k) => a + (b - a) * k;
 
@@ -29,13 +30,15 @@ export const ACT3 = {
   card: 9.55, carded: 10.3,       // the window grows out from behind the orb
   fill: 10.0, filled: 10.4,
   welcome: 10.45,                 // "Welcome to Echotype"
-  left: 12.3,                     // the orb moves to the left column
-  content: 12.9,                  // screen 1 comes in
-  finish: 15.2,                   // setup is done: back to the centre
-  shrink: 15.6, shrunk: 16.2,     // the window shrinks away behind the orb
-  fall: 16.35,                    // the dots fall to the pill
-  landed: 17.6,
+  left: 12.3,                     // the orb glides to the left column (MOVE s)
+  content: 13.3,                  // screen 1 comes in
+  finish: 15.6,                   // setup is done: back to the centre (MOVE s)
+  shrink: 16.3, shrunk: 17.0,     // the window shrinks away behind the orb
+  fall: 17.2,                     // the dots fall to the pill, FALL s each, set off a little apart
+  landed: 18.4,
+  end: 20.6,
 };
+export const MOVE = 1.4, FALL = 1.0, FALL_LAG = 0.35;
 
 const STEP = 1 / 240;
 
@@ -65,12 +68,12 @@ export function createAct3(canvas, { n = 520, r = 46, tilt = 0.42, spin = 0.6, d
     let cy = H / 2, sx = 1, sy = 1, turn = (t - ACT3.take) * 0.35;
     const crouch = span(t, ACT3.hop - 0.12, ACT3.hop), up = span(t, ACT3.hop, ACT3.land);
     if (t < ACT3.hop) { sy = 1 - 0.1 * ease(crouch); sx = 1 + 0.08 * ease(crouch); }
-    else if (t < ACT3.land) { cy -= 38 * Math.sin(Math.PI * up); sy = 1 + 0.08 * Math.sin(Math.PI * up); sx = 1 - 0.05 * Math.sin(Math.PI * up); }
+    else if (t < ACT3.land) { cy -= 22 * Math.sin(Math.PI * up); sy = 1 + 0.05 * Math.sin(Math.PI * up); sx = 1 - 0.03 * Math.sin(Math.PI * up); }
     const since = t - ACT3.land;
-    if (since > 0) { const k = Math.exp(-since * 9) * Math.cos(since * 26); sy *= 1 - 0.12 * k; sx *= 1 + 0.1 * k; }
+    if (since > 0) { const k = Math.exp(-since * 11) * Math.cos(since * 16); sy *= 1 - 0.05 * k; sx *= 1 + 0.04 * k; }
     const tw = span(t, ACT3.twirl, ACT3.twirled);
     turn += TAU * inOut(tw);
-    if (tw > 0 && tw < 1) cy -= 16 * Math.sin(Math.PI * tw);
+    if (tw > 0 && tw < 1) cy -= 8 * Math.sin(Math.PI * tw);
     return { cx, cy, sx, sy, turn };
   }
   function project(v, b) {
@@ -82,11 +85,11 @@ export function createAct3(canvas, { n = 520, r = 46, tilt = 0.42, spin = 0.6, d
 
   // ----- where things are -----
   // The orb's centre: the middle of the screen (a little above the window's centre, so "Welcome"
-  // fits under it), then the window's left column, then the middle again for the way home.
+  // fits under it), gliding to the window's left column, and back to the middle for the way home.
   function orbHome(t, L) {
     const mid = { x: W / 2, y: L.card.y + L.card.h * 0.4 };
-    if (t < ACT3.left || t >= ACT3.finish) return mid;
-    return { x: L.orb.x, y: L.orb.y };
+    const k = glide(span(t, ACT3.left, ACT3.left + MOVE)) * (1 - glide(span(t, ACT3.finish, ACT3.finish + MOVE)));
+    return { x: lerp(mid.x, L.orb.x, k), y: lerp(mid.y, L.orb.y, k) };
   }
   // The idle ball at the bottom of the screen: a sunflower disc, as the pill draws it.
   const BALL = 90;
@@ -95,13 +98,12 @@ export function createAct3(canvas, { n = 520, r = 46, tilt = 0.42, spin = 0.6, d
     return [P.x + rr * Math.cos(th), P.y + rr * Math.sin(th)];
   }
 
-  // Where dot i is pulled at time t, and how hard (null while it falls).
+  // Where dot i is pulled at time t (null once it falls). Each dot follows the orb a little late,
+  // so the swarm flows rather than moving as one block.
   function target(i, t, frame, L) {
-    if (t >= ACT3.fall) return null;
-    const d = frame.get(i), o = orbHome(t, L), size = L.orb.size;
-    const moving = t >= ACT3.left && t < ACT3.finish;
-    if (!d) return { x: o.x, y: o.y, k: 40, z: 0.55 };
-    return { x: o.x - size / 2 + d.x, y: o.y - size / 2 + d.y, k: moving ? 55 : 70, z: moving ? 0.5 : 0.55 };
+    if (t >= ACT3.fall + jitter[i] * FALL_LAG) return null;
+    const d = frame.get(i), o = orbHome(t - jitter[i] * 0.18, L), size = L.orb.size;
+    return d ? { x: o.x - size / 2 + d.x, y: o.y - size / 2 + d.y } : o;
   }
 
   const orbFrame = (t, L) => new Map(MODE_FRAMES[LISTEN.mode](L.orb.size, Math.max(0, t - ACT3.form) * LISTEN.speed, LISTEN.opts).dots.map(d => [d.i, d]));
@@ -122,28 +124,23 @@ export function createAct3(canvas, { n = 520, r = 46, tilt = 0.42, spin = 0.6, d
     }
     const frame = orbFrame(t, L), P = home(W, H);
     sim.p.forEach((q, i) => {
-      // A ripple: dots set off a little apart at each move, so the swarm flows rather than jumps.
-      const lag = jitter[i] * 0.22;
-      let tt = t;
-      if (t >= ACT3.left && t < ACT3.left + lag) tt = ACT3.left - 0.001;
-      if (t >= ACT3.finish && t < ACT3.finish + lag) tt = ACT3.finish - 0.001;
-      if (t >= ACT3.fall && t < ACT3.fall + lag * 1.6) tt = ACT3.fall - 0.001;
-      const T = target(i, tt, frame, L);
+      const T = target(i, t, frame, L);
       if (T) {
-        // A mass on a spring, a little under-damped: it overshoots slightly and settles.
-        const k = T.k * 4, c = 2 * Math.sqrt(k) * T.z;
+        // A mass on a critically damped spring: it follows without overshoot or wobble.
+        const k = 280, c = 2 * Math.sqrt(k);
         q.vx += (k * (T.x - q.x) - c * q.vx) * STEP;
         q.vy += (k * (T.y - q.y) - c * q.vy) * STEP;
       } else {
-        // Falling to the pill: gravity, steered sideways to its place in the ball, one bounce off
-        // the ground, then held there by a stiff spring.
+        // Falling to the pill: gravity sized so every dot takes FALL s whatever the screen's height,
+        // steered sideways to its place in the ball, then caught softly (no bounce).
         const [tx, ty] = ballSlot(i, P);
-        q.vx += (60 * (tx - q.x) - 9 * q.vx) * STEP;
-        if (!q.bounced) {
-          q.vy += 2600 * STEP;
-          if (q.y >= ty && q.vy > 0) { q.y = ty; q.vy *= -0.32; q.bounced = true; }
+        q.g ??= (2 * Math.max(40, ty - q.y)) / FALL ** 2;
+        q.vx += (40 * (tx - q.x) - 2 * Math.sqrt(40) * q.vx) * STEP;
+        if (!q.landed) {
+          q.vy += q.g * STEP;
+          if (q.y >= ty && q.vy > 0) { q.y = ty; q.vy *= 0.25; q.landed = true; }
         } else {
-          q.vy += (900 * (ty - q.y) - 40 * q.vy) * STEP;
+          q.vy += (1600 * (ty - q.y) - 80 * q.vy) * STEP;
         }
       }
       q.x += q.vx * STEP;
@@ -154,7 +151,7 @@ export function createAct3(canvas, { n = 520, r = 46, tilt = 0.42, spin = 0.6, d
   function advance(t) {
     if (!sim || t < sim.t) {
       const b = ballAt(ACT3.take);
-      sim = { t: ACT3.take, p: sphere.map(v => { const [x, y] = project(v, b); return { x, y, vx: 0, vy: 0, bounced: false }; }) };
+      sim = { t: ACT3.take, p: sphere.map(v => { const [x, y] = project(v, b); return { x, y, vx: 0, vy: 0, landed: false }; }) };
     }
     while (sim.t + STEP <= t) {
       sim.t += STEP;
@@ -185,11 +182,12 @@ export function createAct3(canvas, { n = 520, r = 46, tilt = 0.42, spin = 0.6, d
     return { R, grow, fill };
   }
 
-  /** Draws at film time t; returns the window's rect and fill for the page's own window element. */
+  /** Draws at film time t; returns the window's rect and fill for the page's own window element,
+   *  and the dots' mean speed for the score. */
   function draw(t) {
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, W, H);
-    if (t < ACT3.take) return { fill: 0 };
+    if (t < ACT3.take) return { fill: 0, motion: 0 };
     const L = layout(W, H);
     advance(t);
     const win = windowAt(t, L);
@@ -278,7 +276,9 @@ export function createAct3(canvas, { n = 520, r = 46, tilt = 0.42, spin = 0.6, d
       g.arc(p.x, p.y, Math.max(0.3, p.r), 0, TAU);
       g.fill();
     }
-    return { fill: win.fill, rect: win.R };
+    // How fast the dots are moving on average (px/s): the score follows it.
+    const motion = sim.p.reduce((s, q) => s + Math.hypot(q.vx, q.vy), 0) / n;
+    return { fill: win.fill, rect: win.R, motion };
   }
 
   size();

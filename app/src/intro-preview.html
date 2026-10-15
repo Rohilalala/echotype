@@ -74,17 +74,18 @@ window.__draw = t => {
   veil.style.opacity = veilAt(t, intro.timeline.formed) * strength;
   const f = intro.timeline.formed;
   disc.style.opacity = t < ACT3.take ? Math.min(1, Math.max(0, (t - f + 0.5) / 0.7)) : 0;
+  return a.motion;
 };
 if (q.has('t')) window.__draw(Number(q.get('t')));
-// Plays on a loop (19.5 s) so it can be watched over and over; click to restart with sound
+// Plays on a loop (ACT3.end s) so it can be watched over and over; click to restart with sound
 // (browsers only allow audio after a click).
 else {
   const score = createScore(); let t0 = performance.now(), sound = false, lap = 0;
   addEventListener('click', () => { t0 = performance.now(); lap = 0; sound = !q.has('mute'); if (sound) score.start(); });
   const loop = () => {
-    const s = (performance.now() - t0) / 1000, l = Math.floor(s / 19.5);
+    const s = (performance.now() - t0) / 1000, l = Math.floor(s / ACT3.end);
     if (l !== lap) { lap = l; if (sound) score.start(); }
-    window.__draw(s % 19.5); requestAnimationFrame(loop);
+    const m = window.__draw(s % ACT3.end); if (sound) score.motion(m); requestAnimationFrame(loop);
   };
   loop();
 }

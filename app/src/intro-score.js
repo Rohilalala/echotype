@@ -1,154 +1,147 @@
-// The first-launch film's score, synthesised with Web Audio: no audio files to ship or license,
-// and every cue lands on the film's own timeline (intro.js for the stars, ACT3 for the rest).
-import { ACT3 as A } from './intro-act3.js';
+// The first-launch film's score, synthesised with Web Audio: no audio files to ship or license.
+// Four chimes, on beats the film makes deterministic: the ball forms, it twirls, "Welcome to
+// Echotype", and the dots settle home. Under them a pad and a shimmer that follows the dots' actual
+// speed (fed every frame through motion()). After the welcome the music fades to almost nothing:
+// setup asks the user to speak, so it stays out of the way.
+import { ACT3 as A, MOVE, FALL, FALL_LAG } from './intro-act3.js';
 
-const COLLAPSE = 4.0, FORMED = 6.9, END = 19.5;
+const COLLAPSE = 4.0, FORMED = 6.9;
 const hz = m => 440 * 2 ** ((m - 69) / 12);
-
-// A seeded random, so the stars twinkle the same way every time.
 function rng(seed) { return () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32); }
 
-// A long, dark hall: decaying stereo noise for the convolver.
-function hall(ctx, secs = 5.5, decay = 2.8) {
-  const len = Math.floor(ctx.sampleRate * secs), buf = ctx.createBuffer(2, len, ctx.sampleRate);
-  const r = rng(7);
+// A soft, wide hall for the reverb: smooth decaying noise, gently low-passed by averaging.
+function hall(ctx, secs = 4.5) {
+  const len = Math.floor(ctx.sampleRate * secs), buf = ctx.createBuffer(2, len, ctx.sampleRate), r = rng(7);
   for (let c = 0; c < 2; c++) {
     const d = buf.getChannelData(c);
-    for (let i = 0; i < len; i++) d[i] = (r() * 2 - 1) * (1 - i / len) ** decay;
+    let lp = 0;
+    for (let i = 0; i < len; i++) { lp += ((r() * 2 - 1) - lp) * 0.35; d[i] = lp * Math.exp((-4.2 * i) / len); }
   }
   return buf;
 }
 
-/// Schedules the whole score into `dest`, with film time 0 at context time `t0`.
+/// Schedules the score into `dest` with film time 0 at context time `t0`. Returns
+/// motion(speed, when): the dots' mean speed (px/s) at context time `when`.
 export function scoreInto(ctx, dest, t0) {
-  const comp = ctx.createDynamicsCompressor();
-  comp.threshold.value = -14; comp.ratio.value = 3;
-  comp.connect(dest);
-  const verb = ctx.createConvolver(); verb.buffer = hall(ctx);
-  const wet = ctx.createGain(); wet.gain.value = 0.7;
-  verb.connect(wet).connect(comp);
-  const noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
-  { const d = noiseBuf.getChannelData(0), r = rng(3); for (let i = 0; i < d.length; i++) d[i] = r() * 2 - 1; }
-
   const at = s => t0 + s;
-  // A voice's tail: gain → pan → dry + reverb send.
-  function voice(start, pan = 0, send = 0.5, panTo = pan, dur = 0) {
-    const g = ctx.createGain(); g.gain.value = 0;
-    const p = ctx.createStereoPanner(); p.pan.setValueAtTime(pan, at(start));
-    if (panTo !== pan) p.pan.linearRampToValueAtTime(panTo, at(start + dur));
+  const master = ctx.createGain(); master.gain.value = 1.0;
+  const comp = ctx.createDynamicsCompressor(); comp.threshold.value = -8; comp.ratio.value = 3;   // catches overs only, so chimes stay above the pad
+  master.connect(comp).connect(dest);
+  // The home chime rings on like a bell; the whole score eases to silence by the film's end.
+  master.gain.setValueAtTime(1, at(A.end - 1.2));
+  master.gain.setTargetAtTime(0, at(A.end - 1.2), 0.3);
+  master.gain.setValueAtTime(0, at(A.end));
+  const verb = ctx.createConvolver(); verb.buffer = hall(ctx);
+  verb.connect(master);
+
+  function out(pan, send) {
+    const p = ctx.createStereoPanner(); p.pan.value = pan;
     const s = ctx.createGain(); s.gain.value = send;
-    g.connect(p); p.connect(comp); p.connect(s).connect(verb);
-    return g;
+    p.connect(master); p.connect(s).connect(verb);
+    return p;
   }
-  function env(g, start, attack, dur, peak, release = dur - attack) {
-    g.gain.setValueAtTime(0, at(start));
-    g.gain.linearRampToValueAtTime(peak, at(start + attack));
-    g.gain.exponentialRampToValueAtTime(0.0001, at(start + attack + release));
-  }
-  function tone(m, start, dur, { type = 'sine', peak = 0.05, attack = 0.01, pan = 0, send = 0.6, glide, detune = 0 } = {}) {
-    const o = ctx.createOscillator(); o.type = type; o.detune.value = detune;
-    o.frequency.setValueAtTime(hz(m), at(start));
-    if (glide !== undefined) o.frequency.exponentialRampToValueAtTime(hz(glide), at(start + dur));
-    const g = voice(start, pan, send); env(g, start, attack, dur, peak);
-    o.connect(g); o.start(at(start)); o.stop(at(start + dur + 0.05));
-  }
-  // A bell: a sine with a quieter inharmonic partial.
-  function bell(m, start, peak = 0.04, pan = 0, dur = 3.5) {
-    tone(m, start, dur, { peak, pan, send: 0.9 });
-    tone(m + 19.02, start, dur * 0.4, { peak: peak * 0.35, pan, send: 0.9 });
-  }
-  // Filtered noise swept between two frequencies: wind, whooshes, risers.
-  function air(start, dur, { from = 400, to = 2000, q = 1.2, peak = 0.08, attack, pan = 0, panTo = pan, send = 0.5 } = {}) {
-    const n = ctx.createBufferSource(); n.buffer = noiseBuf; n.loop = true;
-    const f = ctx.createBiquadFilter(); f.type = 'bandpass'; f.Q.value = q;
-    f.frequency.setValueAtTime(from, at(start)); f.frequency.exponentialRampToValueAtTime(to, at(start + dur));
-    const g = voice(start, pan, send, panTo, dur); env(g, start, attack ?? dur * 0.6, dur, peak);
-    n.connect(f).connect(g); n.start(at(start)); n.stop(at(start + dur + 0.05));
-  }
-  function thump(start, peak = 0.22) { tone(40, start, 0.45, { peak, attack: 0.005, send: 0.25, glide: 28 }); }
 
-  // The bed: an A Lydian pad under the whole film, breathing through a slow filter.
-  const padOut = ctx.createGain(); padOut.gain.value = 0;
-  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 900; lp.Q.value = 0.5;
-  const lfo = ctx.createOscillator(); lfo.frequency.value = 0.07;
-  const lfoAmt = ctx.createGain(); lfoAmt.gain.value = 350; lfo.connect(lfoAmt).connect(lp.frequency);
-  const padSend = ctx.createGain(); padSend.gain.value = 0.8;
-  lp.connect(padOut); padOut.connect(comp); padOut.connect(padSend).connect(verb);
-  const pad = [];
-  for (const [m, d] of [[33, 0], [45, -6], [52, 5], [56, -4], [59, 7], [63, -8]]) {
-    const o = ctx.createOscillator(); o.type = m < 40 ? 'sine' : 'triangle';
-    o.frequency.value = hz(m); o.detune.value = d;
-    o.connect(lp); o.start(at(0)); o.stop(at(END)); pad.push(o);
+  // A chime: a sine with a faint octave, soft attack, long ring. Major pentatonic only.
+  function chime(m, s, peak = 0.05, pan = 0, ring = 2.8) {
+    const o = out(pan, 0.7);
+    for (const [mult, amp] of [[1, 1], [2, 0.12]]) {
+      const osc = ctx.createOscillator(); osc.frequency.value = hz(m) * mult;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, at(s));
+      g.gain.linearRampToValueAtTime(peak * amp, at(s + 0.012));
+      g.gain.setTargetAtTime(0, at(s + 0.012), ring / 5);
+      osc.connect(g).connect(o); osc.start(at(s)); osc.stop(at(s + ring + 0.2));
+    }
   }
-  lfo.start(at(0)); lfo.stop(at(END));
-  const pg = padOut.gain;
+  // A held, swelling tone for chords.
+  function swell(m, s, dur, peak, attack = 0.6, pan = 0) {
+    const osc = ctx.createOscillator(); osc.frequency.value = hz(m);
+    const g = ctx.createGain(), o = out(pan, 0.6);
+    g.gain.setValueAtTime(0, at(s));
+    g.gain.linearRampToValueAtTime(peak, at(s + attack));
+    g.gain.setTargetAtTime(0, at(s + attack), (dur - attack) / 4);
+    osc.connect(g).connect(o); osc.start(at(s)); osc.stop(at(s + dur + 0.5));
+  }
+
+  // The bed: A major add9 in sines, slightly detuned pairs for warmth, under the whole film.
+  const pad = ctx.createGain(); pad.gain.value = 0;
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 700; lp.Q.value = 0.3;
+  lp.connect(pad).connect(out(0, 0.5));
+  for (const m of [45, 52, 59, 61, 64]) for (const d of [-4, 4]) {
+    const o = ctx.createOscillator(); o.frequency.value = hz(m); o.detune.value = d;
+    const g = ctx.createGain(); g.gain.value = m === 45 ? 0.5 : 0.3;
+    o.connect(g).connect(lp); o.start(at(0)); o.stop(at(A.end));
+  }
+  const pg = pad.gain;
   pg.setValueAtTime(0, at(0));
-  pg.linearRampToValueAtTime(0.06, at(3.2));        // in with the stars
-  pg.linearRampToValueAtTime(0.1, at(FORMED));      // swells through the collapse
-  pg.linearRampToValueAtTime(0.055, at(A.form));
-  pg.linearRampToValueAtTime(0.085, at(A.welcome + 0.6));
-  pg.linearRampToValueAtTime(0.05, at(A.finish));
-  pg.linearRampToValueAtTime(0.06, at(A.landed));
-  pg.linearRampToValueAtTime(0, at(END - 0.1));
-  lp.frequency.setValueAtTime(700, at(0));
-  lp.frequency.linearRampToValueAtTime(2600, at(FORMED));
-  lp.frequency.linearRampToValueAtTime(1100, at(A.form));
-  lp.frequency.linearRampToValueAtTime(1800, at(A.welcome + 0.6));
+  pg.linearRampToValueAtTime(0.05, at(3.5));
+  pg.linearRampToValueAtTime(0.08, at(FORMED));
+  pg.linearRampToValueAtTime(0.06, at(A.welcome));
+  pg.linearRampToValueAtTime(0.004, at(A.left + MOVE));   // nearly shut for setup
+  pg.setValueAtTime(0.004, at(A.end - 1));
+  pg.linearRampToValueAtTime(0, at(A.end - 0.2));
+  lp.frequency.setValueAtTime(500, at(0));
+  lp.frequency.linearRampToValueAtTime(1500, at(FORMED));
+  lp.frequency.linearRampToValueAtTime(900, at(A.form));
 
-  // Act 1, the stars: cosmic wind and far-off twinkles.
-  air(0.2, COLLAPSE + 0.6, { from: 180, to: 420, q: 0.7, peak: 0.035, attack: 2.5, send: 0.9 });
-  const r = rng(11), high = [81, 83, 85, 88, 90, 93, 95];
-  for (let i = 0; i < 16; i++) bell(high[Math.floor(r() * high.length)], 0.6 + r() * 3.3, 0.012 + r() * 0.012, r() * 1.6 - 0.8, 2.5);
+  // The shimmer: high sines whose level follows the dots' speed.
+  const shimmer = ctx.createGain(); shimmer.gain.value = 0;
+  shimmer.connect(out(0, 0.9));
+  for (const [m, d] of [[76, -6], [81, 5], [83, -3], [85, 7]]) {
+    const o = ctx.createOscillator(); o.frequency.value = hz(m); o.detune.value = d;
+    const g = ctx.createGain(); g.gain.value = 0.25;
+    const trem = ctx.createOscillator(); trem.frequency.value = 3 + d / 4;
+    const tg = ctx.createGain(); tg.gain.value = 0.12; trem.connect(tg).connect(g.gain);
+    o.connect(g).connect(shimmer); o.start(at(0)); trem.start(at(0)); o.stop(at(A.end)); trem.stop(at(A.end));
+  }
+  // The stars' collapse has no dots of Act 3 to follow, so its shimmer is drawn by hand.
+  shimmer.gain.setValueAtTime(0, at(COLLAPSE));
+  shimmer.gain.linearRampToValueAtTime(0.05, at(FORMED - 0.3));
+  shimmer.gain.linearRampToValueAtTime(0, at(FORMED + 0.4));
+  shimmer.gain.setTargetAtTime(0, at(A.welcome), 0.6);   // and silent for setup
 
-  // Act 2, the collapse: a riser that pulls everything in, then a bloom as the ball forms.
-  air(COLLAPSE, FORMED - COLLAPSE, { from: 220, to: 5200, q: 2.2, peak: 0.07, attack: FORMED - COLLAPSE - 0.05, release: 0.15, send: 0.6 });
-  tone(57, COLLAPSE + 0.4, FORMED - COLLAPSE - 0.4, { peak: 0.018, attack: 2.2, glide: 69, send: 0.7 });
-  for (const m of [57, 61, 64, 68, 71]) tone(m, FORMED, 4.2, { type: 'triangle', peak: 0.03, attack: 0.02, send: 0.85 });
-  bell(81, FORMED, 0.05); bell(88, FORMED + 0.06, 0.03, 0.3);
+  // The ball forms: one chime.
+  swell(45, FORMED - 0.1, 3.5, 0.05, 0.15);
+  chime(81, FORMED, 0.1);
 
-  // Act 3: the hop, the landing, the twirl.
-  air(A.hop - 0.3, 0.55, { from: 500, to: 2400, peak: 0.05, attack: 0.4, pan: -0.15, panTo: 0.15 });
-  thump(A.land);
-  [69, 73, 76, 80, 81, 85].forEach((m, i) => bell(m, A.twirl + i * 0.11, 0.022, -0.7 + i * 0.28, 1.6));
+  // The twirl: a rolled arpeggio, panned with the turn.
+  [69, 71, 73, 76, 78, 81].forEach((m, i) => chime(m + 12, A.twirl + i * 0.13, 0.04, -0.6 + i * 0.24, 2));
 
-  // The orb forms and the window grows from behind it.
-  bell(76, A.form, 0.03); bell(83, A.form + 0.05, 0.02, 0.2);
-  air(A.card, A.carded - A.card, { from: 300, to: 1400, q: 0.8, peak: 0.04, send: 0.8 });
+  // The window grows and says welcome: the last chime of the film proper.
+  for (const m of [57, 64, 69, 73, 76]) swell(m, A.card, 4.5, 0.018, 0.8);
+  chime(85, A.welcome, 0.09); chime(73, A.welcome, 0.04);
 
-  // Welcome to Echotype.
-  for (const m of [45, 57, 64, 69, 71, 73, 76]) tone(m, A.welcome, 4.5, { type: 'triangle', peak: m < 50 ? 0.04 : 0.022, attack: 0.25, send: 0.85 });
-  bell(88, A.welcome + 0.1, 0.035);
+  // Home: a cadence rolling down to the tonic (E, C#, A) as the last dots settle into the ball,
+  // with a soft A major chord blooming under the final note.
+  const home = A.fall + FALL + FALL_LAG;
+  chime(88, home - 0.3, 0.05, 0.15); chime(85, home - 0.15, 0.06, -0.1); chime(81, home, 0.09, 0, 3.5);
+  for (const m of [45, 57, 61, 64, 69]) swell(m, home - 0.05, 3.2, m === 45 ? 0.04 : 0.022, 0.25);
 
-  // The dots stream to the left, setup appears, they stream back.
-  air(A.left - 0.05, 0.9, { from: 900, to: 300, peak: 0.055, attack: 0.25, pan: 0, panTo: -0.75 });
-  bell(93, A.content, 0.014, -0.2, 1.2);
-  air(A.finish - 0.05, 0.85, { from: 300, to: 1100, peak: 0.05, attack: 0.4, pan: -0.75, panTo: 0 });
-  tone(76, A.shrink, A.shrunk - A.shrink + 0.3, { peak: 0.02, attack: 0.15, glide: 64, send: 0.8 });
-
-  // The fall: a cascade like rain on glass, then home.
-  const fall = A.landed - A.fall, drops = [93, 90, 88, 85, 83, 81, 78, 76, 73, 71, 69, 66];
-  drops.forEach((m, i) => bell(m, A.fall + fall * (i / drops.length) ** 0.7, 0.016, (r() - 0.5) * 0.6, 1.4));
-  thump(A.landed, 0.16);
-  for (const m of [45, 52, 57, 64]) tone(m, A.landed, END - A.landed - 0.2, { peak: 0.02, attack: 0.3, send: 0.85 });
-  bell(81, A.landed + 0.02, 0.03);
+  return {
+    motion(v, when) {
+      // The orb idles at ~25 px/s; ~300 px/s is a full swell.
+      if (when >= at(A.take) && when < at(A.welcome)) shimmer.gain.setTargetAtTime(0.06 * Math.min(1, Math.max(0, v - 30) / 270), when, 0.08);
+    },
+  };
 }
 
-/// Live playback for the film: start() at film time 0; stop() fades out.
+/// Live playback for the film: start() at film time 0, motion(speed) every frame, stop() fades out.
 export function createScore() {
-  let ctx, out;
+  let ctx, bus, score;
   return {
     start() {
       ctx ??= new AudioContext();
       ctx.resume();
       this.stop();
-      out = ctx.createGain(); out.connect(ctx.destination);
-      scoreInto(ctx, out, ctx.currentTime + 0.03);
+      bus = ctx.createGain(); bus.connect(ctx.destination);
+      score = scoreInto(ctx, bus, ctx.currentTime + 0.03);
     },
+    motion(v) { if (score) score.motion(v, ctx.currentTime); },
     stop() {
-      if (!out) return;
-      const o = out; out = null;
-      o.gain.setTargetAtTime(0, ctx.currentTime, 0.08);
-      setTimeout(() => o.disconnect(), 600);
+      if (!bus) return;
+      const b = bus; bus = score = null;
+      b.gain.setTargetAtTime(0, ctx.currentTime, 0.08);
+      setTimeout(() => b.disconnect(), 600);
     },
   };
 }
