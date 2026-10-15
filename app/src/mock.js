@@ -21,7 +21,7 @@ const settings = {
   paste_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+V',
   copy_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+C',
   autostart: !q.has('upgrade'), sounds: true, sound_pack: 'classic', pill_fade: true, orb_listen: 'listening', orb_think: 'working', orb_detail: 1, orb_color: '#eef1ff', pill_size: 1.5, ball_size: 1,
-  advanced: q.has('advanced'), cleaner_memory: 'ready', cleaner_idle_unload: false, cleaner_idle_minutes: 10, cleaner_context: 1024, greetings: true, detect_meetings: true, meeting_end: 'ask', cloud_moved: q.has('moved'),
+  advanced: q.has('advanced'), cleaner_memory: 'ready', cleaner_idle_unload: false, cleaner_idle_minutes: 10, cleaner_context: 1024, greetings: true, detect_meetings: true, prefer_builtin_mic: true, pause_music: false, meeting_end: 'ask', cloud_moved: q.has('moved'),
   look: 'system',
   pill_idle: !q.has('pilloff'), pill_hidden_until: q.has('pillhidden') ? now + 42 * 60000 : 0, pill_in_recordings: false,
   pill_positions: {}, pill_screen: null, pill_follow_cursor: true, show_in: q.has('menubar') ? 'menubar' : 'pill',
@@ -119,9 +119,9 @@ const commands = {
   cancel_download: ({ id }) => { cancelled.add(id); return null; },
   delete_model: ({ id }) => { models.find(x => x.id === id).downloaded = false; return null; },
   list_input_devices: () => [
-    { name: 'MacBook Pro Microphone', bluetooth: false, default: true },
-    { name: 'AirPods Pro', bluetooth: true, default: false },
-    { name: 'Shure MV7', bluetooth: false, default: false },
+    { name: 'MacBook Pro Microphone', bluetooth: false, default: true, builtin: true },
+    { name: 'AirPods Pro', bluetooth: true, default: false, builtin: false },
+    { name: 'Shure MV7', bluetooth: false, default: false, builtin: false },
   ],
   // ?talk=fn&globe=0|1&im=0|1&relaunch=1 shows each talk-key state.
   shortcut_status: () => {

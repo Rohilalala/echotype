@@ -4,5 +4,7 @@
 <dict>
   <key>NSMicrophoneUsageDescription</key>
   <string>Echotype listens while you hold the dictation hotkey and turns your speech into text.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>With "Pause music while dictating" on, Echotype pauses Music or Spotify while you dictate and resumes it afterwards.</string>
 </dict>
 </plist>
