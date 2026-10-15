@@ -1124,6 +1124,9 @@ function startOnboarding(step) {
   showOnboarding(true);
   window.__TAURI__.event.emit?.('main-page', 'onboarding'); // the real pill may show over this window
   orb ??= createOrb($('#obCanvas'), obStill);
+  // Setup from the start on macOS (a first run, or Run setup again) opens with the film, which
+  // brings the card in (?film plays it in a browser).
+  if (step === 1 && !obStill && ((isMac && !preview) || new URLSearchParams(location.search).has('film'))) return obFilm();
   orb.set(obStill ? 'orb' : 'ball');
   orb.start();
   // The ball bursts into the orb once the card has come in, then breathes.
@@ -1131,6 +1134,76 @@ function startOnboarding(step) {
   $('.ob-card').classList.add('intro');
   obStartModel();
   obShow(step, true);
+}
+
+// ----- the first-run film (film.js) -----
+// The window turns into a clear stage over the whole screen: stars over the desktop collapse into
+// the ball, the ball becomes the orb, the card grows out from behind it and says welcome, and the
+// orb settles into the card, where setup takes over. At the end the card shrinks away and the dots
+// fall to the pill's place, and the pill takes over from them. Only the card takes clicks.
+let film = null, filmHome = null;
+const filming = () => document.documentElement.classList.contains('film');
+const filmDrag = [];
+// The pill's ball on screen, in this page's px (the stage sits at the display's origin, unzoomed).
+async function homeSpot() {
+  const h = await invoke('film_home').catch(() => null);
+  return h ? { x: h[0] - window.screenX, y: h[1] - window.screenY, r: h[2] } : null;
+}
+function filmHit(on = true) {
+  const r = $('.ob-card').getBoundingClientRect();
+  invoke('film_hit', { rect: on ? [window.screenX + r.left, window.screenY + r.top, r.width, r.height] : null }).catch(() => {});
+}
+// The card's orb in or out over ms, as the film's dots hand over to it (and back).
+function orbFade(from, to, ms) {
+  return new Promise(done => {
+    const t0 = performance.now();
+    const tick = now => { const k = Math.min(1, (now - t0) / ms); orb.fade(from + (to - from) * k); k < 1 ? requestAnimationFrame(tick) : done(); };
+    requestAnimationFrame(tick);
+  });
+}
+async function obFilm() {
+  const root = document.documentElement;
+  root.classList.add('film', 'film-pre');
+  for (const el of $$('#onboard [data-tauri-drag-region]')) { filmDrag.push(el); el.removeAttribute('data-tauri-drag-region'); } // the stage never moves
+  await invoke('film_window', { on: true, show: true }).catch(() => {});
+  await wait(80); // the stage's size reaches the page
+  const { createFilm, CONTENT } = await import('./film.js');
+  filmHome = await homeSpot();
+  film = createFilm({
+    card: $('.ob-card'), slot: () => $('.ob-step:not([hidden]) .ob-orb'), shell: $('#filmShell'), welcome: $('#filmWelcome'),
+    home: () => filmHome, light: !matchMedia('(prefers-color-scheme: dark)').matches,
+  });
+  obStartModel();
+  obShow(1, true);
+  const played = film.play();
+  later('film', CONTENT * 1000, () => { root.classList.remove('film-pre'); filmHit(); });
+  addEventListener('resize', () => filming() && !root.classList.contains('film-pre') && filmHit());
+  await played;
+  // Setup takes over: the card's own orb, exactly where the film's dots settled.
+  orb.fade(0);
+  orb.set('orb');
+  orb.start();
+  film.show(false);
+  orbFade(0, 1, 300);
+}
+// The end: the card's content and orb go, the film takes the dots home to the pill.
+async function obFilmHome() {
+  filmHit(false);
+  document.documentElement.classList.add('film-out');
+  filmHome = (await homeSpot()) ?? filmHome; // the pill may be a new size since
+  await orbFade(1, 0, 250);
+  orb.stop();
+  await film.home();
+}
+// The stage becomes the settings window again (hidden; `show` brings it up), and the pill shows.
+async function obFilmEnd(show) {
+  film?.destroy();
+  film = null;
+  await invoke('film_window', { on: false, show: false }).catch(() => {});
+  document.documentElement.classList.remove('film', 'film-pre', 'film-out');
+  for (const el of filmDrag.splice(0)) el.setAttribute('data-tauri-drag-region', '');
+  fitZoom();
+  if (show) invoke('focus_main').catch(() => {});
 }
 
 // ----- moving between steps -----
@@ -1240,6 +1313,7 @@ $('#obSkip').addEventListener('click', () => finishOnboarding('home'));
 // Enter is the primary action; Esc and ⌘[ go back. Esc never closes onboarding, and does
 // nothing while a dictation is running (Rust has Esc then, to cancel it).
 $('#onboard').addEventListener('keydown', e => {
+  if (document.documentElement.classList.contains('film-pre')) return e.preventDefault(); // the film is still bringing the card in
   const back = e.key === 'Escape' || (e.metaKey && e.key === '[');
   if (back) {
     e.preventDefault();
@@ -1358,7 +1432,7 @@ function obPractice(p) {
     ob.offerClick = ob.offerClick && !ob.pressed;
     orb.progress(null);
     orb.set('orb');
-    if (!ob.watched) { // once: the real pill is down there
+    if (!ob.watched && (S.onboarded || !isMac)) { // once: the real pill is down there (a first run on macOS has none yet)
       ob.watched = true;
       const w = $('#obWatch');
       w.hidden = false;
@@ -1534,7 +1608,8 @@ async function obFinish() {
   const relaunch = obRelaunch();
   // The orb folds back into the ball and drops out of the card, towards the real pill.
   $('#obNext').disabled = true;
-  if (obStill) { $('.ob-card').classList.add('bye'); await wait(150); }
+  if (filming()) {} // the film takes it home (finishOnboarding)
+  else if (obStill) { $('.ob-card').classList.add('bye'); await wait(150); }
   else {
     orb.set('ball');
     await wait(300);
@@ -1549,6 +1624,7 @@ async function obFinish() {
 
 // `away`: the window steps aside so the pill at the bottom of the screen is the next thing seen.
 async function finishOnboarding(page, away = false) {
+  const filmed = filming();
   // New installs get the new shortcuts and (when allowed) launch at login; upgraders are only offered them.
   const [p, c] = DEFAULT_LAST();
   S.paste_last_hotkey ||= p;
@@ -1562,7 +1638,8 @@ async function finishOnboarding(page, away = false) {
   obListen(false);
   await save();
   const pill = isMac && S.show_in !== 'menubar' && S.pill_idle;
-  if (away && pill && window.__TAURI__.window) {
+  if (filmed && page === 'home') await obFilmHome(); // the dots fall to the pill; it takes over as they land
+  if (away && pill && !filmed && window.__TAURI__.window) {
     await window.__TAURI__.window.getCurrentWindow().hide().catch(() => {});
     setTimeout(() => window.__TAURI__.event.emit?.('pill-hello'), 350); // overlay.js: the ball pulses once
   }
@@ -1572,6 +1649,7 @@ async function finishOnboarding(page, away = false) {
   renderHotkey();
   go(page);
   obDropTiny();
+  if (filmed) await obFilmEnd(page !== 'home');
 }
 
 // ----- the speech model -----
@@ -1750,6 +1828,7 @@ function applyLook() {
 const zoomFor = w => (w >= 2000 ? 1.3 : w >= 1600 ? 1.2 : w >= 1300 ? 1.1 : 1);
 let zoomed = 1;
 function fitZoom() {
+  if (filming()) return; // the film's stage is the whole display, at 1x
   const z = zoomFor(window.outerWidth);
   if (z === zoomed) return;
   zoomed = z;

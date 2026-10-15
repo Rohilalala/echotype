@@ -281,6 +281,13 @@ export function createAct3(canvas, { n = 520, r = 46, tilt = 0.42, spin = 0.6, d
     return { fill: win.fill, rect: win.R, motion };
   }
 
+  /** Puts every dot on its place at film time t, at rest: the film picks up from wherever the
+   *  card's own orb is when setup ends. */
+  function settle(t) {
+    const L = layout(W, H), frame = orbFrame(t, L);
+    sim = { t, p: sphere.map((_, i) => { const T = target(i, t, frame, L); return { x: T.x, y: T.y, vx: 0, vy: 0, landed: false }; }) };
+  }
+
   size();
-  return { draw, size };
+  return { draw, size, settle };
 }

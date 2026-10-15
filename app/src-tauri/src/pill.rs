@@ -19,6 +19,10 @@ use tauri_plugin_global_shortcut::GlobalShortcutExt;
 /// reads them everywhere, hence one static.
 static SIZE: std::sync::Mutex<(f64, f64)> = std::sync::Mutex::new((1.5, 1.0));
 
+/// The idle ball's centre and radius on screen (points), wherever the pill is placed now, shown or
+/// not: the first-run film drops its dots there.
+pub static HOME: std::sync::Mutex<Option<(f64, f64, f64)>> = std::sync::Mutex::new(None);
+
 pub fn zoom() -> f64 {
     lock(&SIZE).0
 }
@@ -85,6 +89,8 @@ pub struct Ctx {
     pub main_home: bool,
     /// Show Echotype in the menu bar: the status item is the indicator and the pill never shows.
     pub menubar: bool,
+    /// The first-run film is on screen: its dots fall to the pill's place and hand over to it.
+    pub film: bool,
 }
 
 impl Ctx {
@@ -97,6 +103,11 @@ impl Ctx {
 /// onboarding is done and it isn't hidden for the hour. Over Echotype's own focused window only
 /// the live states show, and not on Home, which shows them already (D14).
 pub fn visible(c: &Ctx, active: bool) -> bool {
+    // During first-run setup (macOS) the card's own orb shows what the pill would; the pill
+    // arrives at the end of the film, as its dots land.
+    if c.film || (c.mac && !c.onboarded) {
+        return false;
+    }
     if c.mac && c.menubar {
         return false;
     }
@@ -618,7 +629,7 @@ fn choose<'a>(list: &'a [Screen], cursor: Option<(f64, f64)>, follow: bool, home
 }
 
 /// The cursor in global points, or None if the OS won't say.
-fn cursor_now(app: &AppHandle) -> Option<(f64, f64)> {
+pub(crate) fn cursor_now(app: &AppHandle) -> Option<(f64, f64)> {
     let primary = app.primary_monitor().ok().flatten().map_or(1.0, |m| m.scale_factor());
     app.cursor_position().ok().map(|p| cursor_pt((p.x, p.y), primary))
 }
@@ -687,6 +698,7 @@ fn ctx(app: &AppHandle, s: &Settings) -> Ctx {
         main_key: state(app).main_key.load(std::sync::atomic::Ordering::SeqCst),
         main_home: state(app).main_home.load(std::sync::atomic::Ordering::SeqCst),
         menubar: in_menu_bar(s),
+        film: state(app).film.load(std::sync::atomic::Ordering::SeqCst),
     }
 }
 
@@ -818,6 +830,9 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
                 drop(drag);
                 // Never shown where it was not placed (a pinned monitor that is gone).
                 want = placed_on.is_some();
+                let d = 10.0 * ball();
+                let b = capsule_rect(at, (d, d));
+                *lock(&HOME) = want.then_some((b.x + b.w / 2.0, b.y + b.h / 2.0, b.w / 2.0));
                 let r = capsule_rect(at, size);
                 if let Some(c) = cursor {
                     // While held the overlay keeps the mouse, so the mouse-up (and a double-click) reach it.
@@ -1065,7 +1080,7 @@ mod tests {
     }
 
     fn ctx() -> Ctx {
-        Ctx { mac: true, onboarded: true, idle_on: true, hidden_until: 0, now_ms: 1_000_000, main_key: false, main_home: false, menubar: false }
+        Ctx { mac: true, onboarded: true, idle_on: true, hidden_until: 0, now_ms: 1_000_000, main_key: false, main_home: false, menubar: false, film: false }
     }
 
     #[test]

@@ -853,3 +853,17 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .swatch { display: block; width: 20px; height: 20px; border-radius: 50%; background: radial-gradient(circle at 50% 50%, var(--c) 0 3px, transparent 3.5px), #1d1e22; box-shadow: 0 0 0 1px var(--line-strong); cursor: default; }
 .swatches input:checked + .swatch { box-shadow: 0 0 0 2px var(--pane), 0 0 0 4px var(--fg-2); }
 .swatches input:focus-visible + .swatch { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+/* ---------- the first-run film (macOS, film.js) ----------
+   The window is a clear stage over the whole desktop. The card's backdrop (.film-shell) grows out
+   from behind the orb, says welcome, and the card's content comes in over it. */
+html.film, html.film body { background: transparent !important; }
+html.film aside, html.film main { visibility: hidden; }
+html.film .onboard { background: transparent; }
+html.film .ob-card { background: transparent !important; border-color: transparent !important; box-shadow: none !important; animation: none; }
+.film-shell { display: none; }
+html.film .film-shell { display: block; position: fixed; z-index: 0; opacity: 0; pointer-events: none; background: var(--pane); border: 1px solid var(--line-strong); box-shadow: var(--shadow-float), 0 24px 48px -28px rgba(0, 0, 0, 0.22); }
+.film-welcome { position: absolute; left: 0; right: 0; top: calc(40% + 76px); margin: 0; text-align: center; font-size: 28px; line-height: 1.18; letter-spacing: -0.02em; color: var(--fg); opacity: 0; }
+html.film .ob-top, html.film .ob-stage, html.film .ob-foot, html.film .ob-model { transition: opacity 450ms ease; }
+html.film-pre :is(.ob-top, .ob-stage, .ob-foot, .ob-model), html.film-out :is(.ob-top, .ob-stage, .ob-foot, .ob-model) { opacity: 0; pointer-events: none; }
+.film-canvas { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 20; transition: opacity 300ms ease; }

@@ -60,6 +60,10 @@ struct AppState {
     main_key: AtomicBool,
     /// The settings window shows Home (main.js emits `main-page` on every page change).
     main_home: AtomicBool,
+    /// The first-run film has the settings window (film_window); the pill waits for its dots.
+    film: AtomicBool,
+    /// The film's card in screen points: clicks reach the window only here, the rest falls through.
+    film_hit: Mutex<Option<pill::Rect>>,
     clicks: Mutex<pill::Debounce>,
     /// The press on the pill that may be a drag (pill.rs moves the window while it is held).
     drag: Mutex<Option<pill::Drag>>,
@@ -1285,6 +1289,93 @@ async fn reset_accessibility(app: AppHandle) -> R<()> {
     open_permission_settings(app, "accessibility".into()).await
 }
 
+/// The first-run film (macOS): the settings window becomes a clear, borderless stage over the
+/// whole main display for the stars, the setup card and the fall home, with clicks falling through
+/// everywhere but the card (`film_hit`). `on: false` gives it its normal frame back, shown only if
+/// `show`, and lets the pill appear where the dots landed.
+#[tauri::command]
+async fn film_window(app: AppHandle, on: bool, show: bool) -> R<()> {
+    let w = app.get_webview_window("main").ok_or("no settings window")?;
+    let st = state(&app);
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::utils::config::WindowEffectsConfig;
+        use tauri::window::{Effect, EffectState};
+        use tauri::{LogicalPosition, LogicalSize, TitleBarStyle};
+        let e = |r: tauri::Result<()>| r.map_err(|e| e.to_string());
+        if on {
+            let m = w.primary_monitor().map_err(|e| e.to_string())?.ok_or("no display")?;
+            let (pos, size) = (m.position().to_logical::<f64>(m.scale_factor()), m.size().to_logical::<f64>(m.scale_factor()));
+            e(w.set_effects(None::<WindowEffectsConfig>))?;
+            e(w.set_decorations(false))?;
+            e(w.set_shadow(false))?;
+            e(w.set_resizable(false))?;
+            e(w.set_min_size(None::<LogicalSize<f64>>))?;
+            e(w.set_size(LogicalSize::new(size.width, size.height)))?;
+            e(w.set_position(LogicalPosition::new(pos.x, pos.y)))?;
+            *lock(&st.film_hit) = None;
+            e(w.set_ignore_cursor_events(true))?;
+            if !st.film.swap(true, Ordering::SeqCst) {
+                // Clicks reach the window only over the card: the cursor is polled, as the pill does.
+                // ponytail: 30 Hz poll; an NSTrackingArea if it ever shows up in a profile.
+                let h = app.clone();
+                std::thread::spawn(move || {
+                    let mut over = false;
+                    while state(&h).film.load(Ordering::SeqCst) {
+                        let hit = *lock(&state(&h).film_hit);
+                        let now = matches!((hit, pill::cursor_now(&h)), (Some(r), Some(c)) if r.contains(c));
+                        if now != over {
+                            over = now;
+                            if let Some(w) = h.get_webview_window("main") {
+                                let _ = w.set_ignore_cursor_events(!over);
+                            }
+                        }
+                        std::thread::sleep(Duration::from_millis(33));
+                    }
+                });
+            }
+            let _ = w.show();
+            let _ = w.set_focus();
+        } else {
+            // The pill first, over the dots that just landed where it shows (its panel floats
+            // above this window); then the stage hides, so it never flashes back into a window.
+            st.film.store(false, Ordering::SeqCst);
+            let _ = st.pill_wake.send(());
+            std::thread::sleep(Duration::from_millis(150));
+            e(w.hide())?;
+            e(w.set_ignore_cursor_events(false))?;
+            e(w.set_decorations(true))?;
+            e(w.set_title_bar_style(TitleBarStyle::Overlay))?;
+            e(w.set_shadow(true))?;
+            e(w.set_resizable(true))?;
+            e(w.set_effects(WindowEffectsConfig { effects: vec![Effect::Sidebar], state: Some(EffectState::FollowsWindowActiveState), radius: None, color: None, interactive: false }))?;
+            e(w.set_min_size(Some(LogicalSize::new(720.0, 520.0))))?;
+            e(w.set_size(LogicalSize::new(800.0, 600.0)))?;
+            e(w.center())?;
+            if show {
+                show_main(&app);
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (on, show, &w); // the film is macOS-only; elsewhere onboarding keeps its window
+    let _ = st.pill_wake.send(());
+    Ok(())
+}
+
+/// The film's card, in screen points, or None while nothing on the stage takes clicks.
+#[tauri::command]
+async fn film_hit(app: AppHandle, rect: Option<[f64; 4]>) -> R<()> {
+    *lock(&state(&app).film_hit) = rect.map(|[x, y, w, h]| pill::Rect { x, y, w, h });
+    Ok(())
+}
+
+/// Where the film's dots land: the idle ball's centre and radius on screen (points).
+#[tauri::command]
+async fn film_home() -> R<Option<[f64; 3]>> {
+    Ok(lock(&pill::HOME).map(|(x, y, r)| [x, y, r]))
+}
+
 /// Onboarding's Quit, before there is a pill or a reason to stay in the menu bar.
 #[tauri::command]
 async fn quit_app(app: AppHandle) -> R<()> {
@@ -1433,6 +1524,8 @@ pub fn run() {
                 pill_wake,
                 main_key: AtomicBool::new(false),
                 main_home: AtomicBool::new(true),
+                film: AtomicBool::new(false),
+                film_hit: Mutex::new(None),
                 clicks: Mutex::new(pill::Debounce::default()),
                 drag: Mutex::new(None),
                 tray_pill: Mutex::new(None),
@@ -1559,6 +1652,9 @@ pub fn run() {
             open_textedit,
             reset_accessibility,
             quit_app,
+            film_window,
+            film_hit,
+            film_home,
             cloud_start_login,
             cloud_verify,
             cloud_account,

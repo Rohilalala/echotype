@@ -391,6 +391,7 @@
 
   <!-- First run: five steps in one card, with the orb (orb.js) moving between their .ob-orb slots. -->
   <div class="onboard" id="onboard" data-tauri-drag-region role="dialog" aria-modal="true" aria-labelledby="obT1" hidden>
+    <div class="film-shell" id="filmShell" aria-hidden="true"><p class="film-welcome" id="filmWelcome">Welcome to Echotype</p></div>
     <div class="ob-card" data-tauri-drag-region>
       <div class="ob-top" data-tauri-drag-region>
         <ol class="ob-dots" id="obDots" aria-label="Setup, step 1 of 5"><li></li><li></li><li></li><li></li><li></li></ol>
@@ -398,12 +399,14 @@
       </div>
 
       <div class="ob-stage">
-        <section class="ob-step center" data-step="1" aria-labelledby="obT1">
+        <section class="ob-step split" data-step="1" aria-labelledby="obT1">
           <div class="ob-orb" aria-hidden="true"></div>
-          <h2 id="obT1" tabindex="-1">Hold a key. Talk. Let&nbsp;go.</h2>
-          <p class="lede">Echotype types what you say, in any app. First it needs your microphone. It listens only while you hold the key, and your voice never leaves this Mac.</p>
-          <p class="ob-status" id="obMicState" aria-live="polite"></p>
-          <label class="ob-pick" id="obMicPickRow" hidden><span>Microphone</span><select id="obMicPick"></select></label>
+          <div class="ob-body">
+            <h2 id="obT1" tabindex="-1">Hold a key. Talk. Let&nbsp;go.</h2>
+            <p class="lede">Echotype types what you say, in any app. First it needs your microphone. It listens only while you hold the key, and your voice never leaves this Mac.</p>
+            <p class="ob-status" id="obMicState" aria-live="polite"></p>
+            <label class="ob-pick" id="obMicPickRow" hidden><span>Microphone</span><select id="obMicPick"></select></label>
+          </div>
         </section>
 
         <section class="ob-step split" data-step="2" aria-labelledby="obT2" hidden>
