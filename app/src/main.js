@@ -1501,8 +1501,8 @@ $('#obReset').addEventListener('click', async () => {
 });
 
 // ----- 4: make it yours -----
-// One question at a time (.ob-q). A tile saves as it's picked and, a beat later, the next question
-// comes in; the sounds stay put so each can be heard. The pill's questions are macOS-only (data-only).
+// One question at a time (.ob-q). A tile saves as it's picked and stays on screen, so every
+// choice can be tried; Continue moves on. The pill's questions are macOS-only (data-only).
 let obQ = 0;
 const obQs = () => $$('.ob-q').filter(q => !q.dataset.only || (isMac && (q.dataset.only === 'mac' || S.show_in !== 'menubar')));
 function obPrefsRender() {
@@ -1575,9 +1575,6 @@ function obPick(g, t) {
   if (['orb_listen', 'orb_color', 'ball_size'].includes(key)) showPill(); // the real pill acts it out too
   obTilesRender();
   obOrbPreview();
-  if ('stay' in g.dataset) return;
-  const at = obQ; // a beat, so the pick is seen; Back or Continue meanwhile wins
-  later('q', obStill ? 150 : 350, () => obStep === 4 && obQ === at && (at < obQs().length - 1 ? obQShow(at + 1) : obShow(5)));
 }
 for (const g of $$('.ob-q .ob-tiles')) {
   g.addEventListener('click', e => { const t = e.target.closest('.ob-tile'); if (t) obPick(g, t); });
