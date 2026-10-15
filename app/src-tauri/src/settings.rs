@@ -622,29 +622,28 @@ pub fn get_history(limit: usize) -> Vec<HistoryEntry> {
 }
 
 /// A fix from the History page: replaces the text of the entry recorded at `ts`.
-pub fn update_history(ts: u64, text: &str) -> Result<(), String> {
+/// Replaces one entry's text; returns the text it had, so the in-memory "last transcript" can follow.
+pub fn update_history(ts: u64, text: &str) -> Result<String, String> {
     update_history_in(&history_path(), ts, text)
 }
 
-fn update_history_in(path: &Path, ts: u64, text: &str) -> Result<(), String> {
+fn update_history_in(path: &Path, ts: u64, text: &str) -> Result<String, String> {
     let _g = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
     let old = std::fs::read_to_string(path).unwrap_or_default();
-    let mut found = false;
+    let mut found = None;
     let mut lines = Vec::new();
     for l in old.lines().filter(|l| !l.trim().is_empty()) {
         match serde_json::from_str::<HistoryEntry>(l) {
-            Ok(mut e) if e.ts == ts && !found => {
-                found = true;
-                e.text = text.to_string();
+            Ok(mut e) if e.ts == ts && found.is_none() => {
+                found = Some(std::mem::replace(&mut e.text, text.to_string()));
                 lines.push(serde_json::to_string(&e).map_err(|e| e.to_string())?);
             }
             _ => lines.push(l.to_string()), // other entries stay byte for byte
         }
     }
-    if !found {
-        return Err("That entry is no longer in history.".into());
-    }
-    write_atomic(path, &(lines.join("\n") + "\n"))
+    let Some(was) = found else { return Err("That entry is no longer in history.".into()) };
+    write_atomic(path, &(lines.join("\n") + "\n"))?;
+    Ok(was)
 }
 
 pub fn clear_history() -> Result<(), String> {
@@ -877,7 +876,7 @@ mod tests {
             append_history_to(&path, &e).unwrap();
         }
         let before: Vec<String> = std::fs::read_to_string(&path).unwrap().lines().map(String::from).collect();
-        update_history_in(&path, 2, "Ping Midhun").unwrap();
+        assert_eq!(update_history_in(&path, 2, "Ping Midhun").unwrap(), "t2", "returns what it replaced, for Paste last");
         let after: Vec<String> = std::fs::read_to_string(&path).unwrap().lines().map(String::from).collect();
         assert_eq!((after[0].as_str(), after[2].as_str()), (before[0].as_str(), before[2].as_str()));
         let e: HistoryEntry = serde_json::from_str(&after[1]).unwrap();

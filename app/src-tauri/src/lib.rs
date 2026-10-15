@@ -1057,8 +1057,15 @@ async fn get_history(limit: Option<usize>) -> R<Vec<HistoryEntry>> {
 }
 
 #[tauri::command]
-async fn update_history(ts: u64, text: String) -> R<()> {
-    settings::update_history(ts, &text)
+async fn update_history(app: AppHandle, ts: u64, text: String) -> R<()> {
+    let was = settings::update_history(ts, &text)?;
+    // Fixing the newest dictation: Paste last / Copy last give the corrected text too.
+    let st = state(&app);
+    let mut last = lock(&st.last_output);
+    if last.as_deref() == Some(was.as_str()) {
+        *last = Some(text);
+    }
+    Ok(())
 }
 
 #[tauri::command]
