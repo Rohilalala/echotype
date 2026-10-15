@@ -586,15 +586,33 @@ pub struct Word {
 /// Local whisper with token timestamps, grouped into words (a token that starts with a space
 /// starts a word). Meeting notes use the times to cut overlapping chunks and to line words up
 /// with speaker turns.
-/// `vad`: a Silero model; whisper then transcribes only the speech it finds.
+/// `vad`: a Silero model. A chunk with no speech in it gives no words, and whisper segments
+/// before the first speech or after the last are dropped (as `heard` does for dictation).
+/// whisper.cpp's own VAD never runs here (whisper-rs calls whisper_full_with_state, which skips
+/// it), so a meeting's quiet stretches came back as "Thank you." and the like.
+// ponytail: whole segments at a chunk's edges; something invented in a short gap between two
+// speakers inside one chunk survives. Dropping words by their token times lost real words (they
+// drift into a long gap), and joining the speech for whisper made soft speech read worse.
 pub fn transcribe_words(model: &Path, pcm: &[f32], languages: &[String], prompt: &str, vad: Option<&Path>) -> Result<Vec<Word>, String> {
     if pcm.is_empty() {
         return Ok(vec![]);
     }
+    let spans = vad.and_then(|v| speech(v, pcm));
+    if spans.as_ref().is_some_and(Vec::is_empty) {
+        return Ok(vec![]);
+    }
+    words_of(model, pcm, languages, prompt, vad, spans.as_deref())
+}
+
+fn words_of(model: &Path, pcm: &[f32], languages: &[String], prompt: &str, vad: Option<&Path>, spans: Option<&[(f32, f32)]>) -> Result<Vec<Word>, String> {
     run_local(model, pcm, languages, false, prompt, true, false, vad, |state| {
         let mut words: Vec<Word> = vec![];
         for i in 0..state.full_n_segments() {
             let Some(seg) = state.get_segment(i) else { continue };
+            let (t0, t1) = (seg.start_timestamp() as f32 / 100.0, seg.end_timestamp() as f32 / 100.0);
+            if spans.is_some_and(|s| !heard(t0, t1, s)) {
+                continue;
+            }
             for j in 0..seg.n_tokens() {
                 let Some(tok) = seg.get_token(j) else { continue };
                 let text = tok.to_str_lossy().map_err(|e| e.to_string())?;
@@ -841,6 +859,36 @@ mod tests {
         // the check is that nothing was added, not that the text is identical.
         let words = |t: &str| t.split_whitespace().count();
         assert!(words(&kept) <= words(&alone) + 2, "only the speech is kept: {kept:?} vs {alone:?}");
+    }
+
+    /// Meeting chunks through the real model: two speakers with 12 s of knocks between keep every
+    /// word; a chunk of knocks gives none; speech then 20 s of knocks keeps nothing after the speech.
+    /// `ECHOTYPE_TEST_MODEL=<ggml file> ECHOTYPE_TEST_WAV=<speech> [ECHOTYPE_TEST_WAV2=<other speech>] cargo test --release meeting_chunk_keeps_only_speech -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn meeting_chunk_keeps_only_speech() {
+        let (Ok(model), Ok(wav)) = (std::env::var("ECHOTYPE_TEST_MODEL"), std::env::var("ECHOTYPE_TEST_WAV")) else { return eprintln!("skipped") };
+        let (model, vad) = (Path::new(&model), crate::speakers::vad().expect("Silero downloaded (speakers::ensure_vad)"));
+        let read = |f: &str| crate::audio::decode(std::fs::read(f).unwrap(), Some("wav")).unwrap();
+        let (one, two) = (read(&wav), read(&std::env::var("ECHOTYPE_TEST_WAV2").unwrap_or(wav.clone())));
+        let text = |w: &[Word]| w.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+        let words = |pcm: &[f32], vad: Option<&Path>| transcribe_words(model, pcm, &[], "", vad).unwrap();
+
+        let mut both = one.clone();
+        both.extend(knocks(12));
+        both.extend(&two);
+        let (all, kept) = (words(&both, None), words(&both, Some(&vad)));
+        eprintln!("two speakers, without Silero: {}\n              with Silero:    {}", text(&all), text(&kept));
+        assert!(kept.len() + 2 >= all.len(), "no real word lost: {} of {}", kept.len(), all.len());
+
+        assert!(words(&knocks(10), Some(&vad)).is_empty(), "a chunk of knocks gives no words");
+
+        let mut tail = one.clone();
+        tail.extend(knocks(20));
+        let end = one.len() as f32 / 16_000.0 + 1.0;
+        let (all, kept) = (words(&tail, None), words(&tail, Some(&vad)));
+        eprintln!("speech then knocks, without: {}\n                    with:    {}", text(&all), text(&kept));
+        assert!(kept.iter().all(|w| w.start < end), "nothing after the speech: {kept:?}");
     }
 
     #[test]
