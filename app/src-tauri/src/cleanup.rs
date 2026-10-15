@@ -276,6 +276,10 @@ fn rejected(s: &Settings, raw: &str, cleaned: &str) -> Option<&'static str> {
     if lost_a_number(raw, cleaned) {
         return Some("Cleanup left out a number you said, so Echotype pasted your words as spoken.");
     }
+    // "5" for a spoken "paanch" is fine; "5:30" for it is a guess.
+    if numbers(cleaned).len() > numbers(raw).len() + words(raw).iter().filter(|w| NUMBER_WORDS.contains(&w.as_str())).count() {
+        return Some("Cleanup added a number you did not say, so Echotype pasted your words as spoken.");
+    }
     if negations(cleaned) < negations(raw) {
         return Some("Cleanup dropped a \"not\" you said, so Echotype pasted your words as spoken.");
     }
@@ -289,7 +293,7 @@ fn rejected(s: &Settings, raw: &str, cleaned: &str) -> Option<&'static str> {
 /// Lower-case words, with contractions spelled out ("don't" -> "do not", "I'll" -> "I will") so
 /// that contracting or expanding one is not a change. Hyphens split ("non-members" -> "non").
 fn words(text: &str) -> Vec<String> {
-    let sep = |c: char| c.is_whitespace() || (c.is_ascii_punctuation() && c != '\'') || "“”…—–।॥«»¿¡".contains(c);
+    let sep = |c: char| c.is_whitespace() || (c.is_ascii_punctuation() && c != '\'') || "“”…—–।॥«»¿¡₹€£¥".contains(c);
     let mut out = vec![];
     for w in text.to_lowercase().replace(['’', '‘'], "'").split(sep).map(|w| w.trim_matches('\'')).filter(|w| !w.is_empty()) {
         let Some((stem, tail)) = w.split_once('\'') else {
@@ -332,13 +336,20 @@ fn negations(text: &str) -> usize {
     (0..w.len()).filter(|&i| NEG.contains(&w[i].as_str()) && !(w[i] == "no" && w.get(i + 1).is_some_and(|n| CORRECTION.contains(&n.as_str())))).count()
 }
 
+/// Spoken numbers, which cleanup may write as digits: English, then Hinglish and Hindi.
+// ponytail: "do" (2 in Hindi) also counts the English verb, a slightly looser number check.
+const NUMBER_WORDS: [&str; 77] = [
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety", "hundred", "thousand", "million", "dozen", "half",
+    "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
+    "ek", "do", "teen", "char", "chaar", "paanch", "panch", "chhe", "saat", "aath", "nau", "das", "sau", "hazaar", "hazar", "lakh", "crore",
+    "एक", "दो", "तीन", "चार", "पांच", "पाँच", "पाच", "छह", "सात", "आठ", "नौ", "दस", "सौ", "हजार", "हज़ार", "लाख", "करोड़",
+];
+
 /// True when the cleanup holds a word the speaker never said and the Dictionary does not name.
 /// Numbers in digits or words, list punctuation, articles and small prepositions ("open on two
 /// sides") may appear.
-// ponytail: a new number word slips through (lost_a_number only guards against dropped ones).
 fn added_words(raw: &str, cleaned: &str, dictionary: &[String]) -> bool {
     const FREE: [&str; 11] = ["a", "an", "the", "and", "is", "on", "in", "of", "to", "for", "at"];
-    const NUMBER_WORDS: [&str; 33] = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety", "hundred", "thousand", "million", "dozen", "half"];
     let said: std::collections::HashSet<String> = words(raw).into_iter().chain(dictionary.iter().flat_map(|d| words(d))).collect();
     words(cleaned).iter().any(|w| !said.contains(w) && !FREE.contains(&w.as_str()) && !NUMBER_WORDS.contains(&w.as_str()) && !w.starts_with(|c: char| c.is_ascii_digit()))
 }
@@ -609,6 +620,10 @@ mod tests {
             ("The only thing I'd...", "The only thing I'd say is that we need to work on improving our IP.", "added"),
             ("In five minutes, I was in a new world.", "In five minutes, I'll be in a new world.", "added"),
             ("Ping Arnav about the Zozo Day thing.", "Ping Arnav about the Xoxoday launch.", "added"),
+            ("I can't not go to this wedding.", "I can't go to this wedding.", "\"not\""),
+            ("Tell Midhun that the", "Tell Midhun that the message is for him.", "added"),
+            ("The flight is at 6.5 am on the 3rd, gate 22B.", "The flight is at 6:50 AM on the 3rd, gate 22B.", "number"),
+            ("मत भूनना, पाच कुजे तक रिपोर्ट चाहिए.", "मत भूनना, 5:30 कुजे तक रिपोर्ट चाहिए.", "number"),
         ];
         for (raw, cleaned, why) in bad {
             assert!(rejected(&s, raw, cleaned).is_some_and(|w| w.contains(why)), "{raw:?} -> {cleaned:?}");
@@ -624,6 +639,9 @@ mod tests {
             ("I am gonna do it, I do not know when", "I'm going to do it, I don't know when."),
             ("Yeah okay.", "OK."),
             ("No.", "No."),
+            ("Transfer, 2 lakh 50,000 rupees, no wait, 2 lakh only.", "Transfer ₹2 lakh only."),
+            ("मत बूलना, पांच बचे तक रिपोर्ट चाहिए.", "मत बूलना, 5 बचे तक रिपोर्ट चाहिए."),
+            ("My number is nine eight seven six five four three two one zero.", "My number is 9876543210."),
         ];
         for (raw, cleaned) in good {
             assert_eq!(rejected(&s, raw, cleaned), None, "{raw:?} -> {cleaned:?}");
