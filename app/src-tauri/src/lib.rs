@@ -7,6 +7,7 @@ mod cloud;
 mod hotkey;
 mod llm;
 mod meeting;
+mod music;
 mod pill;
 mod platform;
 mod settings;
@@ -261,6 +262,9 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                 Cmd::Lost(id) => (Ev::AutoStop(id), false),
                 Cmd::Show(id, locked) => {
                     if let Some(l) = live.as_mut().filter(|l| l.id == id && (locked || !l.shown)) {
+                        if !l.shown && s.pause_music {
+                            music::set(true);
+                        }
                         l.shown = true;
                         if s.sounds {
                             lock(&l.stats).exclude(SOUND_WINDOWS);
@@ -298,6 +302,9 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                         } else if ev != Ev::Press {
                             // Toggle, or a talk key already held alone (HoldReady) or double-tapped (Release).
                             l.shown = true;
+                            if s.pause_music {
+                                music::set(true);
+                            }
                             if s.sounds {
                                 lock(&l.stats).exclude(SOUND_WINDOWS);
                                 platform::play_sound(&app, if ev == Ev::Release && !toggle_mode { "lock" } else { "start" });
@@ -336,6 +343,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                 Act::Discard { hint: show } => {
                     if let Some(l) = live.take() {
                         l.rec.stop();
+                        music::set(false);
                     }
                     state(&app).recording.store(false, Ordering::SeqCst);
                     let _ = state(&app).pill_wake.send(());
@@ -346,6 +354,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                     let Some(l) = live.take() else { continue };
                     state(&app).recording.store(false, Ordering::SeqCst);
                     let pcm = l.rec.stop();
+                    music::set(false); // the mic is closed: the music needn't wait for transcription
                     let _ = state(&app).pill_wake.send(());
                     if s.sounds {
                         platform::play_sound(&app, "stop");
@@ -391,7 +400,8 @@ fn start_recording(app: &AppHandle, s: &Settings, id: u64) -> Result<Live, Dicta
     let stats = Arc::new(Mutex::new(LevelStats::default()));
     let lost = Arc::new(AtomicBool::new(false));
     let (a, st, lost2, started, sent) = (app.clone(), stats.clone(), lost.clone(), Instant::now(), AtomicBool::new(false));
-    let rec = audio::Recorder::start(s.input_device.clone(), move |db, gone| {
+    let device = audio::pick_input(s.input_device.clone(), s.prefer_builtin_mic, audio::quick_inputs);
+    let rec = audio::Recorder::start(device, move |db, gone| {
         let level = lock(&st).push(db);
         lock(&state(&a).pill).set_level(level.muted, level.meter);
         let _ = a.emit("audio-level", level);
@@ -1261,7 +1271,8 @@ async fn mic_check(app: AppHandle, on: bool) -> R<()> {
     if !on {
         return Ok(());
     }
-    let device = current_settings(&app).input_device;
+    let s = current_settings(&app);
+    let device = audio::pick_input(s.input_device, s.prefer_builtin_mic, audio::quick_inputs);
     let (mut stats, mut n) = (LevelStats::default(), 0u32);
     let rec = blocking(move || {
         audio::Recorder::start(device, move |db, _| {

@@ -576,7 +576,7 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .info { display: inline-grid; place-items: center; width: 14px; height: 14px; margin-left: 4px; border-radius: 50%; border: 1px solid var(--outline); color: var(--fg-2); font: var(--fw-semi) 9px/1 var(--font); vertical-align: 1px; }
 .info::before { content: "i"; }
 .row.tip { background: var(--soft); }
-.row.tip + .row::before, .row + .row.tip::before { opacity: 0; }
+.row.tip:not([hidden]) + .row::before, .row + .row.tip::before { opacity: 0; }
 
 /* Notices: the one-time upgrade offer, the Home "No cleanup" banner and persistent status lines. */
 .notice, .banner { display: flex; align-items: center; gap: 10px; padding: 10px 10px 10px 14px; margin: 16px 0 0; border-radius: var(--r-card); background: var(--soft); font-size: 12.5px; }

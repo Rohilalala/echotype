@@ -197,24 +197,53 @@ pub struct InputDevice {
     pub bluetooth: bool,
     /// The system default input, what "System default" records from.
     pub default: bool,
+    /// Connected inside the Mac (CoreAudio transport BuiltIn): the MacBook or iMac mic.
+    pub builtin: bool,
 }
 
 pub fn input_devices() -> Vec<InputDevice> {
     let host = cpal::default_host();
     let default = host.default_input_device().and_then(|d| d.name().ok());
     #[cfg(target_os = "macos")]
-    let transports = mac::bluetooth_names();
+    let transports = mac::inputs();
     let names: Vec<String> = host.input_devices().map(|ds| ds.filter_map(|d| d.name().ok()).collect()).unwrap_or_default();
     names
         .into_iter()
         .map(|name| {
             #[cfg(target_os = "macos")]
-            let bluetooth = transports.as_ref().map_or_else(|| bluetooth_by_name(&name), |t| t.contains(&name));
+            let (bluetooth, builtin) = match &transports {
+                Some(t) => t.iter().find(|d| d.name == name).map_or((false, false), |d| (d.bluetooth, d.builtin)),
+                None => (bluetooth_by_name(&name), false),
+            };
             #[cfg(not(target_os = "macos"))]
-            let bluetooth = bluetooth_by_name(&name);
-            InputDevice { default: default.as_deref() == Some(name.as_str()), name, bluetooth }
+            let (bluetooth, builtin) = (bluetooth_by_name(&name), false);
+            InputDevice { default: default.as_deref() == Some(name.as_str()), name, bluetooth, builtin }
         })
         .collect()
+}
+
+/// `pick_input`'s device list, straight from CoreAudio (~2 ms; cpal's enumeration takes ~160 ms,
+/// too long for the start of a dictation). Elsewhere there is no built-in mic to prefer.
+pub fn quick_inputs() -> Vec<InputDevice> {
+    #[cfg(target_os = "macos")]
+    return mac::inputs().unwrap_or_default();
+    #[cfg(not(target_os = "macos"))]
+    vec![]
+}
+
+/// The mic a dictation records from (None = the system default). With `prefer_builtin`, a
+/// Bluetooth system default gives way to the built-in mic: recording from AirPods switches them
+/// to the hands-free profile, which makes the voice phone-call quality and the music they play
+/// worse. A mic the user picked is always used as picked.
+pub fn pick_input(chosen: Option<String>, prefer_builtin: bool, inputs: impl FnOnce() -> Vec<InputDevice>) -> Option<String> {
+    if chosen.is_some() || !prefer_builtin {
+        return chosen;
+    }
+    let inputs = inputs();
+    if !inputs.iter().any(|d| d.default && d.bluetooth) {
+        return None;
+    }
+    inputs.into_iter().find(|d| d.builtin).map(|d| d.name)
 }
 
 /// Fallback when the OS can't say how a device is connected.
@@ -252,9 +281,10 @@ mod mac {
         Address { selector: cc(selector), scope: GLOBAL, element: 0 }
     }
 
-    /// Names of every audio device whose CoreAudio transport is Bluetooth or Bluetooth LE.
-    /// None when CoreAudio can't be read; callers fall back to the device name.
-    pub fn bluetooth_names() -> Option<Vec<String>> {
+    /// Every input-capable audio device: its name, how it is connected (CoreAudio transport) and
+    /// whether it is the system default input. None when CoreAudio can't be read; callers fall
+    /// back to the device name.
+    pub fn inputs() -> Option<Vec<super::InputDevice>> {
         // SAFETY: each call gets a valid address and an out-buffer of exactly the size it reports or expects.
         unsafe {
             let devs = addr(b"dev#");
@@ -266,18 +296,27 @@ mod mac {
             if AudioObjectGetPropertyData(SYSTEM, &devs, 0, std::ptr::null(), &mut size, ids.as_mut_ptr().cast()) != 0 {
                 return None;
             }
+            let (mut default, mut dsize) = (0u32, 4u32);
+            AudioObjectGetPropertyData(SYSTEM, &addr(b"dIn "), 0, std::ptr::null(), &mut dsize, (&mut default as *mut u32).cast());
             let mut out = vec![];
             for id in ids {
+                // Input streams: the built-in speakers share the mic's transport.
+                let (streams, mut ssize) = (Address { selector: cc(b"stm#"), scope: cc(b"inpt"), element: 0 }, 0u32);
+                if AudioObjectGetPropertyDataSize(id, &streams, 0, std::ptr::null(), &mut ssize) != 0 || ssize == 0 {
+                    continue;
+                }
                 let (mut transport, mut tsize) = (0u32, 4u32);
                 if AudioObjectGetPropertyData(id, &addr(b"tran"), 0, std::ptr::null(), &mut tsize, (&mut transport as *mut u32).cast()) != 0 {
                     continue;
                 }
-                if transport != cc(b"blue") && transport != cc(b"blea") {
-                    continue;
-                }
                 let (mut name, mut nsize): (CFStringRef, u32) = (std::ptr::null(), std::mem::size_of::<CFStringRef>() as u32);
                 if AudioObjectGetPropertyData(id, &addr(b"lnam"), 0, std::ptr::null(), &mut nsize, (&mut name as *mut CFStringRef).cast()) == 0 && !name.is_null() {
-                    out.push(CFString::wrap_under_create_rule(name).to_string());
+                    out.push(super::InputDevice {
+                        name: CFString::wrap_under_create_rule(name).to_string(),
+                        bluetooth: transport == cc(b"blue") || transport == cc(b"blea"),
+                        builtin: transport == cc(b"bltn"),
+                        default: id == default,
+                    });
                 }
             }
             Some(out)
@@ -720,6 +759,39 @@ mod tests {
     fn bluetooth_name_fallback() {
         assert!(bluetooth_by_name("Aditya's AirPods Pro") && bluetooth_by_name("Jabra Bluetooth Headset"));
         assert!(!bluetooth_by_name("MacBook Pro Microphone") && !bluetooth_by_name("Shure MV7"));
+    }
+
+    #[test]
+    fn a_bluetooth_default_gives_way_to_the_built_in_mic_unless_a_mic_was_picked() {
+        let dev = |name: &str, default, bluetooth, builtin| InputDevice { name: name.into(), default, bluetooth, builtin };
+        let airpods_default = || vec![dev("MacBook Pro Microphone", false, false, true), dev("AirPods Pro", true, true, false), dev("Shure MV7", false, false, false)];
+        assert_eq!(pick_input(None, true, airpods_default).as_deref(), Some("MacBook Pro Microphone"));
+        assert_eq!(pick_input(Some("AirPods Pro".into()), true, || unreachable!()).as_deref(), Some("AirPods Pro"), "a picked mic is never overridden");
+        assert_eq!(pick_input(None, false, || unreachable!()), None, "setting off: the system default");
+        let usb_default = || vec![dev("MacBook Pro Microphone", false, false, true), dev("Shure MV7", true, false, false)];
+        assert_eq!(pick_input(None, true, usb_default), None, "a wired default stays");
+        let no_builtin = || vec![dev("AirPods Pro", true, true, false), dev("Shure MV7", false, false, false)];
+        assert_eq!(pick_input(None, true, no_builtin), None, "no built-in mic (a Mac mini): the AirPods");
+    }
+
+    /// Lists this Mac's inputs, how each is connected and what a dictation would record from:
+    /// `cargo test print_input_devices -- --ignored --nocapture`
+    #[test]
+    #[ignore = "prints this machine's microphones"]
+    fn print_input_devices() {
+        for _ in 0..2 {
+            let t = Instant::now();
+            let _ = input_devices();
+            println!("input_devices() took {:?}", t.elapsed());
+            let t = Instant::now();
+            let _ = quick_inputs();
+            println!("quick_inputs() took {:?}", t.elapsed());
+        }
+        let devs = quick_inputs();
+        for d in &devs {
+            println!("{d:?}");
+        }
+        println!("with prefer_builtin_mic and System default, a dictation records from: {:?}", pick_input(None, true, || devs));
     }
 
     #[test]

@@ -32,6 +32,12 @@ pub struct Settings {
     /// "hold" (push-to-talk) or "toggle".
     pub mode: String,
     pub input_device: Option<String>,
+    /// With `input_device` on System default and a Bluetooth default input (AirPods), record from
+    /// the built-in mic instead, so the headphones keep their music quality (audio::pick_input).
+    /// On for upgraders too: it never overrides a picked mic.
+    pub prefer_builtin_mic: bool,
+    /// Pause Music or Spotify while dictating and resume what Echotype paused (music.rs, macOS).
+    pub pause_music: bool,
     /// Whisper language codes the user speaks, up to 3; empty is auto-detect (any language). One is
     /// transcribed as that language; with two or three, each clip goes to the likeliest of them.
     pub languages: Vec<String>,
@@ -175,6 +181,8 @@ impl Default for Settings {
             hotkey: "Alt+Space".into(),
             mode: "hold".into(),
             input_device: None,
+            prefer_builtin_mic: true,
+            pause_music: false,
             languages: vec![],
             language: String::new(),
             translate_to_english: false,
@@ -602,6 +610,8 @@ mod tests {
         assert_eq!((s.paste_last_hotkey.as_str(), s.copy_last_hotkey.as_str()), ("", ""), "upgraders get no new global shortcuts");
         assert!(!s.autostart, "upgraders are offered launch at login, not opted in");
         assert_eq!(s.talk_key, "accelerator");
+        assert!(s.prefer_builtin_mic && s.input_device.is_none(), "System default skips Bluetooth mics for upgraders too");
+        assert!(!s.pause_music, "music is never paused unasked");
         assert!(s.sounds && s.dismissed.is_empty());
         assert!(s.pill_idle && s.pill_hidden_until == 0 && !s.pill_in_recordings, "the idle pill is on for upgraders, hidden from capture");
         assert_eq!(s.look, "system", "upgraders follow the system appearance");

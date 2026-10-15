@@ -312,6 +312,10 @@
           <select id="mic" data-bind="input_device" data-null></select></label>
         <div class="row tip" id="btTip" hidden><span class="row-text"><span class="row-desc">This is a Bluetooth mic. Bluetooth drops to a low-quality mode while it records, so quiet speech is harder to catch. The built-in mic works better for whispering.</span></span>
           <button class="btn" id="btTipOk" type="button">Got it</button></div>
+        <label class="row" id="preferBuiltinRow"><span class="row-text"><span class="row-title">Use the built-in mic with Bluetooth headphones</span><span class="row-desc">When System default is AirPods or another Bluetooth headset, Echotype records from your Mac's mic, so your headphones keep their sound quality.</span></span>
+          <input type="checkbox" class="switch" data-bind="prefer_builtin_mic" /></label>
+        <label class="row" id="pauseMusicRow"><span class="row-text"><span class="row-title">Pause music while dictating</span><span class="row-desc">Pauses Music or Spotify while you talk and resumes it after. macOS asks once per app to let Echotype control it.</span></span>
+          <input type="checkbox" class="switch" data-bind="pause_music" /></label>
         <label class="row" id="soundsRow"><span class="row-text"><span class="row-title">Sounds</span><span class="row-desc">A short tone when dictation starts, stops or locks, and a different one when your words could not be pasted.</span></span>
           <input type="checkbox" class="switch" data-bind="sounds" /></label>
         <div class="row" id="soundPackRow"><span class="row-text"><span class="row-title" id="soundPackLabel">Sound pack</span><span class="row-desc">Play to hear start, stop and not pasted.</span></span>

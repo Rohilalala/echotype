@@ -127,7 +127,7 @@ function syncBound() {
 function changed(p) {
   if (p === 'mode' || p === 'hotkey') renderHotkey();
   if (p === 'talk_key') saving.then(refreshStatus); // after the save, or the check re-applies the old key
-  if (p === 'input_device') renderMicNote();
+  if (p === 'input_device' || p === 'prefer_builtin_mic') renderMicNote();
   if (p === 'cleanup.enabled') renderRaw();
   if (p === 'translate_to_english') renderLangNote();
   if (p === 'languages') { renderLanguages(); if (obStep === 4 && !$('#onboard').hidden) obLangRender(); }
@@ -986,7 +986,8 @@ async function renderMics() {
 }
 // D13: a persistent info glyph for a Bluetooth mic, plus a one-time tip.
 function renderMicNote() {
-  const d = devices.find(x => (S.input_device ? x.name === S.input_device : x.default));
+  let d = devices.find(x => (S.input_device ? x.name === S.input_device : x.default));
+  if (!S.input_device && d?.bluetooth && S.prefer_builtin_mic) d = devices.find(x => x.builtin) || d; // audio.rs pick_input
   const bt = !!d?.bluetooth;
   $('#btInfo').hidden = !bt;
   $('#btTip').hidden = !bt || S.dismissed.includes('bluetooth_tip');
@@ -1021,6 +1022,7 @@ function renderStartup() {
   $('#talkRow').hidden = $('#obTalkRow').hidden = !isMac; // talk keys are macOS-only; sounds play everywhere
   $('#pillTitle').hidden = $('#pillGroup').hidden = !isMac; // so is the idle pill
   $('#meetingsTitle').hidden = $('#meetingsGroup').hidden = !isMac; // and call detection (calls.rs)
+  $('#preferBuiltinRow').hidden = $('#pauseMusicRow').hidden = !isMac; // and both (audio.rs pick_input, music.rs)
 }
 
 // "Hide for 1 hour" shows until when (D12); the hour ends by itself, so re-render then.
