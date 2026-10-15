@@ -1353,10 +1353,15 @@ async fn film_window(app: AppHandle, on: bool, show: bool) -> R<()> {
             e(w.hide())?;
             e(w.set_ignore_cursor_events(false))?;
             e(w.set_always_on_top(false))?;
+            // The title bar comes back from tao's own state, applied later on the main thread: resizable
+            // first (or the zoom button comes back dimmed), then the overlay style once it has landed
+            // (or the traffic lights sit in a strip above the window instead of over it).
+            // ponytail: a fixed 150 ms wait for tao's async style mask; hook its completion if it ever races.
+            e(w.set_resizable(true))?;
             e(w.set_decorations(true))?;
+            std::thread::sleep(Duration::from_millis(150));
             e(w.set_title_bar_style(TitleBarStyle::Overlay))?;
             e(w.set_shadow(true))?;
-            e(w.set_resizable(true))?;
             e(w.set_effects(WindowEffectsConfig { effects: vec![Effect::Sidebar], state: Some(EffectState::FollowsWindowActiveState), radius: None, color: None, interactive: false }))?;
             e(w.set_min_size(Some(LogicalSize::new(720.0, 520.0))))?;
             e(w.set_size(LogicalSize::new(800.0, 600.0)))?;
@@ -1614,6 +1619,16 @@ pub fn run() {
                 show_main(app.handle());
             }
             // On-screen checks: the card for this text after 2 s, without dictating or typing.
+            // On-screen check of the film's window round trip: the stage, then the settings window again.
+            if std::env::var_os("ECHOTYPE_TEST_FILM").is_some() {
+                let h = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(2));
+                    let _ = tauri::async_runtime::block_on(film_window(h.clone(), true, true));
+                    std::thread::sleep(Duration::from_secs(2));
+                    let _ = tauri::async_runtime::block_on(film_window(h, false, true));
+                });
+            }
             if let Some(text) = std::env::var("ECHOTYPE_TEST_CARD").ok().filter(|t| !t.is_empty()) {
                 let (h, s) = (app.handle().clone(), s.clone());
                 std::thread::spawn(move || {
