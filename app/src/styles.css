@@ -848,3 +848,8 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .range { display: flex; align-items: center; gap: 10px; flex: none; }
 .range input { width: 160px; accent-color: var(--accent); }
 .range output { min-width: 3.2em; text-align: right; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.swatches { display: flex; gap: 8px; flex: none; }
+.swatches input { position: absolute; opacity: 0; pointer-events: none; }
+.swatch { display: block; width: 20px; height: 20px; border-radius: 50%; background: radial-gradient(circle at 50% 50%, var(--c) 0 3px, transparent 3.5px), #1d1e22; box-shadow: 0 0 0 1px var(--line-strong); cursor: default; }
+.swatches input:checked + .swatch { box-shadow: 0 0 0 2px var(--pane), 0 0 0 4px var(--fg-2); }
+.swatches input:focus-visible + .swatch { outline: 2px solid var(--accent); outline-offset: 3px; }

@@ -993,6 +993,7 @@ function renderPill() {
     : 'Drag the pill anywhere on any display; double-click it to put it back.';
   $('#pillFollowRow').hidden = $('#pillIdleRow').hidden = $('#pillHideRow').hidden = $('#pillRecRow').hidden = bar;
   $('#pillSizeRow').hidden = $('#ballSizeRow').hidden = $('#pillPreviewRow').hidden = $('#pillFadeRow').hidden = bar;
+  for (const id of ['orbListenRow', 'orbThinkRow', 'orbDetailRow', 'orbColorRow']) $('#' + id).hidden = bar;
   $('#obFadeRow').hidden = bar || !isMac;
   $('#soundPackRow').hidden = !S.sounds;
   sizePreview();
@@ -1012,14 +1013,17 @@ $('#soundPlay').addEventListener('click', () => invoke('preview_sounds', { pack:
 function sizePreview() {
   $('#pillSizeOut').textContent = `${Math.round((S.pill_size ?? 1.5) * 100)}%`;
   $('#ballSizeOut').textContent = `${Math.round((S.ball_size ?? 1) * 100)}%`;
+  $('#orbDetailOut').textContent = `${Math.round((S.orb_detail ?? 1) * 100)}%`;
 }
 const showPill = () => saving.then(() => invoke('show_pill_demo')).catch(() => {});
-for (const id of ['pill_size', 'ball_size']) {
+for (const id of ['pill_size', 'ball_size', 'orb_detail']) {
   const el = $(`[data-bind="${id}"]`);
   el.addEventListener('input', e => { S[id] = Number(e.target.value); sizePreview(); });
   el.addEventListener('change', showPill);
 }
 $('#pillShow').addEventListener('click', showPill);
+// A new orb style or colour plays on the real pill at once.
+for (const el of $$('[data-bind="orb_listen"], [data-bind="orb_think"], [data-bind="orb_color"]')) el.addEventListener('change', showPill);
 
 $('#pillHide').addEventListener('click', () => {
   S.pill_hidden_until = S.pill_hidden_until > Date.now() ? 0 : Date.now() + HIDE_MS;

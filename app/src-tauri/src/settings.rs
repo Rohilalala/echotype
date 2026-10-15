@@ -91,6 +91,12 @@ pub struct Settings {
     pub ball_size: f64,
     /// The idle ball fades back while the pointer is away and brightens as it comes near; off = always full strength.
     pub pill_fade: bool,
+    /// The orb (Settings → Pill): its listening and thinking styles (thinking-orbs states, ORB_STYLES),
+    /// how many dots it has (0.5..2 times the default) and their colour ("#rrggbb").
+    pub orb_listen: String,
+    pub orb_think: String,
+    pub orb_detail: f64,
+    pub orb_color: String,
     /// Which bundled sound pack plays (one of SOUND_PACKS) when `sounds` is on.
     pub sound_pack: String,
     /// "Show advanced settings". Off: Echotype picks the speech model, the cleaner and its memory
@@ -113,6 +119,9 @@ pub struct Settings {
     /// When a call whose notes are running ends: "ask" | "auto" (stop them).
     pub meeting_end: String,
 }
+
+/// The orb's styles: the thinking-orbs states (app/src/vendor/thinking-orbs.js STATE_TO_MODE).
+pub const ORB_STYLES: [&str; 9] = ["listening", "working", "searching", "solving", "connecting", "weaving", "composing", "breathing", "shaping"];
 
 /// The bundled sound packs (sounds/<pack>/{start,stop,lock,nopaste}.wav).
 pub const SOUND_PACKS: [&str; 5] = ["classic", "glass", "wood", "pop", "soft"];
@@ -193,6 +202,10 @@ impl Default for Settings {
             ball_size: 1.0,
             sound_pack: "classic".into(),
             pill_fade: true,
+            orb_listen: "listening".into(),
+            orb_think: "working".into(),
+            orb_detail: 1.0,
+            orb_color: "#eef1ff".into(),
             advanced: false,
             cleaner_memory: "ready".into(),
             cleaner_idle_unload: false,
@@ -269,6 +282,18 @@ impl Settings {
         let fit = |v: f64, lo: f64, hi: f64, def: f64| if v.is_finite() { v.clamp(lo, hi) } else { def };
         self.pill_size = fit(self.pill_size, 1.0, 2.0, 1.5);
         self.ball_size = fit(self.ball_size, 0.6, 2.0, 1.0);
+        let style = |v: &mut String, def: &str| {
+            if !ORB_STYLES.contains(&v.as_str()) {
+                *v = def.into();
+            }
+        };
+        style(&mut self.orb_listen, "listening");
+        style(&mut self.orb_think, "working");
+        self.orb_detail = fit(self.orb_detail, 0.5, 2.0, 1.0);
+        let hex = self.orb_color.len() == 7 && self.orb_color.starts_with('#') && self.orb_color[1..].chars().all(|c| c.is_ascii_hexdigit());
+        if !hex {
+            self.orb_color = "#eef1ff".into();
+        }
         if !SOUND_PACKS.contains(&self.sound_pack.as_str()) {
             self.sound_pack = "classic".into();
         }

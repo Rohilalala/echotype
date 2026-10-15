@@ -580,6 +580,8 @@ struct View {
     ball: f64,
     /// Fade the idle ball while the pointer is away (Settings → Pill).
     fade: bool,
+    /// The orb's look (Settings → Pill): listening and thinking styles, detail, dot colour.
+    orb: (String, String, f64, String),
 }
 
 struct Screen {
@@ -855,7 +857,7 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
                 shown = want;
             }
             // Picked up, the idle bar is a bar again: the hint is for hovering, not carrying.
-            let view = View { active, hover: inside, expand: expanded && !held, hint, drag: held && lock(&state(&app).drag).is_some_and(|d| d.moved), near: close || held, ball: s.ball_size, fade: s.pill_fade };
+            let view = View { active, hover: inside, expand: expanded && !held, hint, drag: held && lock(&state(&app).drag).is_some_and(|d| d.moved), near: close || held, ball: s.ball_size, fade: s.pill_fade, orb: (s.orb_listen.clone(), s.orb_think.clone(), s.orb_detail, s.orb_color.clone()) };
             if emitted.as_ref() != Some(&view) {
                 let _ = app.emit_to("overlay", "pill", &view);
                 emitted = Some(view);

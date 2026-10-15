@@ -83,6 +83,7 @@ listen('dictation-state', ({ payload: p }) => {
 listen('pill', ({ payload }) => {
   view = payload;
   document.documentElement.style.setProperty('--ball', view.ball ?? 1);
+  if (view.orb) setOrb(view.orb);
   render();
 });
 
@@ -101,10 +102,22 @@ listen('audio-level', ({ payload }) => {
 // listening/thinking → card → ball is one continuous morph. A dark backing chases .pill's box
 // underneath so dots and words read on any wallpaper.
 const cvs = document.getElementById('body'), g = cvs.getContext('2d');
-const W = 260, H = 100, ORB = 36, N = 1000;
+const W = 260, H = 100, ORB = 36, N = 2000;
 // Denser than the 64 px presets, with finer dots, so the orb has the same detail as the intro's ball.
 const dense = (p, count, size) => ({ ...p, opts: scaleRadii(scaleCounts(p.opts, count), size) });
-const LISTEN = dense(resolvePreset('listening', 64), 3, 0.62), THINK = dense(resolvePreset('working', 64), 1.3, 0.8);
+// Settings → Pill: the listening and thinking styles, the detail (times the default dots) and
+// the dots' colour. Rebuilt only when one of them changes.
+let LISTEN, THINK, orbKey = '', tint = [238, 241, 255];
+function setOrb([listen, think, detail, color] = ['listening', 'working', 1, '#eef1ff']) {
+  const key = [listen, think, detail, color].join('|');
+  if (key === orbKey) return;
+  orbKey = key;
+  LISTEN = dense(resolvePreset(listen, 64), 3 * detail, 0.62);
+  THINK = dense(resolvePreset(think, 64), 1.3 * detail, 0.8);
+  const n = parseInt(color.slice(1), 16);
+  tint = [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+setOrb();
 // Dots visible in the ball and along an edge; the rest wait, unseen, on those same spots.
 const BALL_DOTS = 90, EDGE_GAP = 4;
 // The window shows this page zoomed 1.5x (pill.rs ZOOM): draw at 3x so the dots stay crisp.
@@ -243,8 +256,8 @@ function frame(now) {
   for (const i of order) {
     const q = P[i];
     if (q.a < 0.02) continue;
-    const gray = Math.round((1 - Math.min(1, Math.max(0, q.w))) * 255);
-    g.fillStyle = `rgba(${gray},${gray},${gray},${q.a})`;
+    const k = 1 - Math.min(1, Math.max(0, q.w));
+    g.fillStyle = `rgba(${Math.round(tint[0] * k)},${Math.round(tint[1] * k)},${Math.round(tint[2] * k)},${q.a})`;
     g.beginPath();
     g.arc(q.x, q.y, Math.max(0.3, q.r), 0, Math.PI * 2);
     g.fill();
