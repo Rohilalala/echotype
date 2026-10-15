@@ -994,7 +994,6 @@ function renderPill() {
   $('#pillFollowRow').hidden = $('#pillIdleRow').hidden = $('#pillHideRow').hidden = $('#pillRecRow').hidden = bar;
   $('#pillSizeRow').hidden = $('#ballSizeRow').hidden = $('#pillPreviewRow').hidden = $('#pillFadeRow').hidden = bar;
   for (const id of ['orbListenRow', 'orbThinkRow', 'orbDetailRow', 'orbColorRow']) $('#' + id).hidden = bar;
-  $('#obFadeRow').hidden = bar || !isMac;
   $('#soundPackRow').hidden = !S.sounds;
   sizePreview();
   const until = S.pill_hidden_until || 0, hidden = until > Date.now();
@@ -1096,13 +1095,12 @@ for (const b of $$('[data-perm]')) b.addEventListener('click', () => invoke('ope
 const obStill = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const SAY = 'Echotype, meet my Mac.';
 const BUSY = ['recording', 'transcribing', 'cleaning'];
-const PACKS = [['classic', 'Classic'], ['glass', 'Glass'], ['wood', 'Wood'], ['pop', 'Pop'], ['soft', 'Soft']];
 const wait = ms => new Promise(r => setTimeout(r, ms));
 // Per-viewer memory that may be missing (private storage): only what makes cleanup tidier.
 const local = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { return null; } };
 let obStep = 1, orb = null, obPoll = 0, obSeq = 0;
 const obT = {}; // timers by name
-const ob = { mic: null, heard: 0, checked: false, quiet: false, paused: false, ax: null, axSince: 0, asked: false, pressed: false, offerClick: false, watched: false, recAt: 0, secs: 0, hinglish: false };
+const ob = { cleanHow: 'off', mic: null, heard: 0, checked: false, quiet: false, paused: false, ax: null, axSince: 0, asked: false, pressed: false, offerClick: false, watched: false, recAt: 0, secs: 0, hinglish: false };
 const later = (name, ms, fn) => { clearTimeout(obT[name]); obT[name] = setTimeout(fn, ms); };
 // Show something that appears within a step with a short rise.
 function pop(el, on = true) {
@@ -1252,6 +1250,7 @@ function obEnter(n) {
   }
   if (n === 3) { ob.axSince = Date.now(); $('#obStale').hidden = true; renderObKeys(); obAxRender(); }
   if (n === 4) obPrefsRender();
+  else orb.style(null); // step 4 wears the user's orb; the other steps the default, in ink
   if (n === 5) obDoneRender();
   if (n !== 1 && !BUSY.includes(dictation.state)) orb.set('orb');
   obFoot();
@@ -1276,6 +1275,8 @@ function obFoot() {
     if (ob.offerClick) extra = dictation.state === 'recording' ? 'Click to finish' : 'Click to start instead';
   } else if (obStep === 3) {
     if (!ob.ax) { label = 'Open System Settings'; extra = 'Not now: keep text on the clipboard'; }
+  } else if (obStep === 4) {
+    if (obQ < obQs().length - 1) extra = 'Skip the rest';
   } else if (obStep === 5) label = obRelaunch() ? 'Finish and relaunch' : 'Finish';
   next.textContent = label;
   alt.textContent = extra;
@@ -1300,6 +1301,7 @@ $('#obNext').addEventListener('click', async () => {
     return invoke('open_permission_settings', { kind: 'accessibility' }).catch(() => {});
   }
   if (obStep === 5) return obFinish();
+  if (obStep === 4 && obQ < obQs().length - 1) return obQShow(obQ + 1);
   obShow(obStep + 1);
 });
 $('#obAlt').addEventListener('click', () => {
@@ -1307,8 +1309,11 @@ $('#obAlt').addEventListener('click', () => {
   if (obStep === 1) { pop($('#obMicPickRow')); $('#obMicPick').focus(); return obFoot(); }
   if (obStep === 2) return invoke('toggle_dictation').catch(() => {});
   if (obStep === 3) obShow(4);
+  else if (obStep === 4) obShow(5);
 });
-$('#obBack').addEventListener('click', () => (obStep === 1 ? invoke('quit_app').catch(() => {}) : obShow(obStep - 1)));
+// Back (and Esc) walk back through step 4's questions before leaving it.
+const obBackOne = () => (obStep === 4 && obQ > 0 ? obQShow(obQ - 1) : obShow(obStep - 1));
+$('#obBack').addEventListener('click', () => (obStep === 1 ? invoke('quit_app').catch(() => {}) : obBackOne()));
 $('#obSkip').addEventListener('click', () => finishOnboarding('home'));
 // Enter is the primary action; Esc and ⌘[ go back. Esc never closes onboarding, and does
 // nothing while a dictation is running (Rust has Esc then, to cancel it).
@@ -1317,7 +1322,7 @@ $('#onboard').addEventListener('keydown', e => {
   const back = e.key === 'Escape' || (e.metaKey && e.key === '[');
   if (back) {
     e.preventDefault();
-    if (obStep > 1 && !BUSY.includes(dictation.state)) obShow(obStep - 1);
+    if (obStep > 1 && !BUSY.includes(dictation.state)) obBackOne();
   } else if (e.key === 'Enter' && !e.isComposing && !e.target.closest('button, select, a, textarea, input[type="checkbox"], input[type="radio"]')) {
     e.preventDefault();
     const n = $('#obNext');
@@ -1521,20 +1526,116 @@ async function obRealPaste(p) {
 }
 
 // ----- 4: make it yours -----
+// One question at a time (.ob-q). A tile saves as it's picked and, a beat later, the next question
+// comes in; the sounds stay put so each can be heard. The pill's questions are macOS-only (data-only).
+let obQ = 0;
+const obQs = () => $$('.ob-q').filter(q => !q.dataset.only || (isMac && (q.dataset.only === 'mac' || S.show_in !== 'menubar')));
 function obPrefsRender() {
   $('#obName').value = S.display_name || '';
   obHello();
   // Hindi among the Mac's languages: Hinglish is likely, so it starts selected (once).
   if (local('ob-lang') == null && !(S.language === 'hi' && S.translate_to_english) && navigator.languages?.some(l => /^hi\b/i.test(l))) obLang('hinglish');
   obLangRender();
-  const builtIn = obBuiltIn();
-  $('#obClean').hidden = !builtIn;
-  $('#obCleanup').hidden = builtIn;
-  $('#obClean').checked = S.cleanup.enabled && S.cleanup.provider === 'echotype';
-  obSounds();
+  obCleanRender();
+  // Back from the recap lands on the last question.
+  obQShow(document.documentElement.classList.contains('ob-back') ? obQs().length - 1 : 0, true);
+  // The name is typed straight onto the card, so the caret is there waiting (labelled by the heading).
+  if (obQ === 0) setTimeout(() => obStep === 4 && obQ === 0 && $('#obName').focus({ preventScroll: true }));
 }
-const obHello = () => $('#obHello').replaceChildren(firstName() ? `Home will say “${hello()}”` : 'Home greets you by name.');
+// Under the name, the greeting Home will give, fading in once there's a name (and out, as it was).
+function obHello() {
+  if (firstName()) $('#obHello').textContent = hello();
+  $('#obHello').classList.toggle('on', !!firstName());
+}
 $('#obName').addEventListener('input', e => { S.display_name = e.target.value; saveSoon(); obHello(); renderGreeting(); });
+
+// The step's own enter (a staggered rise, ob-back reversing it), the count, the orb, the focus.
+function obQShow(i, first = false) {
+  const qs = obQs(), q = qs[i];
+  clearTimeout(obT.q);
+  if (!first) document.documentElement.classList.toggle('ob-back', i < obQ);
+  obQ = i;
+  for (const x of $$('.ob-q')) { x.hidden = x !== q; x.classList.remove('enter'); }
+  // The orb, colour and ball questions centre a large orb: it glides there, and back to its column after.
+  const step = q.closest('.ob-step'), wide = 'wide' in q.dataset;
+  step.classList.toggle('ob-wide', wide);
+  orb.slot(wide ? q.querySelector('.ob-centre') : step.querySelector(':scope > .ob-orb'));
+  [...q.children].forEach((el, k) => el.style.setProperty('--i', k));
+  void q.offsetWidth;
+  q.classList.add('enter');
+  $('#obCount').textContent = `${i + 1} of ${qs.length}`;
+  obTilesRender();
+  obOrbPreview();
+  obFoot();
+  if (!first) q.querySelector('.ob-tile[tabindex="0"], input').focus({ preventScroll: true });
+}
+
+const obHinglishOn = () => ob.hinglish || (S.language === 'hi' && S.translate_to_english);
+const obVal = (t, key) => ({ true: true, false: false })[t.dataset.v] ?? (key === 'ball_size' ? Number(t.dataset.v) : t.dataset.v);
+function obTilesRender() {
+  for (const g of $$('.ob-q .ob-tiles')) {
+    const key = g.dataset.key, q = g.closest('.ob-q').dataset.q, v = t => t.dataset.v;
+    const on = t => key === 'ball_size' ? Math.abs(S.ball_size - obVal(t, key)) < 0.1
+      : key ? S[key] === obVal(t, key)
+      : q === 'lang' ? v(t) === (obHinglishOn() ? 'hinglish' : 'en')
+      : q === 'clean' ? (v(t) === 'yes' ? obCleanOn() : !obCleanOn() && !S.cleanup.enabled)
+      : v(t) === (S.sounds ? S.sound_pack : 'off'); // sound
+    const ts = [...g.children];
+    for (const t of ts) t.setAttribute('aria-checked', on(t));
+    // Roving focus: Tab lands on the chosen tile (or the first) and the arrows move from there.
+    const cur = ts.find(t => t.getAttribute('aria-checked') === 'true') ?? ts[0];
+    for (const t of ts) t.tabIndex = t === cur ? 0 : -1;
+  }
+}
+function obPick(g, t) {
+  const key = g.dataset.key, q = g.closest('.ob-q').dataset.q, v = obVal(t, key);
+  if (key) { S[key] = v; save(); syncBound(); changed(key); }
+  else if (q === 'lang') obLang(v);
+  else if (q === 'clean') obCleanPick(v === 'yes');
+  else { // sound: tapping one plays it, again if it's already the one
+    S.sounds = v !== 'off';
+    if (S.sounds) { S.sound_pack = v; invoke('preview_sounds', { pack: v }).catch(() => {}); }
+    save(); syncBound(); changed('sounds');
+  }
+  if (['orb_listen', 'orb_color', 'ball_size'].includes(key)) showPill(); // the real pill acts it out too
+  obTilesRender();
+  obOrbPreview();
+  if ('stay' in g.dataset) return;
+  const at = obQ; // a beat, so the pick is seen; Back or Continue meanwhile wins
+  later('q', obStill ? 150 : 350, () => obStep === 4 && obQ === at && (at < obQs().length - 1 ? obQShow(at + 1) : obShow(5)));
+}
+for (const g of $$('.ob-q .ob-tiles')) {
+  g.addEventListener('click', e => { const t = e.target.closest('.ob-tile'); if (t) obPick(g, t); });
+  // Arrows move between tiles (up and down by a row); Enter or Space picks (a button's own click).
+  g.addEventListener('keydown', e => {
+    const cols = getComputedStyle(g).gridTemplateColumns.split(' ').length;
+    const d = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: cols, ArrowUp: -cols }[e.key];
+    if (!d) return;
+    e.preventDefault();
+    const ts = [...g.children], n = ts[(ts.indexOf(document.activeElement) + d + ts.length) % ts.length];
+    for (const t of ts) t.tabIndex = t === n ? 0 : -1;
+    n.focus();
+  });
+  if (!('preview' in g.dataset)) continue;
+  // The orb, colour and ball questions: the card's orb shows the tile under the pointer or the
+  // keyboard, and goes back to the current choice when they leave without picking.
+  const show = t => t?.classList.contains('ob-tile') && obOrbPreview(g.dataset.key, obVal(t, g.dataset.key));
+  g.addEventListener('pointerover', e => show(e.target.closest('.ob-tile')));
+  g.addEventListener('focusin', e => show(e.target));
+  g.addEventListener('pointerleave', () => obOrbPreview());
+  g.addEventListener('focusout', e => g.contains(e.relatedTarget) || obOrbPreview());
+}
+
+// The card's orb is the user's: their style in their colour on the pill's dark disc and, on the
+// ball question, the resting ball at the pill's real size. `key`/`v`: a tile being looked at.
+function obOrbPreview(key, v) {
+  if (!orb || obStep !== 4 || $('#onboard').hidden) return;
+  const pill = isMac && S.show_in !== 'menubar', o = { orb_listen: S.orb_listen, orb_color: S.orb_color, ball_size: S.ball_size };
+  if (key) o[key] = v;
+  const ball = pill && obQs()[obQ]?.dataset.q === 'ball';
+  orb.style(pill ? { listen: o.orb_listen, think: S.orb_think, detail: S.orb_detail, color: o.orb_color, pill: ball ? { size: o.ball_size, zoom: S.pill_size } : null } : null);
+  if (!BUSY.includes(dictation.state)) orb.set(ball ? 'ball' : 'orb');
+}
 
 // Hinglish: Hindi + English, typed as English. It needs a model that translates (Medium, or Small
 // if Medium doesn't fit), so it switches on once that model is on this Mac.
@@ -1548,51 +1649,44 @@ function obLang(v) {
   obLangRender();
 }
 function obLangRender() {
-  const on = ob.hinglish || (S.language === 'hi' && S.translate_to_english);
-  for (const r of $$('input[name="obLang"]')) r.checked = r.value === (on ? 'hinglish' : 'en');
+  obTilesRender();
   const m = obHinglishModel();
-  $('#obLangDesc').textContent = !on ? 'Typed as you say it.'
+  $('#obLangDesc').textContent = !obHinglishOn() ? ''
     : !m ? 'Hinglish needs the Medium model, and this Mac is short of memory for it right now.'
     : m.downloaded ? `Typed in English, with ${m.label}.`
     : `Typed in English, once ${m.label} (${fmtMB(m.size_mb)}) has downloaded.`;
 }
-for (const r of $$('input[name="obLang"]')) r.addEventListener('change', () => obLang(r.value));
 
-// The built-in cleanup model, when it's installed and fits; otherwise today's setup choices.
+// The built-in cleanup model, when it's installed and fits. Otherwise "Yes" means setting up a
+// local server (or, by the link, a key) once onboarding finishes.
 function obBuiltIn() {
   const c = sys.cleaners?.find(x => x.automatic);
   return isMac && !!sys.echotype_model_installed && !!c && c.ram_mb + 2048 <= sys.available_ram_gb * 1024;
 }
-$('#obClean').addEventListener('change', e => {
-  if (e.target.checked) { S.cleanup.enabled = true; setProvider('cleanup', 'echotype'); }
+const obCleanOn = () => (obBuiltIn() ? S.cleanup.enabled && S.cleanup.provider === 'echotype' : ob.cleanHow !== 'off');
+function obCleanPick(yes) {
+  if (!obBuiltIn()) { ob.cleanHow = !yes ? 'off' : ob.cleanHow === 'off' ? 'local' : ob.cleanHow; return obCleanRender(); }
+  if (yes) { S.cleanup.enabled = true; setProvider('cleanup', 'echotype'); }
   else { S.cleanup.enabled = false; save(); }
   syncBound();
   setCleanupInert();
   renderRaw();
-});
-
-function obSounds() {
-  $('#obSounds').replaceChildren(...[...PACKS, ['off', 'Off']].map(([id, label]) => {
-    const input = h('input', { type: 'radio', name: 'obPack', value: id, checked: id === 'off' ? !S.sounds : S.sounds && S.sound_pack === id });
-    // A click on the pack already chosen plays it again (change only fires on a new one).
-    input.addEventListener('click', () => id !== 'off' && S.sounds && S.sound_pack === id && invoke('preview_sounds', { pack: id }).catch(() => {}));
-    input.addEventListener('change', () => {
-      S.sounds = id !== 'off';
-      if (S.sounds) { S.sound_pack = id; invoke('preview_sounds', { pack: id }).catch(() => {}); }
-      syncBound();
-      save();
-      $('#soundPackRow').hidden = !S.sounds;
-    });
-    return h('label', {}, input, h('span', {}, label));
-  }));
 }
+function obCleanRender() {
+  const built = obBuiltIn(), key = ob.cleanHow === 'key';
+  $('#obCleanYes').textContent = built ? 'With the cleanup model on this Mac'
+    : key ? 'With your own API key, set up when you finish' : 'With a local server like Ollama, set up when you finish';
+  $('#obCleanHow').hidden = built;
+  $('#obCleanHow').textContent = key ? 'Use a local server instead' : 'Use my own API key instead';
+}
+$('#obCleanHow').addEventListener('click', () => { ob.cleanHow = ob.cleanHow === 'key' ? 'local' : 'key'; obCleanRender(); obTilesRender(); });
 
 // ----- 5: you're set -----
 function obDoneRender() {
   $('#obT5').textContent = firstName() ? `You're set, ${firstName()}.` : "You're set.";
   const toggle = S.mode === 'toggle', [pasteKey] = DEFAULT_LAST();
   const item = (keys, text) => h('li', {}, h('span', { className: 'keys' }, keys), h('span', {}, text));
-  $('#obRecap').replaceChildren(
+  fill($('#obRecap'), // the hands-free line is `false` in toggle mode, which step 4 offers
     item(talkCaps(), toggle ? 'Press to talk, again to type' : 'Hold to talk, let go to type'),
     !toggle && item([...talkCaps(), h('span', { className: 'times' }, '×2')], 'Keep talking hands-free'),
     item([h('kbd', {}, 'esc')], 'Cancel while you talk'),
@@ -1603,7 +1697,7 @@ function obDoneRender() {
 }
 
 async function obFinish() {
-  const how = $('#obCleanup').hidden ? 'off' : $('#obCleanup').value;
+  const how = ob.cleanHow; // a local server or a key, picked in step 4 when there's no built-in model
   if (how !== 'off') { setupCleanup(how); return finishOnboarding('cleanup'); } // a key or a server to set up
   const relaunch = obRelaunch();
   // The orb folds back into the ball and drops out of the card, towards the real pill.

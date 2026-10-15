@@ -446,29 +446,129 @@
           </div>
         </section>
 
+        <!-- Step 4 is a run of single questions (.ob-q), one at a time. A tile saves when picked and,
+             a beat later, moves on; Continue and Back walk the questions too. -->
         <section class="ob-step split" data-step="4" aria-labelledby="obT4" hidden>
           <div class="ob-orb" aria-hidden="true"></div>
           <div class="ob-body">
-            <h2 id="obT4" tabindex="-1">Make it yours</h2>
-            <div class="group ob-group">
-              <label class="row"><span class="row-text"><span class="row-title">What should I call you?</span><span class="row-desc ob-hello" id="obHello" aria-live="polite"></span></span>
-                <input type="text" id="obName" autocomplete="given-name" spellcheck="false" placeholder="Your first name" maxlength="40" /></label>
-              <div class="row"><span class="row-text"><span class="row-title" id="obLangLabel">I speak</span><span class="row-desc" id="obLangDesc"></span></span>
-                <span class="seg" role="radiogroup" aria-labelledby="obLangLabel">
-                  <label><input type="radio" name="obLang" value="en" /><span>English</span></label>
-                  <label><input type="radio" name="obLang" value="hinglish" /><span>Hindi + English</span></label>
-                </span></div>
-              <label class="row" id="obCleanRow"><span class="row-text"><span class="row-title">Clean up my words</span><span class="row-desc">Drops the ums and keeps your corrections: “um so four, no wait, five” becomes “5”.</span></span>
-                <input type="checkbox" class="switch" id="obClean" />
-                <select id="obCleanup" aria-label="Cleanup" hidden>
-                  <option value="off">Off for now</option>
-                  <option value="local">A local server (Ollama, LM Studio)</option>
-                  <option value="key">My own API key</option>
-                </select></label>
-              <div class="row" id="obSoundRow"><span class="row-text"><span class="row-title" id="obSoundLabel">Sounds</span><span class="row-desc">Click one to hear it.</span></span>
-                <span class="ob-chips" id="obSounds" role="radiogroup" aria-labelledby="obSoundLabel"></span></div>
-              <label class="row" id="obFadeRow"><span class="row-text"><span class="row-title">Fade the pill when you're not near it</span><span class="row-desc">The ball at the bottom of the screen dims until your pointer comes close.</span></span>
-                <input type="checkbox" class="switch" data-bind="pill_fade" /></label>
+            <p class="ob-count" id="obCount"></p>
+
+            <div class="ob-q" data-q="name">
+              <h2 id="obT4" tabindex="-1">What should I call you?</h2>
+              <input type="text" class="ob-name" id="obName" autocomplete="given-name" spellcheck="false" placeholder="Your first name" maxlength="40" aria-labelledby="obT4" aria-describedby="obHello" />
+              <p class="ob-hello" id="obHello"></p>
+            </div>
+
+            <div class="ob-q" data-q="lang" hidden>
+              <h2 id="obQLang" tabindex="-1">What do you speak?</h2>
+              <p class="lede" id="obLangDesc"></p>
+              <div class="ob-tiles" role="radiogroup" aria-labelledby="obQLang">
+                <button type="button" class="ob-tile" role="radio" data-v="en"><b>English</b><span>Or any language, typed as you say it</span></button>
+                <button type="button" class="ob-tile" role="radio" data-v="hinglish"><b>Hindi + English</b><span>Typed in English</span></button>
+              </div>
+            </div>
+
+            <div class="ob-q" data-q="mode" hidden>
+              <h2 id="obQMode" tabindex="-1">Hold, or press?</h2>
+              <div class="ob-tiles" role="radiogroup" aria-labelledby="obQMode" data-key="mode">
+                <button type="button" class="ob-tile" role="radio" data-v="hold"><b>Hold to talk</b><span>Let go and your words are typed</span></button>
+                <button type="button" class="ob-tile" role="radio" data-v="toggle"><b>Press to start</b><span>Press again when you're done</span></button>
+              </div>
+            </div>
+
+            <div class="ob-q" data-q="clean" hidden>
+              <h2 id="obQClean" tabindex="-1">Clean up my words?</h2>
+              <p class="lede">Drops the ums and keeps your corrections: “um so four, no wait, five” becomes “5”.</p>
+              <div class="ob-tiles" role="radiogroup" aria-labelledby="obQClean">
+                <button type="button" class="ob-tile" role="radio" data-v="yes"><b>Yes, clean up</b><span id="obCleanYes">With the cleanup model on this Mac</span></button>
+                <button type="button" class="ob-tile" role="radio" data-v="no"><b>Not now</b><span>Typed exactly as you say it</span></button>
+              </div>
+              <button type="button" class="link ob-link" id="obCleanHow" hidden></button>
+            </div>
+
+            <!-- data-wide: the orb leaves its column for the middle of the card (.ob-centre), large. -->
+            <div class="ob-q" data-q="orb" data-only="pill" data-wide hidden>
+              <h2 id="obQOrb" tabindex="-1">Pick your orb</h2>
+              <p class="lede">It moves like this while you talk.</p>
+              <div class="ob-centre" aria-hidden="true"></div>
+              <div class="ob-tiles six" role="radiogroup" aria-labelledby="obQOrb" data-key="orb_listen" data-preview>
+                <button type="button" class="ob-tile" role="radio" data-v="listening"><b>Wave</b></button>
+                <button type="button" class="ob-tile" role="radio" data-v="searching"><b>Globe</b></button>
+                <button type="button" class="ob-tile" role="radio" data-v="working"><b>Orbits</b></button>
+                <button type="button" class="ob-tile" role="radio" data-v="breathing"><b>Ring</b></button>
+                <button type="button" class="ob-tile" role="radio" data-v="weaving"><b>Braid</b></button>
+                <button type="button" class="ob-tile" role="radio" data-v="shaping"><b>Shapes</b></button>
+              </div>
+            </div>
+
+            <div class="ob-q" data-q="color" data-only="pill" data-wide hidden>
+              <h2 id="obQColor" tabindex="-1">And its colour</h2>
+              <div class="ob-centre" aria-hidden="true"></div>
+              <div class="ob-tiles ob-colors" role="radiogroup" aria-labelledby="obQColor" data-key="orb_color" data-preview>
+                <button type="button" class="ob-tile" role="radio" data-v="#eef1ff" style="--c:#eef1ff"><i></i><span>White</span></button>
+                <button type="button" class="ob-tile" role="radio" data-v="#9fd8ff" style="--c:#9fd8ff"><i></i><span>Ice</span></button>
+                <button type="button" class="ob-tile" role="radio" data-v="#9ff0c8" style="--c:#9ff0c8"><i></i><span>Mint</span></button>
+                <button type="button" class="ob-tile" role="radio" data-v="#ffd59a" style="--c:#ffd59a"><i></i><span>Amber</span></button>
+                <button type="button" class="ob-tile" role="radio" data-v="#ffb3c7" style="--c:#ffb3c7"><i></i><span>Rose</span></button>
+                <button type="button" class="ob-tile" role="radio" data-v="#c7b8ff" style="--c:#c7b8ff"><i></i><span>Lilac</span></button>
+              </div>
+            </div>
+
+            <div class="ob-q" data-q="ball" data-only="pill" data-wide hidden>
+              <h2 id="obQBall" tabindex="-1">How big is the ball?</h2>
+              <p class="lede">It waits at the bottom of your screen. Shown here at its real size.</p>
+              <div class="ob-centre" aria-hidden="true"></div>
+              <div class="ob-tiles three" role="radiogroup" aria-labelledby="obQBall" data-key="ball_size" data-preview>
+                <button type="button" class="ob-tile" role="radio" data-v="0.75"><b>Small</b></button>
+                <button type="button" class="ob-tile" role="radio" data-v="1"><b>Medium</b></button>
+                <button type="button" class="ob-tile" role="radio" data-v="1.5"><b>Large</b></button>
+              </div>
+            </div>
+
+            <div class="ob-q" data-q="sound" hidden>
+              <h2 id="obQSound" tabindex="-1">Pick a sound</h2>
+              <p class="lede">Tap one to hear it, then Continue.</p>
+              <div class="ob-tiles three" role="radiogroup" aria-labelledby="obQSound" data-stay>
+                <button type="button" class="ob-tile" role="radio" data-v="classic"><b>Classic</b></button>
+                <button type="button" class="ob-tile" role="radio" data-v="glass"><b>Glass</b></button>
+                <button type="button" class="ob-tile" role="radio" data-v="wood"><b>Wood</b></button>
+                <button type="button" class="ob-tile" role="radio" data-v="pop"><b>Pop</b></button>
+                <button type="button" class="ob-tile" role="radio" data-v="soft"><b>Soft</b></button>
+                <button type="button" class="ob-tile" role="radio" data-v="off"><b>No sounds</b></button>
+              </div>
+            </div>
+
+            <div class="ob-q" data-q="look" hidden>
+              <h2 id="obQLook" tabindex="-1">Which look?</h2>
+              <div class="ob-tiles" role="radiogroup" aria-labelledby="obQLook" data-key="look">
+                <button type="button" class="ob-tile" role="radio" data-v="classic"><b>Classic</b><span>Quiet grays</span></button>
+                <button type="button" class="ob-tile" role="radio" data-v="v2"><b>Ink</b><span>Deep blue ink on warm paper</span></button>
+              </div>
+            </div>
+
+            <div class="ob-q" data-q="fade" data-only="pill" hidden>
+              <h2 id="obQFade" tabindex="-1">Dim the ball when you're away?</h2>
+              <div class="ob-tiles" role="radiogroup" aria-labelledby="obQFade" data-key="pill_fade">
+                <button type="button" class="ob-tile" role="radio" data-v="true"><b>Yes</b><span>It brightens as your pointer comes close</span></button>
+                <button type="button" class="ob-tile" role="radio" data-v="false"><b>No</b><span>Always at full strength</span></button>
+              </div>
+            </div>
+
+            <div class="ob-q" data-q="history" hidden>
+              <h2 id="obQHistory" tabindex="-1">Keep a history?</h2>
+              <div class="ob-tiles" role="radiogroup" aria-labelledby="obQHistory" data-key="history_enabled">
+                <button type="button" class="ob-tile" role="radio" data-v="true"><b>Yes</b><span>Everything you dictate, on this Mac only</span></button>
+                <button type="button" class="ob-tile" role="radio" data-v="false"><b>No</b><span>Nothing is kept</span></button>
+              </div>
+            </div>
+
+            <div class="ob-q" data-q="meetings" data-only="mac" hidden>
+              <h2 id="obQMeet" tabindex="-1">Take notes in calls?</h2>
+              <p class="lede">When Zoom, Teams or Meet starts, Echotype offers to. Nothing is recorded until you click Start.</p>
+              <div class="ob-tiles" role="radiogroup" aria-labelledby="obQMeet" data-key="detect_meetings">
+                <button type="button" class="ob-tile" role="radio" data-v="true"><b>Yes, offer</b><span>A quiet prompt when a call begins</span></button>
+                <button type="button" class="ob-tile" role="radio" data-v="false"><b>No</b><span>Start notes yourself from Meetings</span></button>
+              </div>
             </div>
           </div>
         </section>
