@@ -236,7 +236,7 @@ h1 + .group { margin-top: 16px; }
   min-height: 44px;
   padding: 10px 14px;
 }
-.row + .row::before, #apiBody > .row::before, #reps > .row::before, .group > #reps + .row::before {
+.row + .row::before, #apiBody > .row::before, #reps > .row::before, .group > #reps + .row::before, #appStyles > .row::before {
   content: "";
   position: absolute;
   left: 14px;

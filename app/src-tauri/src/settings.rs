@@ -160,6 +160,60 @@ pub struct Cleanup {
     /// "default" | "casual" | "formal" | "verbatim".
     pub style: String,
     pub custom_instructions: String,
+    /// "Match the app you're typing in": the style comes from the app in front when recording
+    /// starts (app_style). Off for everyone until switched on.
+    pub match_app: bool,
+    /// The user's picks per app, over APP_STYLES. A list, not a map: merge() and main.js merge3
+    /// replace lists whole, so a removed row stays removed.
+    pub app_styles: Vec<AppStyle>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct AppStyle {
+    /// Bundle id ("com.tinyspeck.slackmacgap").
+    pub id: String,
+    pub name: String,
+    /// A style, or "" for the user's own `Cleanup::style`.
+    pub style: String,
+}
+
+/// Built-in styles by bundle id (an id ending in '.' matches the prefix). Browsers and every
+/// other app keep the user's style.
+pub const APP_STYLES: &[(&str, &str)] = &[
+    ("com.tinyspeck.slackmacgap", "casual"),
+    ("net.whatsapp.WhatsApp", "casual"),
+    ("com.apple.MobileSMS", "casual"),
+    ("com.hnc.Discord", "casual"),
+    ("ru.keepcoder.Telegram", "casual"),
+    ("com.tdesktop.Telegram", "casual"),
+    ("com.apple.mail", "formal"),
+    ("com.microsoft.Outlook", "formal"),
+    ("com.apple.Terminal", "verbatim"),
+    ("com.googlecode.iterm2", "verbatim"),
+    ("dev.warp.Warp-Stable", "verbatim"),
+    ("com.mitchellh.ghostty", "verbatim"),
+    ("com.microsoft.VSCode", "verbatim"),
+    ("com.microsoft.VSCodeInsiders", "verbatim"),
+    ("com.todesktop.230313mzl4w4u92", "verbatim"), // Cursor
+    ("com.apple.dt.Xcode", "verbatim"),
+    ("com.jetbrains.", "verbatim"),
+    ("dev.zed.Zed", "verbatim"),
+];
+
+pub fn builtin_style(id: &str) -> Option<&'static str> {
+    APP_STYLES.iter().find(|(k, _)| if k.ends_with('.') { id.starts_with(k) } else { id == *k }).map(|(_, v)| *v)
+}
+
+/// The style for a dictation into app `id` (None: Echotype itself or unknown): the user's pick
+/// for that app, else the built-in one, else the user's style. Switched off: always the user's style.
+pub fn app_style<'a>(c: &'a Cleanup, id: Option<&str>) -> &'a str {
+    let Some(id) = id.filter(|_| c.match_app) else { return &c.style };
+    match c.app_styles.iter().find(|a| a.id == id) {
+        Some(a) if a.style.is_empty() => &c.style,
+        Some(a) => &a.style,
+        None => builtin_style(id).unwrap_or(&c.style),
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -253,6 +307,8 @@ impl Default for Cleanup {
             base_url: String::new(),
             style: "default".into(),
             custom_instructions: String::new(),
+            match_app: false,
+            app_styles: vec![],
         }
     }
 }
@@ -613,6 +669,7 @@ mod tests {
         assert_eq!(ink.look, "system", "a saved Ink look loads as System");
         assert!(s.pill_positions.is_empty() && s.show_in == "pill", "upgraders keep the pill, bottom-centre");
         assert!(s.pill_follow_cursor && s.pill_screen.is_none(), "...on the screen they are using");
+        assert!(!s.cleanup.match_app && s.cleanup.app_styles.is_empty(), "upgraders keep one style everywhere");
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
     }
@@ -658,10 +715,34 @@ mod tests {
     }
 
     #[test]
+    fn the_app_in_front_picks_the_style_only_when_switched_on() {
+        let mut c = Cleanup { style: "formal".into(), ..Cleanup::default() };
+        let slack = Some("com.tinyspeck.slackmacgap");
+        assert_eq!(app_style(&c, slack), "formal", "off: the user's style everywhere");
+        c.match_app = true;
+        assert_eq!(app_style(&c, slack), "casual");
+        assert_eq!(app_style(&c, Some("com.apple.mail")), "formal");
+        assert_eq!(app_style(&c, Some("com.apple.Terminal")), "verbatim");
+        assert_eq!(app_style(&c, Some("com.jetbrains.pycharm")), "verbatim", "any JetBrains IDE");
+        assert_eq!(app_style(&c, Some("com.jetbrains")), "formal", "the prefix needs its dot");
+        assert_eq!(app_style(&c, Some("com.google.Chrome")), "formal", "browsers keep the user's style");
+        assert_eq!(app_style(&c, Some("")), "formal");
+        assert_eq!(app_style(&c, None), "formal", "Echotype itself or not known");
+        let row = |id: &str, style: &str| AppStyle { id: id.into(), name: id.into(), style: style.into() };
+        c.app_styles = vec![row("com.tinyspeck.slackmacgap", "formal"), row("com.apple.Terminal", ""), row("com.google.Chrome", "verbatim")];
+        assert_eq!(app_style(&c, slack), "formal", "the user's pick beats the built-in one");
+        assert_eq!(app_style(&c, Some("com.apple.Terminal")), "formal", "\"\" is the user's style");
+        assert_eq!(app_style(&c, Some("com.google.Chrome")), "verbatim");
+        c.match_app = false;
+        assert_eq!(app_style(&c, Some("com.google.Chrome")), "formal", "picks only apply while switched on");
+    }
+
+    #[test]
     fn settings_round_trip() {
         let mut s = Settings::default();
         s.dictionary = vec!["Arnav".into()];
         s.replacements = vec![Replacement { from: "my email".into(), to: "me@example.com".into() }];
+        s.cleanup.app_styles = vec![AppStyle { id: "com.apple.mail".into(), name: "Mail".into(), style: "casual".into() }];
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
     }

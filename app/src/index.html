@@ -151,6 +151,13 @@
           <label class="row choice"><input type="radio" name="style" value="verbatim" data-bind="cleanup.style" /><span class="row-text"><span class="row-title">Verbatim</span><span class="row-desc">Adds punctuation only. Every word stays as you said it.</span></span></label>
         </div>
 
+        <h2 class="group-title">Style per app</h2>
+        <div class="group">
+          <label class="row"><span class="row-text"><span class="row-title">Match the app you’re typing in</span><span class="row-desc">Casual in chat apps, formal in Mail and Outlook, word for word in terminals and code editors. Other apps use the style above.</span></span>
+            <input type="checkbox" class="switch" data-bind="cleanup.match_app" /></label>
+          <div id="appStyles"></div>
+        </div>
+
         <h2 class="group-title"><label for="custom">Custom instructions</label></h2>
         <textarea id="custom" rows="3" data-bind="cleanup.custom_instructions" placeholder="For example: use British spelling, and write numbers as digits."></textarea>
       </div>

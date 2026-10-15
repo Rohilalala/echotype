@@ -27,6 +27,7 @@ const COMMANDS: &[&str] = &[
     "open_permission_settings",
     "request_microphone",
     "focus_main",
+    "last_app",
     "mic_check",
     "play_sound",
     "reset_accessibility",

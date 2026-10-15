@@ -132,6 +132,7 @@ function changed(p) {
   if (p === 'translate_to_english') renderLangNote();
   if (p === 'languages') { renderLanguages(); if (obStep === 4 && !$('#onboard').hidden) obLangRender(); }
   if (p === 'cleanup.enabled') { setCleanupInert(); renderCloud(); refreshCloud(); }
+  if (p === 'cleanup.match_app') refreshLastApp();
   if (p.startsWith('local_api')) refreshApi();
   if (p === 'history_enabled') renderHistory();
   if (p === 'pill_idle' || p === 'show_in') renderPill();
@@ -154,6 +155,7 @@ function go(page) {
   if (page === 'meetings') meetingsPage.show();
   if (page === 'settings') { refreshPerms(); refreshApi(); refreshStatus(); }
   if (page === 'speech' || page === 'cleanup') refreshCloud();
+  if (page === 'cleanup') refreshLastApp();
   history.replaceState(null, '', '#' + page);
   document.dispatchEvent(new CustomEvent('echotype:page', { detail: page })); // stats.js refreshes on its page
   window.__TAURI__.event.emit?.('main-page', page); // Home shows the live state, so the pill steps aside there (D14)
@@ -671,6 +673,28 @@ function renderCleanup() {
   $('#cleanupProvider').replaceChildren(...presets.filter(p => p.cleanup).map(p => h('option', { value: p.id, selected: p.id === S.cleanup.provider }, p.label)));
   setCleanupInert();
   fillRemote('cleanup');
+  renderAppStyles();
+}
+
+// "Match the app you're typing in": the user's style per app, and the app the last dictation went to.
+const APP_STYLE_OPTS = [['', 'Your style'], ['default', 'Default'], ['casual', 'Casual'], ['formal', 'Formal'], ['verbatim', 'Verbatim']];
+let lastApp = null;
+function renderAppStyles() {
+  const box = $('#appStyles'), list = () => S.cleanup.app_styles; // S is replaced when a save comes back
+  box.hidden = !S.cleanup.match_app;
+  const add = lastApp?.id && !list().some(a => a.id === lastApp.id) ? lastApp : null;
+  const label = v => APP_STYLE_OPTS.find(o => o[0] === v)?.[1].toLowerCase() ?? v;
+  fill(box, list().map((a, i) => h('div', { className: 'row' },
+    h('span', { className: 'row-text' }, h('span', { className: 'row-title' }, a.name)),
+    h('select', { 'aria-label': `Style in ${a.name}`, onchange: e => { list()[i].style = e.target.value; save(); } }, APP_STYLE_OPTS.map(([v, l]) => h('option', { value: v, selected: v === a.style }, l))),
+    h('button', { className: 'icon-btn', type: 'button', 'aria-label': `Remove ${a.name}`, onclick: () => { list().splice(i, 1); save(); renderAppStyles(); } }, svg(CROSS)))),
+  h('div', { className: 'row' },
+    h('span', { className: 'row-text' }, h('span', { className: 'row-desc' }, add ? `Your last dictation went to ${add.name}, which uses ${label(add.style)}.` : 'To pick the style for an app, dictate into it, then add it here.')),
+    add && h('button', { className: 'btn', type: 'button', onclick: () => { list().push({ id: add.id, name: add.name, style: add.style }); save(); renderAppStyles(); } }, `Add ${add.name}`)));
+}
+async function refreshLastApp() {
+  lastApp = await invoke('last_app').catch(() => null);
+  renderAppStyles();
 }
 $('#cleanupProvider').addEventListener('change', e => setProvider('cleanup', e.target.value));
 
@@ -1882,7 +1906,7 @@ listen('dictation-state', ({ payload }) => {
     recent.unshift({ ts: Date.now(), text: payload.text });
     renderRecent();
   }
-  if (payload.state === 'done' || payload.state === 'error') refreshCloud(); // words used went up
+  if (payload.state === 'done' || payload.state === 'error') { refreshCloud(); refreshLastApp(); } // words used went up; the app it went to
   if (payload.state !== 'recording') muted = false;
   obDictation(payload);
 });

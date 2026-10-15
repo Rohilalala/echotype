@@ -77,6 +77,8 @@ struct AppState {
     /// The last dictated text, for paste-last and copy-last. Memory only, so it works with history
     /// off; cleared with history and when history is switched off.
     last_output: Mutex<Option<String>>,
+    /// The app the last dictation went to, with "Match the app you're typing in" on (Cleanup page: add it).
+    last_app: Mutex<Option<platform::FrontApp>>,
     /// Model downloads in flight: id → fraction done, so a press can say "Model downloading 42%".
     downloads: Mutex<HashMap<String, f64>>,
     /// The mic is open, so paste-last must not replace the recording pill with its notice.
@@ -237,6 +239,8 @@ struct Live {
     rec: audio::Recorder,
     stats: Arc<Mutex<LevelStats>>,
     lost: Arc<AtomicBool>,
+    /// The app in front as recording started, when the style follows it (the user may switch away while it transcribes).
+    front: Option<platform::FrontApp>,
 }
 
 /// One thread owns the recorder and the talk-key state machine, so every key, click, Esc and
@@ -293,6 +297,9 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                         state(&app).recording.store(true, Ordering::SeqCst);
                         let _ = state(&app).pill_wake.send(());
                         l.locked = locked && !toggle_mode;
+                        if s.cleanup.match_app {
+                            l.front = platform::frontmost_app(&app);
+                        }
                         if click {
                             show_later(&app, id, false, CLICK_SHOW_AFTER);
                         } else if ev != Ev::Press {
@@ -357,7 +364,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                         continue;
                     }
                     let warning = l.lost.load(Ordering::SeqCst).then(|| "Microphone disconnected. Transcribed what was captured.".to_string());
-                    let clip = Clip { quality: st.quality(), muted_seen: st.muted_seen(), warning, speaking_ms: st.speaking_ms(), snr_db: st.floor_and_speech().map(|(floor, speech)| speech - floor) };
+                    let clip = Clip { quality: st.quality(), muted_seen: st.muted_seen(), warning, speaking_ms: st.speaking_ms(), snr_db: st.floor_and_speech().map(|(floor, speech)| speech - floor), front: l.front.clone() };
                     drop(st);
                     process(&app, pcm, busy.clone(), clip, true);
                 }
@@ -403,7 +410,7 @@ fn start_recording(app: &AppHandle, s: &Settings, id: u64) -> Result<Live, Dicta
         }
     });
     match rec {
-        Ok(rec) => Ok(Live { id, shown: false, locked: false, rec, stats, lost }),
+        Ok(rec) => Ok(Live { id, shown: false, locked: false, rec, stats, lost, front: None }),
         Err(_) if platform::microphone_status() == "denied" => {
             Err(DictationState { state: "error", error: Some("Microphone access is off".into()), action: Some("microphone"), ..Default::default() })
         }
@@ -421,6 +428,8 @@ struct Clip {
     speaking_ms: Option<u64>,
     /// How far the loudest part rose above the room (dB): low means noise, not a voice.
     snr_db: Option<f32>,
+    /// Live::front. A retry has none, so it gets the user's style.
+    front: Option<platform::FrontApp>,
 }
 
 /// Clears the busy flag when dropped, so even a panicking worker can't leave dictation stuck.
@@ -457,7 +466,11 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
     let speaking_ms = clip.speaking_ms.unwrap_or(pcm.len() as u64 * 1000 / audio::RATE as u64); // a retry has no level stats
     std::thread::spawn(move || {
         let guard = Busy(busy);
-        let s = current_settings(&app);
+        let mut s = current_settings(&app);
+        if let Some(f) = clip.front.clone() {
+            s.cleanup.style = settings::app_style(&s.cleanup, Some(&f.id)).to_string();
+            *lock(&state(&app).last_app) = Some(f);
+        }
         let chip_q = chip(clip.quality, false);
         emit_state(&app, DictationState { state: "transcribing", chip: chip_q, ..Default::default() });
         // A panic in a decoder, whisper-rs or the HTTP stack becomes an error state, not a silent loss.
@@ -1236,9 +1249,17 @@ async fn request_microphone() -> R<&'static str> {
 /// dictation was just pasted into another app). Returns the app that was in front, if not Echotype.
 #[tauri::command]
 async fn focus_main(app: AppHandle) -> R<Option<String>> {
-    let front = platform::frontmost_app(&app);
+    let front = platform::frontmost_app(&app).map(|f| f.name);
     show_main(&app);
     Ok(front)
+}
+
+/// The app the last dictation went to (with "Match the app you're typing in" on) and its
+/// built-in style, "" for the user's own: the Cleanup page offers to add it to its list.
+#[tauri::command]
+async fn last_app(app: AppHandle) -> R<Option<serde_json::Value>> {
+    let front = lock(&state(&app).last_app).clone();
+    Ok(front.map(|f| serde_json::json!({ "style": settings::builtin_style(&f.id).unwrap_or(""), "id": f.id, "name": f.name })))
 }
 
 /// Windows (50 ms each) a sound check runs before it stops by itself: two minutes.
@@ -1567,6 +1588,7 @@ pub fn run() {
                 tray_menu: Mutex::new(None),
                 last_failed: Mutex::new(None),
                 last_output: Mutex::new(None),
+                last_app: Mutex::new(None),
                 downloads: Mutex::new(HashMap::new()),
                 recording: AtomicBool::new(false),
             });
@@ -1696,6 +1718,7 @@ pub fn run() {
             open_permission_settings,
             request_microphone,
             focus_main,
+            last_app,
             mic_check,
             play_sound,
             reset_accessibility,

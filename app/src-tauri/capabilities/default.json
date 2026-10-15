@@ -42,6 +42,7 @@
     "allow-open-permission-settings",
     "allow-request-microphone",
     "allow-focus-main",
+    "allow-last-app",
     "allow-mic-check",
     "allow-play-sound",
     "allow-reset-accessibility",
