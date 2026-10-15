@@ -1733,7 +1733,7 @@ async function finishOnboarding(page, away = false) {
   obListen(false);
   await save();
   const pill = isMac && S.show_in !== 'menubar' && S.pill_idle;
-  if (filmed && page === 'home') await obFilmHome(); // the dots fall to the pill; it takes over as they land
+  if (filmed) await obFilmHome(); // the dots fall to the pill; it takes over as they land (a page that needs setting up opens after)
   if (away && pill && !filmed && window.__TAURI__.window) {
     await window.__TAURI__.window.getCurrentWindow().hide().catch(() => {});
     setTimeout(() => window.__TAURI__.event.emit?.('pill-hello'), 350); // overlay.js: the ball pulses once
