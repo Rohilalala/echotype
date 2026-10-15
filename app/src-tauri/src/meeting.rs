@@ -8,7 +8,7 @@ use crate::audio;
 use crate::capture::{self, Capture, Piece, Source};
 use crate::settings::{self, Settings};
 use crate::speakers::{self, Clusters, Embedder, Turn};
-use crate::stt::{self, Word};
+use crate::stt::{self, Word, looped, norm};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -118,10 +118,6 @@ fn spread(text: &str, secs: f32) -> Vec<Word> {
 
 // ---------- timeline ----------
 
-fn norm(w: &str) -> String {
-    w.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
-}
-
 /// A speaker's sentences: words up to . ? or ! (a sentence never splits, so word times that
 /// soak up a pause cannot break one apart, and a speaker change starts a new one).
 fn sentences(words: &[(Word, String)]) -> Vec<Segment> {
@@ -139,13 +135,6 @@ fn sentences(words: &[(Word, String)]) -> Vec<Segment> {
         open = !w.text.ends_with(['.', '?', '!']);
     }
     out
-}
-
-/// Whisper stuck in a loop on noise ("the top of the top of the top of the top"): a long
-/// sentence that is mostly the same few words again.
-fn looped(text: &str) -> bool {
-    let words: Vec<String> = text.split_whitespace().map(norm).filter(|w| !w.is_empty()).collect();
-    words.len() >= 8 && words.iter().collect::<HashSet<_>>().len() * 2 <= words.len()
 }
 
 /// One timeline from the mic and computer-audio words: sentences from both, ordered by time, and

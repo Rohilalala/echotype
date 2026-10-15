@@ -432,6 +432,7 @@ fn after_stt(s: &Settings, raw: String, stt_ms: u64, mut warning: Option<String>
     if !has_speech(&raw) {
         return Output { raw: String::new(), text: String::new(), stt_ms, cleanup_ms: 0, warning, no_cleanup: false };
     }
+    let raw = stt::collapse_loops(&raw);
     let replaced = apply_replacements(&raw, &s.replacements);
     let mut text = if dictated { spoken_breaks(&replaced) } else { replaced };
     let mut cleanup_ms = 0;
@@ -549,6 +550,14 @@ mod tests {
 
     fn post(s: &Settings, raw: &str) -> Output {
         after_stt(s, raw.into(), 1, None, false, true, || {}, |_, t| Ok(format!("«{t}»")))
+    }
+
+    #[test]
+    fn whisper_repeats_collapse_with_or_without_cleanup() {
+        let mut s = Settings::default();
+        assert_eq!(post(&s, "I'm a little, little, little.").text, "I'm a little.");
+        s.cleanup.enabled = true;
+        assert_eq!(post(&s, "so the the the plan").text, "«so the plan»", "the LLM gets the collapsed text");
     }
 
     #[test]
