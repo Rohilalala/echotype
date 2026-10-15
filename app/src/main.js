@@ -926,7 +926,7 @@ function renderDict() {
   $('#chips').replaceChildren(...S.dictionary.map((w, i) =>
     h('span', { className: 'chip' }, w, h('button', { type: 'button', 'aria-label': `Remove ${w}`, onclick: () => { S.dictionary.splice(i, 1); save(); renderDict(); $('#newWord').focus(); } }, svg(CROSS)))));
   $('#reps').replaceChildren(...S.replacements.map((r, i) => {
-    const field = (k, label) => h('input', { type: 'text', value: r[k], 'aria-label': label, spellcheck: false, placeholder: k === 'from' ? 'my email' : 'me@example.com', oninput: e => { r[k] = e.target.value; saveSoon(); } });
+    const field = (k, label) => h('input', { type: 'text', value: r[k], 'aria-label': label, spellcheck: false, placeholder: k === 'from' ? 'my email' : 'me@example.com', oninput: e => { S.replacements[i][k] = e.target.value; saveSoon(); } }); // S, not r: a save's echo replaces S without re-rendering
     return h('div', { className: 'row rep' }, field('from', 'When you say'), field('to', 'Type'),
       h('button', { className: 'icon-btn', type: 'button', 'aria-label': 'Remove replacement', onclick: () => { S.replacements.splice(i, 1); save(); renderDict(); } }, svg(CROSS)));
   }));
