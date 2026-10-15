@@ -63,6 +63,7 @@ for (const m of models) m.warning = low && m.ram_mb > rec.ram_mb ? `Uses about $
 
 const ago = min => Math.floor((now - min * 60000) / 1000);
 let history = [
+  { ts: ago(1), raw: "don't forget to not include the tax in the final invoice", text: "don't forget to not include the tax in the final invoice", cleaned: "Don't forget to include the tax in the final invoice.", stt_ms: 520, cleanup_ms: 480, stt_provider: 'local', cleanup_provider: 'ollama' },
   { ts: ago(4), raw: 'haan toh um kal ki meeting mein we decided ki launch ko push karenge thursday tak', text: "In yesterday's meeting we decided to push the launch to Thursday.", stt_ms: 690, cleanup_ms: 540, stt_provider: 'local', cleanup_provider: 'ollama' },
   { ts: ago(38), raw: 'can you send me the uh the figma link no wait the loom link from the demo', text: 'Can you send me the Loom link from the demo?', stt_ms: 410, cleanup_ms: 610, stt_provider: 'local', cleanup_provider: 'ollama' },
   { ts: ago(95), raw: 'groceries eggs milk sourdough and two avocados', text: 'Groceries:\n- Eggs\n- Milk\n- Sourdough\n- Two avocados', stt_ms: 380, cleanup_ms: 720, stt_provider: 'local', cleanup_provider: 'ollama' },
@@ -157,6 +158,18 @@ const commands = {
   pill_drag: () => null,
   pill_reset: () => null,
   pill_copy: () => null,
+  pill_copy_cleaned: () => null,
+  // Re-run last (lib.rs rerun_options / rerun): ?norerun = no clip kept.
+  rerun_options: () => (q.has('norerun') ? [] : [
+    { id: 'lang:auto', label: 'Auto-detect language' }, { id: 'model:small', label: 'With Small' }, { id: 'raw', label: 'Without cleanup' },
+  ]),
+  rerun: async ({ id }) => {
+    emit('dictation-state', { state: 'transcribing' }); await wait(500);
+    const text = id === 'raw' ? 'so um the design review moves to friday at three' : 'The design review moves to Friday at 3.';
+    history.unshift({ ts: Math.floor(Date.now() / 1000), raw: 'so um the design review moves to friday at three', text, stt_ms: 610, cleanup_ms: id === 'raw' ? 0 : 450, stt_provider: id.startsWith('model:') ? `local:${id.slice(6)}` : 'local', cleanup_provider: id === 'raw' ? null : 'ollama', no_cleanup: id === 'raw' });
+    emit('dictation-state', { state: 'done', text, copied: true, card: true, warning: 'Re-run copied, ⌘V to paste' });
+    return null;
+  },
   pill_dismiss: () => null,
   check_permissions: () => ({ microphone: perm.mic === 'restricted' ? 'denied' : perm.mic, microphone_restricted: perm.mic === 'restricted', accessibility: perm.ax }),
   // A grant made "in System Settings" a moment later (?mic=denied&later, and Accessibility unless ?stale).
@@ -284,7 +297,8 @@ if (q.has('view') || q.has('hover')) {
 // dictation state through the real overlay/Home code: state = recording|transcribing|cleaning|done|error|hint,
 // chip = quiet|too_quiet|no_cleanup, plus message=, error=, action=, copied=1, locked=1, muted=1,
 // card=1 (nowhere to paste; text= sets the transcript, nokey=1 drops the paste-last hint),
-// offer=Start notes with state=hint&card=1&warning=...&text=... (a detected call's offer, calls.rs).
+// offer=Start notes with state=hint&card=1&warning=...&text=... (a detected call's offer, calls.rs),
+// cleaned=... with state=done&card=1&nokey=1&warning=... (the guard pasted the words as spoken).
 if (q.has('state')) {
   setTimeout(() => {
     const state = q.get('state');
@@ -293,7 +307,7 @@ if (q.has('state')) {
       card: q.has('card'), paste_key: q.has('card') && !q.has('nokey') ? '⌘ ⌃ V' : undefined,
       error: state === 'error' ? q.get('error') || 'Microphone access is off' : undefined,
       message: q.get('message') || undefined, chip: q.get('chip') || undefined, action: q.get('action') || undefined,
-      warning: q.get('warning') || undefined, copied: q.has('copied'), locked: q.has('locked'), retry: q.has('retry'),
+      warning: q.get('warning') || undefined, copied: q.has('copied'), locked: q.has('locked'), retry: q.has('retry'), cleaned: q.get('cleaned') || undefined,
     });
     if (state === 'recording') {
       let i = 0;

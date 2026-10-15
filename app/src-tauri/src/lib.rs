@@ -71,9 +71,14 @@ struct AppState {
     tray_pill: Mutex<Option<MenuItem<tauri::Wry>>>,
     /// The tray's own menu, put back when menu-bar mode ends.
     tray_menu: Mutex<Option<Menu<tauri::Wry>>>,
-    /// The last recording whose transcription failed, kept so `retry_last` can run it again.
+    /// The last dictation's audio, so `retry_last` can run it again when it failed and Re-run last
+    /// can run it with another language, model or no cleanup. Memory only, never written to disk,
+    /// so it is gone on quit.
     // ponytail: only the last one, in memory; a failed-recordings folder if users need more than one retry.
-    last_failed: Mutex<Option<Vec<f32>>>,
+    last_clip: Mutex<Option<Kept>>,
+    /// The cleanup the guard rejected for the last dictation, for "Use cleaned version". Memory
+    /// only, cleared with last_output.
+    last_cleaned: Mutex<Option<String>>,
     /// The last dictated text, for paste-last and copy-last. Memory only, so it works with history
     /// off; cleared with history and when history is switched off.
     last_output: Mutex<Option<String>>,
@@ -88,6 +93,7 @@ enum Cmd {
     /// A click on the pill: Ev::Toggle, with the recording shown after CLICK_SHOW_AFTER.
     Click,
     Retry,
+    Rerun(Rerun),
     /// Recording `n`'s microphone went away: transcribe what it captured.
     Lost(u64),
     /// Recording `n` survived SHOW_AFTER: show it and play the start (or, once locked, the lock) sound.
@@ -130,6 +136,9 @@ struct DictationState {
     /// A card offering meeting notes for a detected call: its button ("Start notes" | "Stop notes").
     #[serde(skip_serializing_if = "Option::is_none")]
     offer: Option<&'static str>,
+    /// The guard pasted the words as spoken: a card with the rejected cleanup and "Copy cleaned".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cleaned: Option<String>,
 }
 
 fn state(app: &AppHandle) -> tauri::State<'_, AppState> {
@@ -272,8 +281,16 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                 }
                 Cmd::Retry => {
                     if live.is_none() && !busy.load(Ordering::SeqCst) {
-                        if let Some(pcm) = lock(&state(&app).last_failed).take() {
-                            process(&app, pcm, busy.clone(), Clip::default(), false);
+                        if let Some(k) = lock(&state(&app).last_clip).take_if(|k| k.failed) {
+                            process(&app, k.pcm, busy.clone(), Clip::default(), false, None);
+                        }
+                    }
+                    continue;
+                }
+                Cmd::Rerun(r) => {
+                    if live.is_none() && !busy.load(Ordering::SeqCst) {
+                        if let Some(k) = lock(&state(&app).last_clip).take() {
+                            process(&app, k.pcm, busy.clone(), Clip::default(), false, Some(r));
                         }
                     }
                     continue;
@@ -359,7 +376,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                     let warning = l.lost.load(Ordering::SeqCst).then(|| "Microphone disconnected. Transcribed what was captured.".to_string());
                     let clip = Clip { quality: st.quality(), muted_seen: st.muted_seen(), warning, speaking_ms: st.speaking_ms(), snr_db: st.floor_and_speech().map(|(floor, speech)| speech - floor) };
                     drop(st);
-                    process(&app, pcm, busy.clone(), clip, true);
+                    process(&app, pcm, busy.clone(), clip, true, None);
                 }
             }
         }
@@ -423,6 +440,65 @@ struct Clip {
     snr_db: Option<f32>,
 }
 
+/// A dictation's audio kept in memory (AppState last_clip).
+struct Kept {
+    pcm: Vec<f32>,
+    failed: bool,
+}
+
+/// A successful dictation is kept for Re-run up to 5 minutes (16 kHz f32, about 19 MB); a failed
+/// one whatever its length, as before, so Retry never loses it.
+// ponytail: longer clips are simply not offered for Re-run; keep them too if anyone misses it.
+const KEEP_SAMPLES: usize = 5 * 60 * audio::RATE as usize;
+
+fn keep(pcm: Vec<f32>, failed: bool) -> Option<Kept> {
+    (failed || pcm.len() <= KEEP_SAMPLES).then_some(Kept { pcm, failed })
+}
+
+/// Re-run last: the kept clip through the whole pipeline again with one thing changed. Its menu
+/// id is "pill-rerun:" plus `id()`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Rerun {
+    /// A language code, or "auto".
+    Lang(String),
+    /// A downloaded local speech model.
+    Model(String),
+    NoCleanup,
+}
+
+impl Rerun {
+    pub fn id(&self) -> String {
+        match self {
+            Rerun::Lang(c) => format!("lang:{c}"),
+            Rerun::Model(m) => format!("model:{m}"),
+            Rerun::NoCleanup => "raw".into(),
+        }
+    }
+
+    pub fn parse(id: &str) -> Option<Rerun> {
+        match id.split_once(':') {
+            Some(("lang", c)) => Some(Rerun::Lang(c.into())),
+            Some(("model", m)) => Some(Rerun::Model(m.into())),
+            None if id == "raw" => Some(Rerun::NoCleanup),
+            _ => None,
+        }
+    }
+
+    /// These settings for this one run; nothing is saved.
+    fn apply(&self, s: &mut Settings) {
+        match self {
+            Rerun::Lang(c) if c == "auto" => s.languages.clear(),
+            Rerun::Lang(c) => s.languages = vec![c.clone()],
+            Rerun::Model(m) => {
+                s.stt.provider = "local".into();
+                s.stt.local_model = m.clone(); // what history names
+                s.stt.rerun_model = Some(m.clone());
+            }
+            Rerun::NoCleanup => s.cleanup.enabled = false,
+        }
+    }
+}
+
 /// Clears the busy flag when dropped, so even a panicking worker can't leave dictation stuck.
 struct Busy(Arc<AtomicBool>);
 
@@ -446,8 +522,8 @@ fn pastes(s: &Settings, main_focused: bool) -> bool {
 /// STT + cleanup + paste + history on a worker thread, so the hotkey stays responsive.
 /// Paste vs copy is decided here, when the text is ready: with Echotype's own window in front
 /// (or onboarding not finished, or a retry from the window) pasting would type into Echotype,
-/// so the text goes to the clipboard instead.
-fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, paste: bool) {
+/// so the text goes to the clipboard instead. A Re-run (`rerun`) is copied and shown on the card.
+fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, paste: bool, rerun: Option<Rerun>) {
     if pcm.len() < MIN_SAMPLES {
         emit_state(app, hint("Didn't catch that", None));
         return;
@@ -457,7 +533,10 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
     let speaking_ms = clip.speaking_ms.unwrap_or(pcm.len() as u64 * 1000 / audio::RATE as u64); // a retry has no level stats
     std::thread::spawn(move || {
         let guard = Busy(busy);
-        let s = current_settings(&app);
+        let mut s = current_settings(&app);
+        if let Some(r) = &rerun {
+            r.apply(&mut s);
+        }
         let chip_q = chip(clip.quality, false);
         emit_state(&app, DictationState { state: "transcribing", chip: chip_q, ..Default::default() });
         // A panic in a decoder, whisper-rs or the HTTP stack becomes an error state, not a silent loss.
@@ -466,8 +545,8 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
         }))
         .unwrap_or_else(|_| Err("Transcription crashed unexpectedly".into()));
         let failed = result.is_err();
-        // Keep the audio of a failed transcription for retry_last; a success frees the old one.
-        *lock(&state(&app).last_failed) = failed.then_some(pcm);
+        // Keep the audio for retry_last (failed) and Re-run last; it replaces the one before.
+        *lock(&state(&app).last_clip) = keep(pcm, failed);
         let ev = match result {
             Err(e) => DictationState { state: "error", action: memory_action(&s, &e).or(error_action(&e)), error: Some(e), retry: true, ..Default::default() },
             // Whisper invents "Thank you." and the like from noise; with no voice above the room, it's noise.
@@ -475,9 +554,12 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
                 hint(if clip.muted_seen { "No audio. Check your mic" } else { "Didn't catch that" }, clip.muted_seen.then_some("microphone"))
             }
             Ok(out) => {
-                record_stats(&app, &s, stats::Source::Dictation, &out.text, speaking_ms);
+                if rerun.is_none() {
+                    record_stats(&app, &s, stats::Source::Dictation, &out.text, speaking_ms); // a re-run's words were counted once
+                }
                 record_history(&s, &out);
                 *lock(&state(&app).last_output) = Some(out.text.clone());
+                *lock(&state(&app).last_cleaned) = out.cleaned.clone();
                 let paste = paste && pastes(&s, main_window_focused(&app));
                 let warning = out.warning.clone().or(clip.warning);
                 let chip = chip(clip.quality, out.no_cleanup && out.warning.is_none());
@@ -495,6 +577,15 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
                 };
                 let action = warning.as_deref().and_then(|w| memory_action(&s, w));
                 match res {
+                    // A re-run is not pasted: the card shows what it heard this time, with Copy.
+                    Ok(()) if rerun.is_some() && out.cleaned.is_none() => DictationState {
+                        warning: warning.or(Some(format!("Re-run copied, {} to paste", platform::PASTE_KEYS))),
+                        copied: true,
+                        action: None, // nothing to fix: a re-run is never pasted
+                        ..card(&s, out.text, None, chip)
+                    },
+                    // The guard pasted the words as spoken: the card offers the cleaned version.
+                    Ok(()) if out.cleaned.is_some() => DictationState { state: "done", text: Some(out.text), warning, copied: !paste, chip, action, card: true, cleaned: out.cleaned, ..Default::default() },
                     Ok(()) => DictationState { state: "done", text: Some(out.text), warning, copied: !paste, chip, action, ..Default::default() },
                     // Nowhere to paste, or the keystroke blocked (secure input): the card, with Copy.
                     Err((e, true)) => {
@@ -591,6 +682,7 @@ fn record_history(s: &Settings, out: &cleanup::Output) {
         stt_provider: if s.stt.provider == "local" { format!("local:{}", stt::model_id(&s.stt.local_model)) } else { s.stt.provider.clone() },
         cleanup_provider: cleaned.then(|| s.cleanup.provider.clone()),
         no_cleanup: out.no_cleanup,
+        cleaned: out.cleaned.clone(),
     };
     if let Err(e) = settings::append_history(&entry) {
         eprintln!("echotype: could not write history: {e}");
@@ -846,6 +938,7 @@ fn commit_settings(app: &AppHandle, change: impl FnOnce(&Settings) -> Settings) 
     }
     if old.history_enabled && !new.history_enabled {
         *lock(&state(app).last_output) = None; // switching history off also forgets the in-memory copy
+        *lock(&state(app).last_cleaned) = None;
     }
     if new.talk_key != old.talk_key {
         apply_talk_key(app, &new);
@@ -938,6 +1031,7 @@ async fn get_history(limit: Option<usize>) -> R<Vec<HistoryEntry>> {
 #[tauri::command]
 async fn clear_history(app: AppHandle) -> R<()> {
     *lock(&state(&app).last_output) = None;
+    *lock(&state(&app).last_cleaned) = None;
     settings::clear_history()
 }
 
@@ -1148,6 +1242,44 @@ fn copy_last(app: &AppHandle) -> R<()> {
     platform::copy(&text)
 }
 
+/// "Copy cleaned" on the card the guard shows: the cleanup it rejected, to the clipboard. Not
+/// ⌘Z and paste: undo is not reliable across apps (it can undo the user's own typing, or only
+/// part of the paste), and the app in front may have changed since.
+#[tauri::command]
+async fn pill_copy_cleaned(app: AppHandle) -> R<()> {
+    copy_cleaned(&app)
+}
+
+pub(crate) fn copy_cleaned(app: &AppHandle) -> R<()> {
+    let text = lock(&state(app).last_cleaned).clone().ok_or("No cleaned version to copy")?;
+    platform::copy(&text)
+}
+
+/// Re-run last (pill menu, History): the kept clip again with one change. Copied, never pasted.
+pub(crate) fn rerun_last(app: &AppHandle, r: Rerun) {
+    let _ = state(app).dictation.send(Cmd::Rerun(r));
+}
+
+/// What History's Re-run offers: [{id, label}], empty when no clip is kept.
+#[tauri::command]
+async fn rerun_options(app: AppHandle) -> R<Vec<serde_json::Value>> {
+    if lock(&state(&app).last_clip).is_none() {
+        return Ok(vec![]);
+    }
+    let s = current_settings(&app);
+    Ok(pill::rerun_options(&s, |id| stt::model_file(id).is_some()).into_iter().map(|(r, label)| serde_json::json!({ "id": r.id(), "label": label })).collect())
+}
+
+#[tauri::command]
+async fn rerun(app: AppHandle, id: String) -> R<()> {
+    let r = Rerun::parse(&id).ok_or("Unknown re-run")?;
+    if lock(&state(&app).last_clip).is_none() {
+        return Err("There is no recording to re-run".into());
+    }
+    rerun_last(&app, r);
+    Ok(())
+}
+
 /// ✕ on the card.
 #[tauri::command]
 async fn pill_dismiss(app: AppHandle) -> R<()> {
@@ -1204,7 +1336,7 @@ async fn relaunch(app: AppHandle) -> R<()> {
 #[tauri::command]
 async fn retry_last(app: AppHandle) -> R<()> {
     let st = state(&app);
-    if st.last_failed.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+    if st.last_clip.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_none_or(|k| !k.failed) {
         return Err("There is no failed recording to retry".into());
     }
     st.dictation.send(Cmd::Retry).map_err(|e| e.to_string())
@@ -1565,7 +1697,8 @@ pub fn run() {
                 drag: Mutex::new(None),
                 tray_pill: Mutex::new(None),
                 tray_menu: Mutex::new(None),
-                last_failed: Mutex::new(None),
+                last_clip: Mutex::new(None),
+                last_cleaned: Mutex::new(None),
                 last_output: Mutex::new(None),
                 downloads: Mutex::new(HashMap::new()),
                 recording: AtomicBool::new(false),
@@ -1692,6 +1825,8 @@ pub fn run() {
             shortcut_status,
             relaunch,
             retry_last,
+            rerun_options,
+            rerun,
             check_permissions,
             open_permission_settings,
             request_microphone,
@@ -1717,6 +1852,7 @@ pub fn run() {
             pill_drag,
             pill_reset,
             pill_copy,
+            pill_copy_cleaned,
             preview_sounds,
             show_pill_demo,
             pill_dismiss,
@@ -1817,12 +1953,38 @@ fn cli_report(result: R<cleanup::Output>, total_ms: u128) -> (String, String, i3
 
 #[cfg(test)]
 mod tests {
-    use super::{Settings, accel_label, chip, cli_report, commit, parse_hotkey, unregistered_shortcuts};
+    use super::{KEEP_SAMPLES, Rerun, Settings, accel_label, chip, cli_report, commit, keep, parse_hotkey, stt, unregistered_shortcuts};
     use crate::audio::Quality;
     use std::cell::RefCell;
 
     /// Under the app manifest a command missing from a capability fails only at runtime, in the
     /// window, so check generate_handler!, build.rs COMMANDS and both capability files agree.
+    #[test]
+    fn the_last_clip_is_kept_within_its_cap() {
+        let five_min = vec![0.0; KEEP_SAMPLES];
+        assert!(keep(five_min, false).is_some_and(|k| !k.failed), "a success is kept for Re-run");
+        assert!(keep(vec![0.0; KEEP_SAMPLES + 1], false).is_none(), "but not past five minutes");
+        assert!(keep(vec![0.0; KEEP_SAMPLES + 1], true).is_some_and(|k| k.failed), "a failure is kept at any length for Retry");
+    }
+
+    #[test]
+    fn a_rerun_changes_one_setting_for_one_run() {
+        let mut s = Settings { languages: vec!["en".into(), "hi".into()], ..Settings::default() };
+        s.cleanup.enabled = true;
+        let base = s.clone();
+        let run = |r: Rerun| {
+            let mut t = base.clone();
+            r.apply(&mut t);
+            t
+        };
+        assert_eq!(run(Rerun::Lang("hi".into())).languages, ["hi"]);
+        assert!(run(Rerun::Lang("auto".into())).languages.is_empty());
+        assert!(!run(Rerun::NoCleanup).cleanup.enabled);
+        let m = run(Rerun::Model("small".into()));
+        assert_eq!((m.stt.provider.as_str(), stt::local_model(&m).as_str(), m.advanced), ("local", "small", false), "the model, without switching on advanced settings");
+        assert_eq!(serde_json::to_value(&m).unwrap()["stt"].get("rerun_model"), None, "never saved");
+    }
+
     #[test]
     fn capabilities_list_every_command_and_the_overlay_only_the_pill() {
         let lib = include_str!("lib.rs");
@@ -1875,7 +2037,7 @@ mod tests {
 
     #[test]
     fn cli_prints_nothing_and_exits_zero_when_no_speech_was_found() {
-        let out = |text: &str| crate::cleanup::Output { raw: text.into(), text: text.into(), stt_ms: 5, cleanup_ms: 0, warning: None, no_cleanup: true };
+        let out = |text: &str| crate::cleanup::Output { raw: text.into(), text: text.into(), stt_ms: 5, cleanup_ms: 0, warning: None, no_cleanup: true, cleaned: None };
         let (stdout, stderr, code) = cli_report(Ok(out("")), 9);
         assert_eq!((stdout.as_str(), code), ("", 0));
         assert!(stderr.starts_with("echotype: no speech found\n"), "{stderr}");

@@ -38,6 +38,8 @@
     "allow-shortcut-status",
     "allow-relaunch",
     "allow-retry-last",
+    "allow-rerun-options",
+    "allow-rerun",
     "allow-check-permissions",
     "allow-open-permission-settings",
     "allow-request-microphone",

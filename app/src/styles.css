@@ -204,6 +204,7 @@ h1 { font-size: 20px; line-height: 26px; font-weight: var(--fw-semi); letter-spa
 .group-title { font-size: 13px; font-weight: var(--fw); color: var(--fg-3); margin: 26px 0 8px 2px; }
 h1 + .group { margin-top: 16px; }
 .page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.page-head select { margin-left: auto; width: auto; min-width: 0; flex: 0 1 auto; } /* History: Re-run last dictation, beside Clear history */
 .boot-error { max-width: 52ch; color: var(--bad); }
 
 .saved {

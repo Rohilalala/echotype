@@ -88,6 +88,9 @@ fn auto_model(total_mb: u64, downloaded: impl Fn(&str) -> bool) -> &'static str 
 
 /// The local speech model these settings use: the manual pick with advanced settings on, else Automatic's.
 pub fn local_model(s: &Settings) -> String {
+    if let Some(m) = &s.stt.rerun_model {
+        return m.clone();
+    }
     if s.advanced { s.stt.local_model.clone() } else { auto_model(ram_mb().0, |id| model_file(id).is_some()).into() }
 }
 
