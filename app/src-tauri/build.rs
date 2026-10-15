@@ -14,6 +14,7 @@ const COMMANDS: &[&str] = &[
     "cancel_download",
     "list_input_devices",
     "get_history",
+    "update_history",
     "clear_history",
     "get_stats",
     "clear_stats",

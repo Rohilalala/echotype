@@ -591,6 +591,11 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .hero-sub .tag { margin-left: 2px; }
 .history summary .tag { flex: none; }
 .history .detail .hint { color: var(--fg-2); font-size: 12px; margin: 0; }
+.history .detail > .btn { align-self: flex-start; }
+.history .fix { display: flex; flex-direction: column; gap: 8px; }
+.history .fix-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.history .learn { display: flex; flex-direction: column; gap: 6px; }
+.history .learn p { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 40px; margin: 0; padding: 6px 8px 6px 12px; font-size: 12.5px; background: var(--soft); border-radius: var(--r-card); }
 
 /* Echotype Cloud account: an elevated card; fields sized for an email and a 6-digit code. */
 .group.elev { background: var(--elev); border-color: var(--composer-line); border-radius: var(--r-float); box-shadow: var(--shadow-float); }

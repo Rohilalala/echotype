@@ -952,9 +952,11 @@ async function renderHistory() {
   list.replaceChildren(...items.map(it => {
     const copy = h('button', { className: 'btn quiet', type: 'button' }, 'Copy');
     copy.onclick = e => { e.preventDefault(); copyText(it.text, copy); };
+    const text = h('span', { className: 'text' }, it.text);
+    const fix = h('button', { className: 'btn', type: 'button', onclick: () => startFix(it, text, fix) }, 'Fix');
     return h('details', {},
-      h('summary', {}, h('span', { className: 'text' }, it.text), it.no_cleanup && h('span', { className: 'tag' }, 'No cleanup'), h('time', { className: 'when', title: fmtTime(it.ts).replace('\n', ' ') }, fmtAgo(it.ts)), copy),
-      h('div', { className: 'detail' },
+      h('summary', {}, text, it.no_cleanup && h('span', { className: 'tag' }, 'No cleanup'), h('time', { className: 'when', title: fmtTime(it.ts).replace('\n', ' ') }, fmtAgo(it.ts)), copy),
+      h('div', { className: 'detail' }, fix,
         it.raw !== it.text && h('p', { className: 'raw text' }, h('b', {}, 'Heard: '), it.raw),
         h('span', { className: 'timing' },
           h('span', {}, `Speech ${it.stt_ms} ms${it.stt_provider ? ` (${it.stt_provider})` : ''}`),
@@ -962,6 +964,83 @@ async function renderHistory() {
         it.no_cleanup && noCleanup() && h('p', { className: 'hint' }, 'Kept as you said it because cleanup is off. ', h('button', { className: 'btn quiet', type: 'button', onclick: () => go('cleanup') }, 'Set up cleanup'))));
   }));
 }
+// Fix: edit an entry's text in place, save it, then offer to learn the names it corrected.
+function startFix(it, textEl, fixBtn) {
+  const area = h('textarea', { value: it.text, rows: Math.min(8, it.text.split('\n').length + 1), 'aria-label': 'Corrected text' });
+  const err = h('p', { className: 'row-desc error', role: 'alert', hidden: true });
+  const close = () => { form.remove(); fixBtn.hidden = false; fixBtn.focus(); };
+  area.onkeydown = e => { if (e.key === 'Escape') close(); else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) form.requestSubmit(); };
+  const form = h('form', { className: 'fix', onsubmit: async e => {
+    e.preventDefault();
+    const before = it.text, after = area.value.trim();
+    if (!after || after === before) return close();
+    try { await invoke('update_history', { ts: it.ts, text: after }); }
+    catch (e) { err.textContent = `Couldn't save: ${e}`; err.hidden = false; return; }
+    it.text = textEl.textContent = after;
+    close();
+    fixBtn.parentElement.querySelector('.learn')?.remove();
+    const tips = fixSuggestions(before, after);
+    if (tips.length) fixBtn.after(learnBox(tips));
+    invoke('get_history', { limit: 3 }).then(r => { recent = r; renderRecent(); }).catch(() => {});
+  } }, area, err, h('div', { className: 'fix-actions' },
+    h('button', { className: 'btn', type: 'button', onclick: close }, 'Cancel'),
+    h('button', { className: 'btn primary', type: 'submit' }, 'Save')));
+  fixBtn.hidden = true;
+  fixBtn.after(form);
+  area.focus();
+}
+
+function learnBox(tips) {
+  const ask = (q, label, done, act) => {
+    const row = h('p', {}, h('span', {}, q), h('button', { className: 'btn', type: 'button', onclick: () => {
+      act(); save(); renderDict();
+      row.replaceChildren(h('span', { className: 'key-state' }, svg(CHECK), done));
+    } }, label));
+    return row;
+  };
+  return h('div', { className: 'learn' }, tips.flatMap(t => [
+    !S.dictionary.some(w => w.toLowerCase() === t.word.toLowerCase())
+      && ask(`Add ${t.word} to your Dictionary?`, 'Add', `${t.word} is in your Dictionary.`, () => S.dictionary.push(t.word)),
+    t.from && !S.replacements.some(r => r.from.trim().toLowerCase() === t.from.toLowerCase())
+      && ask(`Always replace “${t.from}” with “${t.word}”?`, 'Add rule', `“${t.from}” now becomes “${t.word}”.`, () => S.replacements.push({ from: t.from, to: t.word })),
+  ]));
+}
+
+// Function words: correcting one is grammar, not a name, and a whole-word rule on one
+// ("the" → "a") would rewrite nearly every dictation, so neither is ever offered.
+const STOP = new Set('a an the and or but if of to in on at by for from with as is are was were be been am i you he she it we they me him her us them my your his its our their this that these those so not no do does did have has had will would can could should just um uh oh ok okay yes yeah hey'.split(' '));
+const bare = w => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ''); // "Xoxoday." → "Xoxoday"
+const wkey = w => w.toLowerCase().replace(/[^\p{L}\p{N}]/gu, ''); // "Let's" and "lets" are the same word
+// What a fix taught: each substituted run of up to three words whose new form looks like a name
+// or term (a capital, or letters with digits like "GPT4", outside the function words; a bare
+// number fix is not a term), as { word, from }. `from` is set
+// when the wrong form is itself worth a replacement rule. Case-, punctuation- and spacing-only
+// edits compare equal under wkey and are never offered.
+// ponytail: a capital at the start of a sentence counts as a name; skip it if that proves noisy.
+function fixSuggestions(before, after) {
+  const a = before.split(/\s+/).filter(Boolean), b = after.split(/\s+/).filter(Boolean);
+  const ka = a.map(wkey), kb = b.map(wkey);
+  // ponytail: O(n·m) LCS table; a dictation is a few hundred words at most.
+  const L = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
+  for (let i = a.length - 1; i >= 0; i--) for (let j = b.length - 1; j >= 0; j--)
+    L[i][j] = ka[i] === kb[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const out = [];
+  for (let i = 0, j = 0; i < a.length || j < b.length;) {
+    if (ka[i] === kb[j]) { i++; j++; continue; }
+    const i0 = i, j0 = j;
+    while ((i < a.length || j < b.length) && !(i < a.length && ka[i] === kb[j]))
+      if (j < b.length && (i === a.length || L[i][j + 1] >= L[i + 1][j])) j++; else i++;
+    const from = a.slice(i0, i).map(bare).filter(Boolean), to = b.slice(j0, j).map(bare).filter(Boolean);
+    if (!from.length || !to.length || from.length > 3 || to.length > 3) continue;
+    if (wkey(from.join('')) === wkey(to.join(''))) continue;
+    if (!to.some(w => !STOP.has(w.toLowerCase()) && (/\p{Lu}/u.test(w) || /\p{L}/u.test(w) && /\p{N}/u.test(w)))) continue;
+    const word = to.join(' '), wrong = from.join(' ');
+    if (out.some(t => t.word === word)) continue;
+    out.push({ word, from: from.every(w => STOP.has(w.toLowerCase())) || wkey(wrong).length < 3 ? null : wrong });
+  }
+  return out;
+}
+
 const confirmClear = on => { $('#clearHistory').hidden = on; $('#clearConfirm').hidden = !on; (on ? $('#clearCancel') : $('#clearHistory')).focus(); };
 $('#clearHistory').addEventListener('click', () => confirmClear(true));
 $('#clearCancel').addEventListener('click', () => confirmClear(false));

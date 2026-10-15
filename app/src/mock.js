@@ -65,6 +65,8 @@ for (const m of models) m.warning = low && m.ram_mb > rec.ram_mb ? `Uses about $
 
 const ago = min => Math.floor((now - min * 60000) / 1000);
 let history = [
+  { ts: ago(2), raw: 'ping arnav and midan about the zozo day thing', text: 'Ping Arnav and Midan about the Zozo Day thing', stt_ms: 420, cleanup_ms: 380, stt_provider: 'local', cleanup_provider: 'ollama' },
+  { ts: ago(3), raw: 'lets meet tomorrow', text: 'lets meet tomorrow', stt_ms: 300, cleanup_ms: 0, stt_provider: 'local', cleanup_provider: null, no_cleanup: true },
   { ts: ago(4), raw: 'haan toh um kal ki meeting mein we decided ki launch ko push karenge thursday tak', text: "In yesterday's meeting we decided to push the launch to Thursday.", stt_ms: 690, cleanup_ms: 540, stt_provider: 'local', cleanup_provider: 'ollama' },
   { ts: ago(38), raw: 'can you send me the uh the figma link no wait the loom link from the demo', text: 'Can you send me the Loom link from the demo?', stt_ms: 410, cleanup_ms: 610, stt_provider: 'local', cleanup_provider: 'ollama' },
   { ts: ago(95), raw: 'groceries eggs milk sourdough and two avocados', text: 'Groceries:\n- Eggs\n- Milk\n- Sourdough\n- Two avocados', stt_ms: 380, cleanup_ms: 720, stt_provider: 'local', cleanup_provider: 'ollama' },
@@ -129,6 +131,12 @@ const commands = {
   },
   relaunch: () => null,
   get_history: ({ limit }) => (settings.history_enabled ? history.slice(0, limit) : []),
+  update_history: ({ ts, text }) => {
+    const e = history.find(x => x.ts === ts);
+    if (!e) throw 'That entry is no longer in history.';
+    e.text = text;
+    return null;
+  },
   clear_history: () => { history = []; return null; },
   transcribe_file: async ({ path }) => {
     await wait(1400);
