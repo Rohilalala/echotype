@@ -11,6 +11,19 @@
   body[data-bg="light"] .win { position: absolute; inset: 9% 14% 14% 12%; background: #fff; border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,.18); }
   body[data-bg="light"] .win::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 38px; background: #f4f4f6; border-radius: 12px 12px 0 0; border-bottom: 1px solid #e3e3e6; }
   body[data-bg="light"] .win i { position: absolute; left: 8%; right: 30%; height: 10px; border-radius: 5px; background: #ececef; }
+  /* A stand-in for the setup window (the real one is the onboarding card in index.html). */
+  .card { position: fixed; border-radius: 18px; opacity: 0; box-shadow: 0 30px 80px rgba(0,0,0,.35), 0 0 0 1px rgba(255,255,255,.08); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; }
+  body[data-bg="dark"] .card { background: rgba(30,31,34,.97); color: #ececee; }
+  body[data-bg="light"] .card { background: rgba(252,252,253,.98); color: #1d1d1f; box-shadow: 0 30px 80px rgba(0,0,0,.18), 0 0 0 1px rgba(0,0,0,.08); }
+  .card .content { position: absolute; left: 330px; right: 48px; top: 50%; transform: translateY(-50%); }
+  .card .content > * { opacity: 0; transform: translateY(10px); }
+  .card h1 { font-size: 26px; font-weight: 600; letter-spacing: -.01em; margin: 0 0 10px; }
+  .card p { margin: 0 0 22px; opacity: .72; }
+  .card button { font: inherit; font-weight: 500; padding: 8px 18px; border-radius: 18px; border: 0; background: #ececee; color: #111; }
+  body[data-bg="light"] .card button { background: #1d1d1f; color: #fff; }
+  .card .dots { position: absolute; left: 24px; top: 20px; display: flex; gap: 6px; }
+  .card .dots i { width: 6px; height: 6px; border-radius: 3px; background: currentColor; opacity: .25; }
+  .card .dots i:first-child { width: 18px; opacity: .9; }
   canvas, .veil { position: fixed; inset: 0; width: 100vw; height: 100vh; }
   /* The veil: the desktop dimmed like cinema lights going down, darker at the edges. */
   /* The ball's backing: the idle pill's dark disc, fading in as the last stars land. */
@@ -22,25 +35,37 @@
 <div class="win"><i style="top:80px"></i><i style="top:104px;right:45%"></i><i style="top:128px"></i><i style="top:176px;right:38%"></i></div>
 <div class="veil" id="veil"></div>
 <div class="disc" id="disc"></div>
+<div class="card" id="card"><div class="dots"><i></i><i></i><i></i><i></i><i></i></div><div class="content"><h1>Hold a key. Talk. Let go.</h1><p>Echotype types what you say, in any app. First it needs your microphone. It listens only while you hold the key, and your voice never leaves this Mac.</p><button>Continue</button></div></div>
 <canvas id="c"></canvas>
+<canvas id="a3"></canvas>
 <script type="module">
 import { createIntro, veilAt } from './intro.js';
+import { createAct3, ACT3 } from './intro-act3.js';
 const q = new URLSearchParams(location.search);
 document.body.dataset.bg = q.get('bg') || 'dark';
 const intro = createIntro(document.getElementById('c'), { dpr: Number(q.get('dpr')) || undefined });
 const veil = document.getElementById('veil'), strength = q.has('veil') ? Number(q.get('veil')) : 0.15;
+const card = document.getElementById('card'), items = [...card.querySelectorAll('.content > *')];
+// The setup window: centred, 680 x 420, the orb in its left column.
+const layout = (W, H) => { const w = Math.min(680, W - 80), h = 420, x = (W - w) / 2, y = (H - h) / 2; return { card: { x, y, w, h, r: 18 }, orb: { x: x + 165, y: y + h / 2, size: 150 } }; };
+const act3 = createAct3(document.getElementById('a3'), { dpr: Number(q.get('dpr')) || undefined, layout, light: document.body.dataset.bg === 'light' });
 const disc = document.getElementById('disc');
 const placeDisc = () => { const b = intro.ballAt(); Object.assign(disc.style, { left: b.x + 'px', top: b.y + 'px', width: b.r * 2.3 + 'px', height: b.r * 2.3 + 'px' }); };
 placeDisc();
 window.__draw = t => {
-  intro.draw(t);
+  // The film until the ball has formed; from then on the live Act 3, from the same dots.
+  if (t < ACT3.take) intro.draw(t); else intro.draw(-100);
+  const a = act3.draw(t);
+  const L = layout(innerWidth, innerHeight);
+  Object.assign(card.style, { left: L.card.x + 'px', top: L.card.y + 'px', width: L.card.w + 'px', height: L.card.h + 'px', opacity: a.fill });
+  items.forEach((el, i) => { const k = Math.min(1, Math.max(0, (t - ACT3.content - i * 0.06) / 0.3)); const e = 1 - (1 - k) ** 3; el.style.opacity = e; el.style.transform = `translateY(${10 * (1 - e)}px)`; });
   veil.style.opacity = veilAt(t, intro.timeline.formed) * strength;
   const f = intro.timeline.formed;
-  disc.style.opacity = Math.min(1, Math.max(0, (t - f + 0.5) / 0.7));
+  disc.style.opacity = t < ACT3.take ? Math.min(1, Math.max(0, (t - f + 0.5) / 0.7)) : 0;
 };
 if (q.has('t')) window.__draw(Number(q.get('t')));
 // Plays on a loop (10 s) so it can be watched over and over; click to restart.
-else { let t0 = performance.now(); addEventListener('click', () => (t0 = performance.now())); const loop = () => { window.__draw(((performance.now() - t0) / 1000) % 10); requestAnimationFrame(loop); }; loop(); }
+else { let t0 = performance.now(); addEventListener('click', () => (t0 = performance.now())); const loop = () => { window.__draw(((performance.now() - t0) / 1000) % 14); requestAnimationFrame(loop); }; loop(); }
 </script>
 </body>
 </html>

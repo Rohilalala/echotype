@@ -235,7 +235,7 @@ export function createIntro(canvas, opts = {}) {
       order.push([i, b * 0.6 + (1 - z) * 0.4 + R() * 0.25]);
     }
     order.sort((p, q) => q[1] - p[1]);
-    const pillCentre = [0, H * 0.12];
+    const pillCentre = [0, 0]; // the ball forms at the centre of the screen
     // Assign each pill dot the nearest unused candidate star, so falls cross as little as possible.
     const pool = order.slice(0, Math.min(N, dots.length * 3)).map(o => o[0]);
     const used = new Set();
