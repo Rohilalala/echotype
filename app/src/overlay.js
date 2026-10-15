@@ -1,5 +1,5 @@
 if (!window.__TAURI__) await import('./mock.js');
-import { resolvePreset, MODE_FRAMES } from './vendor/thinking-orbs.js';
+import { resolvePreset, MODE_FRAMES, scaleCounts, scaleRadii } from './vendor/thinking-orbs.js';
 const { listen } = window.__TAURI__.event;
 const { invoke } = window.__TAURI__.core;
 const pill = document.getElementById('pill'), label = document.getElementById('label');
@@ -101,8 +101,10 @@ listen('audio-level', ({ payload }) => {
 // listening/thinking → card → ball is one continuous morph. A dark backing chases .pill's box
 // underneath so dots and words read on any wallpaper.
 const cvs = document.getElementById('body'), g = cvs.getContext('2d');
-const W = 260, H = 100, ORB = 36, N = 600;
-const LISTEN = resolvePreset('listening', 64), THINK = resolvePreset('working', 64);
+const W = 260, H = 100, ORB = 36, N = 1000;
+// Denser than the 64 px presets, with finer dots, so the orb has the same detail as the intro's ball.
+const dense = (p, count, size) => ({ ...p, opts: scaleRadii(scaleCounts(p.opts, count), size) });
+const LISTEN = dense(resolvePreset('listening', 64), 3, 0.62), THINK = dense(resolvePreset('working', 64), 1.3, 0.8);
 // Dots visible in the ball and along an edge; the rest wait, unseen, on those same spots.
 const BALL_DOTS = 90, EDGE_GAP = 4;
 // The window shows this page zoomed 1.5x (pill.rs ZOOM): draw at 3x so the dots stay crisp.

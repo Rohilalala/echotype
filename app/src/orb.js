@@ -2,10 +2,12 @@
 // orb, the thinking orb and a check mark, and springs to whatever slot the current step gives it.
 // The pill's approach (overlay.js: thinking-orbs dots by id, each on its own spring), drawn in the
 // window's own ink on its own paper instead of light dots on a dark backing.
-import { resolvePreset, MODE_FRAMES } from './vendor/thinking-orbs.js';
+import { resolvePreset, MODE_FRAMES, scaleCounts, scaleRadii } from './vendor/thinking-orbs.js';
 
-const N = 520;
-const LISTEN = resolvePreset('listening', 64), THINK = resolvePreset('working', 64);
+const N = 1000;
+// The same dense orb as the pill (overlay.js), so it's one object everywhere.
+const dense = (p, count, size) => ({ ...p, opts: scaleRadii(scaleCounts(p.opts, count), size) });
+const LISTEN = dense(resolvePreset('listening', 64), 3, 0.62), THINK = dense(resolvePreset('working', 64), 1.3, 0.8);
 // The same orbs, a little denser: these are drawn three to four times the pill's size.
 const DENSE = { listening: { ...LISTEN.opts, rings: 13, lonDensity: 30 }, working: { ...THINK.opts, orbitN: 12, ghostN: 34, ghostA: 0.85 } };
 const hash = i => { const v = Math.sin(i * 12.9898) * 43758.5453; return v - Math.floor(v); };

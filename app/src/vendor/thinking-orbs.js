@@ -1,5 +1,5 @@
 // thinking-orbs engine by Jakub Antalik, MIT License (see thinking-orbs-LICENSE.txt).
-// https://github.com/Jakubantalik/thinking-orbs @ de85557 — src/engine bundled to plain JS; one change, marked "Echotype:" in finalizeFrame.
+// https://github.com/Jakubantalik/thinking-orbs @ de85557 — src/engine bundled to plain JS; two changes, marked "Echotype:" (dot ids in finalizeFrame; scaleCounts/scaleRadii exported).
 // orbs-src/src/engine/core.ts
 function lerp(a, b, f) {
   return a + (b - a) * f;
@@ -848,5 +848,7 @@ export {
   paintFrame,
   paintLines,
   radiusScale,
-  resolvePreset
+  resolvePreset,
+  scaleCounts, // Echotype: exported, so the pill can draw a denser orb than the 64 px preset
+  scaleRadii
 };
