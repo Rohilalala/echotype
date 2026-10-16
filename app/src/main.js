@@ -155,7 +155,7 @@ function go(page) {
   if (page === 'meetings') meetingsPage.show();
   if (page === 'settings') { refreshPerms(); refreshApi(); refreshStatus(); }
   if (page === 'speech' || page === 'cleanup') refreshCloud();
-  if (page === 'cleanup') refreshLastApp();
+  if (page === 'cleanup') { refreshLastApp(); refreshInstalled(); }
   history.replaceState(null, '', '#' + page);
   document.dispatchEvent(new CustomEvent('echotype:page', { detail: page })); // stats.js refreshes on its page
   window.__TAURI__.event.emit?.('main-page', page); // Home shows the live state, so the pill steps aside there (D14)
@@ -697,8 +697,18 @@ function renderAppStyles() {
     h('select', { 'aria-label': `Style in ${a.name}`, onchange: e => { list()[i].style = e.target.value; save(); } }, APP_STYLE_OPTS.map(([v, l]) => h('option', { value: v, selected: v === a.style }, l))),
     h('button', { className: 'icon-btn', type: 'button', 'aria-label': `Remove ${a.name}`, onclick: () => { list().splice(i, 1); save(); renderAppStyles(); } }, svg(CROSS)))),
   h('div', { className: 'row' },
-    h('span', { className: 'row-text' }, h('span', { className: 'row-desc' }, add ? `Your last dictation went to ${add.name}, which uses ${label(add.style)}.` : 'To pick the style for an app, dictate into it, then add it here.')),
-    add && h('button', { className: 'btn', type: 'button', onclick: () => { list().push({ id: add.id, name: add.name, style: add.style }); save(); renderAppStyles(); } }, `Add ${add.name}`)));
+    h('span', { className: 'row-text' }, h('span', { className: 'row-desc' }, add ? `Your last dictation went to ${add.name}, which uses ${label(add.style)}.` : 'Pick an app to set its style.')),
+    add && h('button', { className: 'btn', type: 'button', onclick: () => { list().push({ id: add.id, name: add.name, style: add.style }); save(); renderAppStyles(); } }, `Add ${add.name}`),
+    installed.length > 0 && h('select', { 'aria-label': 'Add an app', onchange: e => {
+      const a = installed.find(x => x.id === e.target.value);
+      if (a) { list().push({ id: a.id, name: a.name, style: a.style }); save(); }
+      renderAppStyles();
+    } }, h('option', { value: '' }, 'Add an app…'), installed.filter(a => !list().some(x => x.id === a.id)).map(a => h('option', { value: a.id }, a.name)))));
+}
+let installed = [];
+async function refreshInstalled() {
+  installed = await invoke('installed_apps').catch(() => []);
+  renderAppStyles();
 }
 async function refreshLastApp() {
   lastApp = await invoke('last_app').catch(() => null);

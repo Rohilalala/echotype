@@ -133,6 +133,7 @@ const commands = {
   },
   relaunch: () => null,
   // ?apps turns on "Match the app you're typing in", with a last dictation into Slack.
+  installed_apps: () => [{ id: 'com.apple.mail', name: 'Mail', style: 'formal' }, { id: 'com.tinyspeck.slackmacgap', name: 'Slack', style: 'casual' }, { id: 'com.apple.TextEdit', name: 'TextEdit', style: '' }],
   last_app: () => (q.has('apps') ? { id: 'com.tinyspeck.slackmacgap', name: 'Slack', style: 'casual' } : null),
   get_history: ({ limit }) => (settings.history_enabled ? history.slice(0, limit) : []),
   update_history: ({ ts, text }) => {

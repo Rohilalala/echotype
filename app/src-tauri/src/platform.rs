@@ -299,6 +299,33 @@ pub fn frontmost_app(app: &AppHandle) -> Option<FrontApp> {
 }
 
 /// `tccutil reset <service> <bundle id>`.
+/// Apps a style can be picked for without dictating into them first: the bundles in the
+/// Applications folders, by name. Other platforms: none, so the list grows by dictating.
+pub fn installed_apps() -> Vec<FrontApp> {
+    #[cfg(target_os = "macos")]
+    {
+        use core_foundation::{bundle::CFBundle, string::CFString, url::CFURL};
+        let home = dirs::home_dir().unwrap_or_default().join("Applications");
+        let roots = ["/Applications", "/Applications/Utilities", "/System/Applications", "/System/Applications/Utilities"].map(std::path::PathBuf::from).into_iter().chain([home]);
+        let mut apps: Vec<FrontApp> = roots
+            .filter_map(|d| std::fs::read_dir(d).ok())
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "app"))
+            .filter_map(|p| {
+                let info = CFBundle::new(CFURL::from_path(&p, true)?)?.info_dictionary();
+                let id = info.find(&CFString::from_static_string("CFBundleIdentifier"))?.downcast::<CFString>()?.to_string();
+                Some(FrontApp { id, name: p.file_stem()?.to_string_lossy().into() })
+            })
+            .collect();
+        apps.sort_by_key(|a| a.name.to_lowercase());
+        apps
+    }
+    #[cfg(not(target_os = "macos"))]
+    Vec::new()
+}
+
 fn tcc_reset_args<'a>(service: &'a str, bundle_id: &'a str) -> [&'a str; 3] {
     ["reset", service, bundle_id]
 }
@@ -613,6 +640,14 @@ mod tests {
 
     fn el(role: &str) -> Focused {
         Focused { role: role.into(), ..Default::default() }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn installed_apps_are_named_by_bundle_id_in_name_order() {
+        let apps = installed_apps();
+        assert!(apps.iter().any(|a| a.id == "com.apple.TextEdit" && a.name == "TextEdit"), "TextEdit ships with macOS");
+        assert!(apps.windows(2).all(|w| w[0].name.to_lowercase() <= w[1].name.to_lowercase()));
     }
 
     #[test]
