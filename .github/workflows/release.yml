@@ -26,6 +26,11 @@ jobs:
           - os: windows-latest
             args: --bundles msi,nsis
     runs-on: ${{ matrix.os }}
+    env:
+      # Signs the in-app updates (Settings → Updates checks the release's latest.json against the
+      # pubkey in tauri.conf.json). The key's pair is in the owner's ~/.tauri; it has no password.
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -75,6 +80,11 @@ jobs:
             name: windows-x64
             args: --bundles msi,nsis
     runs-on: ${{ matrix.os }}
+    env:
+      # Signs the in-app updates (Settings → Updates checks the release's latest.json against the
+      # pubkey in tauri.conf.json). The key's pair is in the owner's ~/.tauri; it has no password.
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

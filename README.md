@@ -79,7 +79,7 @@ scripts/build-llama-server.sh    # Mac only: the runner for Echotype's cleanup m
 npm run tauri build
 ```
 
-Needs Rust, CMake and Node 20+, and macOS 13 or later on a Mac. `build-llama-server.sh` builds a pinned llama.cpp release (MIT) into `src-tauri/binaries/`, which the Mac build bundles. Transcribe a file without opening the window:
+Needs Rust, CMake and Node 20+, and macOS 13 or later on a Mac. `build-llama-server.sh` builds a pinned llama.cpp release (MIT) into `src-tauri/binaries/`, which the Mac build bundles. Building the app also signs its in-app update: set `TAURI_SIGNING_PRIVATE_KEY` to the updater key (the release workflow reads it from the repository secret of that name; the public half is in `tauri.conf.json`). Without it, build with `--no-bundle` or turn off `createUpdaterArtifacts` locally. Transcribe a file without opening the window:
 
 ```sh
 echotype --transcribe note.opus
