@@ -157,8 +157,8 @@ pub fn chat(s: &Settings, system: &str, text: &str, timeout: Duration) -> Result
     };
     let preset = settings::preset(&c.provider);
     // A local server (Ollama, LM Studio) runs whatever the user pulled: never guess a model it may not have.
-    if c.model.trim().is_empty() && c.provider != "echotype" && preset.is_some_and(|p| !p.needs_key) {
-        let eg = preset.map(|p| p.default_cleanup_model).filter(|m| !m.is_empty()).map(|m| format!(", for example {m}")).unwrap_or_default();
+    if c.model.trim().is_empty() && c.provider != "echotype" && preset.as_ref().is_some_and(|p| !p.needs_key) {
+        let eg = preset.as_ref().map(|p| p.default_cleanup_model).filter(|m| !m.is_empty()).map(|m| format!(", for example {m}")).unwrap_or_default();
         return Err(format!("Enter the model to use in Settings → Cleanup{eg}"));
     }
     let model = if c.model.trim().is_empty() { preset.map(|p| p.default_cleanup_model).unwrap_or_default() } else { c.model.trim() };

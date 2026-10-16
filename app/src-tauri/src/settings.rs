@@ -504,7 +504,7 @@ pub fn presets() -> Vec<Preset> {
         p("ollama", "Ollama", false, true, "http://localhost:11434/v1", "", "gemma3:1b", false),
         p("lmstudio", "LM Studio", false, true, "http://localhost:1234/v1", "", "google/gemma-3-1b", false),
         // Built in: llm.rs runs it on a free localhost port, so it has no fixed URL.
-        p("echotype", "Echotype model (local)", false, true, "", "", "echotype-clean", false),
+        p("echotype", "Echotype model (local)", false, true, "", "", "", false),
         p("custom", "Custom (OpenAI-compatible)", true, true, "", "", "", false),
     ];
     all.retain(|p| CLOUD || p.id != "cloud");

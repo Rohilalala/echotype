@@ -1028,7 +1028,7 @@ async fn download_model(app: AppHandle, id: String) -> R<()> {
             }
             let _ = app.emit("model-download", serde_json::json!({ "id": id, "downloaded": downloaded, "total": total, "done": done, "error": error }));
         };
-        let res = stt::download(&id, |d, t| emit(d, t, false, None));
+        let res = if llm::find(&id).is_some() { llm::download(&id, |d, t| emit(d, t, false, None)) } else { stt::download(&id, |d, t| emit(d, t, false, None)) };
         match &res {
             Ok(()) => emit(0, None, true, None),
             Err(e) => emit(0, None, true, Some(e)),
@@ -1045,7 +1045,7 @@ fn cancel_download(id: String) {
 
 #[tauri::command]
 async fn delete_model(id: String) -> R<()> {
-    stt::delete(&id)
+    if llm::find(&id).is_some() { llm::delete(&id) } else { stt::delete(&id) }
 }
 
 #[tauri::command]
