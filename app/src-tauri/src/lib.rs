@@ -577,10 +577,6 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
                 hint(if clip.muted_seen { "No audio. Check your mic" } else { "Didn't catch that" }, clip.muted_seen.then_some("microphone"))
             }
             Ok(out) => {
-                if rerun.is_none() {
-                    record_stats(&app, &s, stats::Source::Dictation, &out.text, speaking_ms); // a re-run's words were counted once
-                }
-                record_history(&s, &out);
                 *lock(&state(&app).last_output) = Some(out.text.clone());
                 *lock(&state(&app).last_cleaned) = out.cleaned.clone();
                 let paste = paste && pastes(&s, main_window_focused(&app));
@@ -598,6 +594,11 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
                 } else {
                     platform::copy(&out.text).map_err(|e| (e, false))
                 };
+                // After the paste, not before: the disk writes took 15-20 ms off the time to text.
+                if rerun.is_none() {
+                    record_stats(&app, &s, stats::Source::Dictation, &out.text, speaking_ms); // a re-run's words were counted once
+                }
+                record_history(&s, &out);
                 let action = warning.as_deref().and_then(|w| memory_action(&s, w));
                 match res {
                     // A re-run is not pasted: the card shows what it heard this time, with Copy.
