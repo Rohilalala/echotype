@@ -1486,19 +1486,19 @@ mod tests {
     #[test]
     fn rerun_offers_only_what_would_change_the_result() {
         use crate::Rerun;
-        let ids = |s: &Settings| rerun_options(s, |id| ["small", "medium", "tiny.en"].contains(&id)).into_iter().map(|(r, l)| (r.id(), l)).collect::<Vec<_>>();
+        let ids = |s: &Settings| rerun_options(s, |id| ["large-v3-turbo-q5_0", "tiny.en"].contains(&id)).into_iter().map(|(r, l)| (r.id(), l)).collect::<Vec<_>>();
         let mut s = Settings { advanced: true, ..Settings::default() };
-        s.stt.local_model = "small".into();
+        s.stt.local_model = "base.en".into(); // a model no longer offered, still on this Mac
         s.cleanup.enabled = true;
         s.languages = vec!["en".into(), "hi".into()];
-        assert_eq!(ids(&s), [("lang:en", "In English"), ("lang:hi", "In Hindi"), ("lang:auto", "Auto-detect language"), ("model:medium", "With Medium"), ("model:tiny.en", "With Tiny (English)"), ("raw", "Without cleanup")].map(|(a, b)| (a.to_string(), b.to_string())));
+        assert_eq!(ids(&s), [("lang:en", "In English"), ("lang:hi", "In Hindi"), ("lang:auto", "Auto-detect language"), ("model:large-v3-turbo-q5_0", "With Large v3 Turbo (Q5)"), ("model:tiny.en", "With Tiny (English)"), ("raw", "Without cleanup")].map(|(a, b)| (a.to_string(), b.to_string())));
         s.languages = vec!["hi".into()];
         s.cleanup.style = "verbatim".into();
-        assert_eq!(ids(&s).iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>(), ["lang:auto", "model:medium", "model:tiny.en"], "one language is what ran; verbatim has no cleanup to skip");
+        assert_eq!(ids(&s).iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>(), ["lang:auto", "model:large-v3-turbo-q5_0", "model:tiny.en"], "one language is what ran; verbatim has no cleanup to skip");
         s.languages.clear();
         s.cleanup.enabled = false;
         s.stt.provider = "groq".into();
-        assert_eq!(ids(&s).iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>(), ["model:medium", "model:small", "model:tiny.en"], "a cloud transcript can be re-run on any local model");
+        assert_eq!(ids(&s).iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>(), ["model:large-v3-turbo-q5_0", "model:tiny.en"], "a cloud transcript can be re-run on any local model");
         for (r, _) in rerun_options(&Settings { languages: vec!["en".into(), "fr".into()], ..s.clone() }, |_| true) {
             assert_eq!(Rerun::parse(&r.id()), Some(r), "the menu id comes back as the same choice");
         }

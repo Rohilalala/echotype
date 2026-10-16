@@ -42,20 +42,16 @@ const presets = [
 const cancelled = new Set(); // cancel_download: download_model stops at its next step
 const models = [
   { id: 'large-v3-turbo-q5_0', label: 'Large v3 Turbo (Q5)', size_mb: 547, ram_mb: 761, downloaded: !q.has('onboarding') || q.get('model') === 'ready', note: 'Best default: near-large accuracy, fast, 99 languages. Cannot translate.' },
-  { id: 'large-v3-turbo', label: 'Large v3 Turbo', size_mb: 1624, ram_mb: 1840, downloaded: false, note: 'Full-precision turbo. Slightly more accurate, twice the size. Cannot translate.' },
-  { id: 'large-v3-q5_0', label: 'Large v3 (Q5)', size_mb: 1031, ram_mb: 1608, downloaded: false, note: 'Most accurate, best for Hindi and other languages. Several times slower than Turbo; translates.' },
-  { id: 'medium', label: 'Medium', size_mb: 1533, ram_mb: 1869, downloaded: false, note: 'Multilingual and translates to English (Hinglish → English).' },
-  { id: 'small', label: 'Small', size_mb: 488, ram_mb: 717, downloaded: false, note: 'Multilingual, translates; lighter and less accurate than medium.' },
-  { id: 'base.en', label: 'Base (English)', size_mb: 148, ram_mb: 316, downloaded: !q.has('onboarding'), note: 'English only. For low-memory machines.' },
   { id: 'tiny.en', label: 'Tiny (English)', size_mb: 78, ram_mb: 224, downloaded: q.get('model') === 'tiny', note: 'English only. Fastest, least accurate.' },
 ];
 // ?ram=8 previews an 8 GB Mac (Automatic's light setup and its warnings); ?cloud shows Echotype Cloud.
 const low = q.get('ram') === '8';
 const sys = { total_ram_gb: low ? 8 : 24, available_ram_gb: low ? 3.2 : 5.1, os: 'macos', arch: 'aarch64', can_autostart: q.get('appdir') !== '0', low_ram: low, cloud: q.has('cloud'),
   echotype_model_installed: true, echotype_model_mb: 940,
-  cleaners: [{ id: 'echotype-clean', label: 'Echotype 1.5B', size_mb: 940, ram_mb: 1113, installed: true, automatic: true, warning: null }] };
-for (const m of models) Object.assign(m, { english_only: m.id.endsWith('.en'), translates: ['medium', 'small', 'large-v3-q5_0'].includes(m.id), fits: m.ram_mb + 2048 <= sys.available_ram_gb * 1024 });
-const rec = models.find(m => m.id === (low ? 'small' : 'large-v3-turbo-q5_0'));
+  cleaners: [{ id: 'echotype-tiny', label: 'Echotype Tiny', note: '0.5B. Light and quick; best for English.', downloadable: q.has('dl-cleaners'), size_mb: 401, ram_mb: 552, installed: false, automatic: low, warning: null },
+    { id: 'echotype-medium', label: 'Echotype Medium', note: '1.5B. Catches more; uses about twice the memory.', downloadable: q.has('dl-cleaners'), size_mb: 940, ram_mb: 1099, installed: true, automatic: !low, warning: low ? 'Uses about 1.1 GB while dictating. On an 8 GB Mac this can slow other apps.' : null }] };
+for (const m of models) Object.assign(m, { english_only: m.id.endsWith('.en'), translates: false, fits: m.ram_mb + 2048 <= sys.available_ram_gb * 1024 });
+const rec = models.find(m => m.id === 'large-v3-turbo-q5_0');
 rec.recommended = true;
 // Automatic: the recommendation once downloaded, else the downloaded model closest in RAM (stt.rs auto_model).
 const automatic = () => {
@@ -84,7 +80,7 @@ const sampleAccount = plan => plan === 'pro'
   : { email: 'you@example.com', plan: 'free', words_used: 1240, words_limit: 2000, resets_at: nextMonday(), audio_seconds_used: 610, audio_seconds_limit: 7200 };
 let cloudAccount = ['free', 'pro'].includes(q.get('cloud')) ? sampleAccount(q.get('cloud')) : null;
 if (q.has('cloud')) settings.stt.provider = 'cloud';
-if (q.has('builtin')) Object.assign(settings.cleanup, { enabled: true, provider: 'echotype', model: 'echotype-clean' });
+if (q.has('builtin')) Object.assign(settings.cleanup, { enabled: true, provider: 'echotype', model: 'echotype-medium' });
 let busy = false;
 // Onboarding: ?mic=unknown|denied|granted|restricted (onboarding starts at unknown), ?ax=1 (starts on).
 const perm = { mic: q.get('mic') || (q.has('onboarding') ? 'unknown' : 'granted'), ax: q.has('onboarding') ? q.get('ax') === '1' : !q.has('noaccess') };
