@@ -965,13 +965,15 @@ function renderLangNote() {
 }
 
 // ---------- dictionary ----------
+// Placeholders only: what a snippet can be. Nothing is filled in for the user.
+const SNIPPET_EXAMPLES = [['my email address', 'you@example.com'], ['my phone number', '+91 98765 43210'], ['my home address', 'Street, city, postcode'], ['my sign-off', 'Thanks, talk soon']];
 function renderDict() {
   $('#chips').replaceChildren(...S.dictionary.map((w, i) =>
     h('span', { className: 'chip' }, w, h('button', { type: 'button', 'aria-label': `Remove ${w}`, onclick: () => { S.dictionary.splice(i, 1); save(); renderDict(); $('#newWord').focus(); } }, svg(CROSS)))));
   $('#reps').replaceChildren(...S.replacements.map((r, i) => {
-    const field = (k, label) => h('input', { type: 'text', value: r[k], 'aria-label': label, spellcheck: false, placeholder: k === 'from' ? 'my email' : 'me@example.com', oninput: e => { S.replacements[i][k] = e.target.value; saveSoon(); } }); // S, not r: a save's echo replaces S without re-rendering
+    const field = (k, label) => h('input', { type: 'text', value: r[k], 'aria-label': label, spellcheck: false, placeholder: SNIPPET_EXAMPLES[i % SNIPPET_EXAMPLES.length][k === 'from' ? 0 : 1], oninput: e => { S.replacements[i][k] = e.target.value; saveSoon(); } }); // S, not r: a save's echo replaces S without re-rendering
     return h('div', { className: 'row rep' }, field('from', 'When you say'), field('to', 'Type'),
-      h('button', { className: 'icon-btn', type: 'button', 'aria-label': 'Remove replacement', onclick: () => { S.replacements.splice(i, 1); save(); renderDict(); } }, svg(CROSS)));
+      h('button', { className: 'icon-btn', type: 'button', 'aria-label': 'Remove snippet', onclick: () => { S.replacements.splice(i, 1); save(); renderDict(); } }, svg(CROSS)));
   }));
 }
 $('#addWord').addEventListener('submit', e => {
