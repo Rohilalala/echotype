@@ -1443,6 +1443,12 @@ async fn last_app(app: AppHandle) -> R<Option<serde_json::Value>> {
     Ok(front.map(|f| serde_json::json!({ "style": settings::builtin_style(&f.id).unwrap_or(""), "id": f.id, "name": f.name })))
 }
 
+/// "Style per app" → Add an app: the installed apps, each with its built-in style ("" for the user's own).
+#[tauri::command]
+async fn installed_apps() -> R<Vec<serde_json::Value>> {
+    blocking(|| Ok(platform::installed_apps().into_iter().map(|f| serde_json::json!({ "style": settings::builtin_style(&f.id).unwrap_or(""), "id": f.id, "name": f.name })).collect())).await
+}
+
 /// Windows (50 ms each) a sound check runs before it stops by itself: two minutes.
 // ponytail: the recorder keeps its audio in memory (~23 MB at 48 kHz for two minutes); the cap is the bound.
 const MIC_CHECK_WINDOWS: u32 = 2400;
@@ -1909,6 +1915,7 @@ pub fn run() {
             request_microphone,
             focus_main,
             last_app,
+            installed_apps,
             mic_check,
             play_sound,
             reset_accessibility,

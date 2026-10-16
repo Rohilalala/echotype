@@ -49,6 +49,7 @@
     "allow-request-microphone",
     "allow-focus-main",
     "allow-last-app",
+    "allow-installed-apps",
     "allow-mic-check",
     "allow-play-sound",
     "allow-reset-accessibility",
