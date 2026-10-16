@@ -187,6 +187,34 @@ pub fn chat(s: &Settings, system: &str, text: &str, timeout: Duration) -> Result
     parse_reply(&v).ok_or_else(|| "its response had no message content".to_string())
 }
 
+/// What says "About you". Only phrases that mean the detail itself: "my number", "my address" and
+/// "my LinkedIn" are left out, they would turn "my number one priority", "my address book" and
+/// "my LinkedIn post" into the detail.
+const PERSONAL: [(&str, &[&str]); 5] = [
+    ("email", &["my email address", "my e-mail address", "my email id"]),
+    ("phone", &["my phone number", "my mobile number", "my contact number", "my cell number"]),
+    ("address", &["my home address", "my full address"]),
+    ("website", &["my website"]),
+    ("linkedin", &["my linkedin profile", "my linkedin url"]),
+];
+
+/// "About you" as replacements, for the details the user has filled in.
+pub fn personal_replacements(p: &settings::Personal) -> Vec<Replacement> {
+    PERSONAL
+        .iter()
+        .flat_map(|(field, phrases)| {
+            let value = match *field {
+                "email" => &p.email,
+                "phone" => &p.phone,
+                "address" => &p.address,
+                "website" => &p.website,
+                _ => &p.linkedin,
+            };
+            phrases.iter().filter(move |_| !value.trim().is_empty()).map(move |ph| Replacement { from: ph.to_string(), to: value.trim().to_string() })
+        })
+        .collect()
+}
+
 /// Case-insensitive, whole-word (or whole-phrase) replacements.
 pub fn apply_replacements(text: &str, reps: &[Replacement]) -> String {
     let mut out = text.to_string();
@@ -544,7 +572,7 @@ fn after_stt(s: &Settings, raw: String, stt_ms: u64, mut warning: Option<String>
         return Output { raw: String::new(), text: String::new(), stt_ms, cleanup_ms: 0, warning, no_cleanup: false, cleaned: None };
     }
     let raw = stt::collapse_loops(&raw);
-    let replaced = apply_replacements(&raw, &s.replacements);
+    let replaced = apply_replacements(&raw, &[s.replacements.clone(), personal_replacements(&s.personal)].concat());
     let mut text = if dictated { spoken_breaks(&replaced) } else { replaced };
     let (mut cleanup_ms, mut cleaned) = (0, None);
     // "No cleanup": switched off, or on with no key to call the provider. Verbatim is a choice, not raw.
@@ -726,6 +754,23 @@ mod tests {
         let o = after_stt(&s, raw.into(), 1, None, false, true, || {}, |_, _| Ok("1. Blueberries".into()));
         assert_eq!(o.text, raw, "the words as spoken");
         assert!(o.warning.is_some_and(|w| w.contains("number")));
+    }
+
+    #[test]
+    fn about_you_is_typed_for_its_phrases_only() {
+        let mut s = Settings::default();
+        s.personal.email = " me@example.com ".into();
+        s.personal.phone = "+91 98765 43210".into();
+        s.personal.address = "12 Park Street, Kolkata".into();
+        s.replacements = vec![Replacement { from: "my website".into(), to: "mine.dev".into() }];
+        s.personal.website = "example.com".into();
+        let o = after_stt(&s, "Send it to my email address and call my phone number.".into(), 1, None, false, true, || {}, |_, _| unreachable!());
+        assert_eq!(o.text, "Send it to me@example.com and call +91 98765 43210.");
+        let o = after_stt(&s, "Ship to My Home Address, not my address book.".into(), 1, None, false, true, || {}, |_, _| unreachable!());
+        assert_eq!(o.text, "Ship to 12 Park Street, Kolkata, not my address book.", "any case; \"my address book\" stays");
+        let o = after_stt(&s, "It's my number one priority, see my website.".into(), 1, None, false, true, || {}, |_, _| unreachable!());
+        assert_eq!(o.text, "It's my number one priority, see mine.dev.", "no \"my number\"; the user's own replacement wins");
+        assert!(personal_replacements(&settings::Personal::default()).is_empty(), "nothing filled in, nothing typed");
     }
 
     #[test]

@@ -12,6 +12,7 @@ const settings = {
   stt: { provider: 'local', local_model: q.has('onboarding') ? '' : 'large-v3-turbo-q5_0', model: '', base_url: '' },
   cleanup: { enabled: !q.has('nocleanup'), provider: 'ollama', model: 'gemma3:4b', base_url: '', style: 'default', custom_instructions: '',
     match_app: q.has('apps'), app_styles: q.has('apps') ? [{ id: 'com.apple.Terminal', name: 'Terminal', style: '' }, { id: 'com.google.Chrome', name: 'Google Chrome', style: 'casual' }] : [] },
+  personal: { email: '', phone: '', address: '', website: '', linkedin: '' },
   dictionary: ['Echotype', 'Tauri', 'Hinglish', 'Supabase'],
   replacements: [{ from: 'my email', to: 'aditya@example.com' }],
   restore_clipboard: true, history_enabled: true,
@@ -138,7 +139,7 @@ const commands = {
   wispr_import_preview: () => (q.has('nowispr') ? null : {
     words: ['Aditya Rohilla', 'Wispr Flow', 'ZopMop', 'Anshi', 'xoxoday'], replacements: [{ from: 'my email address', to: 'me@example.com' }],
     languages: ['en'], app_styles: [{ id: 'com.tinyspeck.slackmacgap', name: 'Slack', style: 'casual' }, { id: 'net.whatsapp.WhatsApp', name: 'WhatsApp', style: 'casual' }],
-    talk_key: 'left_control', sounds: true, pause_music: false, autostart: true, look: 'light', display_name: 'Aditya',
+    talk_key: 'left_control', email: 'me@example.com', sounds: true, pause_music: false, autostart: true, look: 'light', display_name: 'Aditya',
   }),
   wispr_import: () => {
     settings.display_name ||= 'Aditya';

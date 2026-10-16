@@ -105,7 +105,7 @@ function set(p, v) {
 function bindAll() {
   for (const el of $$('[data-bind]')) {
     const p = el.dataset.bind;
-    const text = el.tagName === 'TEXTAREA' || ['text', 'url', 'password', 'number'].includes(el.type);
+    const text = el.tagName === 'TEXTAREA' || ['text', 'url', 'password', 'number', 'email', 'tel'].includes(el.type);
     el.addEventListener(text ? 'input' : 'change', () => {
       if (el.type === 'number' && !el.checkValidity()) return;
       let v = el.type === 'checkbox' ? el.checked : ['number', 'range'].includes(el.type) ? Number(el.value) : el.value;
@@ -873,6 +873,7 @@ const LANGS = [['auto', 'Auto-detect'], ['en', 'English'], ['hi', 'Hindi'], ['ar
 // Mac would bring over, read by the core (wispr.rs). null when Wispr Flow is not installed.
 let wispr = null;
 const talkLabel = k => $(`#talkKey option[value="${k}"]`)?.textContent ?? k;
+const also = f => [f.sounds != null && `sounds ${f.sounds ? 'on' : 'off'}`, f.autostart && 'open at login', f.look && `${f.look} look`].filter(Boolean);
 function wisprLines(f) {
   const few = (a, n = 4) => a.slice(0, n).join(', ') + (a.length > n ? ` and ${a.length - n} more` : '');
   return [
@@ -881,8 +882,8 @@ function wisprLines(f) {
     f.languages.length && ['Languages', f.languages.map(langName).join(', ')],
     f.app_styles.length && ['Styles', few(f.app_styles.map(a => `${a.style} in ${a.name}`), 3)],
     f.talk_key && ['Talk key', `hold ${talkLabel(f.talk_key)} (quit Wispr Flow so only one listens)`],
-    [f.sounds != null && `sounds ${f.sounds ? 'on' : 'off'}`, f.autostart && 'open at login', f.look && `${f.look} look`].some(Boolean)
-      && ['Also', [f.sounds != null && `sounds ${f.sounds ? 'on' : 'off'}`, f.autostart && 'open at login', f.look && `${f.look} look`].filter(Boolean).join(', ')],
+    f.email && ['About you', `${f.email} (say “my email address”)`],
+    also(f).length && ['Also', also(f).join(', ')],
   ].filter(Boolean);
 }
 async function wisprImport() {
