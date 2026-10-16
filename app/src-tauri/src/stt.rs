@@ -239,7 +239,7 @@ pub fn pick_local_model(s: &Settings) -> Result<(PathBuf, Option<String>), Strin
         }
     }
     Err(format!(
-        "Translate to English needs a multilingual model (medium or small); {} cannot translate. Download one under Models.",
+        "Translate to English needs Small; {} cannot translate. Download it under Speech model.",
         model_id(chosen)
     ))
 }
