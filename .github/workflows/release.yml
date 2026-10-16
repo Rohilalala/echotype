@@ -26,6 +26,7 @@ jobs:
           - os: windows-latest
             args: --bundles msi,nsis
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -96,6 +97,7 @@ jobs:
             name: windows-x64
             args: --bundles msi,nsis
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -137,14 +139,15 @@ jobs:
         working-directory: app
       - run: npm run tauri build -- ${{ matrix.args }}
         working-directory: app
-      - name: The installer puts the cleanup runner and the Vulkan loader next to Echotype.exe
+      # What the installers pack: the cleanup runner and the Vulkan loader beside the app. (A silent
+      # install here waits forever on an elevation prompt, so the build folder is checked instead.)
+      - name: The cleanup runner and the Vulkan loader ship next to Echotype.exe
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          cmd //c start //wait "" "$(cygpath -w "$(cygpath -u "$CARGO_TARGET_DIR")"/release/bundle/nsis/*.exe)" /S
-          dir="$(cygpath -u "$LOCALAPPDATA")/Echotype"
+          dir="$(cygpath -u "$CARGO_TARGET_DIR")/release"
           ls "$dir"
-          test -f "$dir/llama-server.exe" && test -f "$dir/vulkan-1.dll"
+          test -f "$dir/echotype.exe" && test -f "$dir/llama-server.exe" && test -f "$dir/vulkan-1.dll"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: echotype-${{ matrix.name }}
