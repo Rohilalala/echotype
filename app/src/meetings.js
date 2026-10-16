@@ -7,6 +7,9 @@ let editing = null; // speaker id being renamed
 let confirmDelete = false, startError = '', timer, starting = false, draftTitle = '';
 let exportsOf = null; // { id, md, txt }, fetched with the meeting so Copy runs inside the click
 let summarizing = null, summaryError = ''; // the meeting whose Pro summary is being written
+let windowMode = false; // the meeting window: this meeting only, no list
+const answers = {}; // Pro Ask: meeting id → [{ q, a }], for this session
+let asking = false, askError = '';
 
 const clock = s => {
   s = Math.max(0, Math.floor(s));
@@ -42,8 +45,8 @@ async function load(id) {
   open = await invoke('meeting_get', { id });
   exportsOf = null;
   if (open.state !== 'recording' && open.segments.length) {
-    const [md, txt] = await Promise.all([invoke('meeting_export', { id, format: 'md' }), invoke('meeting_export', { id, format: 'txt' })]);
-    exportsOf = { id, md, txt };
+    const [md, txt, json] = await Promise.all(['md', 'txt', 'json'].map(format => invoke('meeting_export', { id, format })));
+    exportsOf = { id, md, txt, json };
   }
 }
 
@@ -134,6 +137,13 @@ async function openMeeting(id) {
   $('#main').scrollTop = live()?.id === id ? $('#main').scrollHeight : 0;
 }
 
+// The meeting window shows meeting `id` (meeting.rs show_window).
+export async function openWindow(id) {
+  windowMode = true;
+  await refresh();
+  if (id) await openMeeting(id);
+}
+
 async function summarize(id) {
   summarizing = id; summaryError = '';
   render();
@@ -195,6 +205,39 @@ function summaryCard(m) {
     status.summaries && h('button', { className: 'btn', type: 'button', disabled: busy, onclick: () => summarize(m.id) }, busy ? 'Writing…' : 'Summarize')));
 }
 
+// Echotype Pro: ask about the meeting, live or done ("What did I miss?"). Free builds say it's coming.
+function askCard(m) {
+  if (!m.segments.length) return null;
+  if (!status.summaries) return h('p', { className: 'note' }, 'Ask anything about this meeting: coming soon with Echotype Pro.');
+  const list = answers[m.id] ??= [];
+  const input = h('input', { type: 'text', placeholder: 'Ask anything about this meeting', 'aria-label': 'Ask about this meeting', maxLength: 500, disabled: asking });
+  const ask = async q => {
+    q = q.trim();
+    if (!q || asking) return;
+    asking = true; askError = ''; render();
+    try { list.push({ q, a: await invoke('meeting_ask', { id: m.id, question: q }) }); }
+    catch (e) { askError = String(e); }
+    asking = false; render();
+  };
+  return h('div', { className: 'ask' },
+    h('form', { onsubmit: e => { e.preventDefault(); ask(input.value); } }, input,
+      h('button', { className: 'btn', type: 'submit', disabled: asking }, asking ? 'Asking…' : 'Ask'),
+      live()?.id === m.id && h('button', { className: 'btn quiet', type: 'button', disabled: asking, onclick: () => ask('What did I miss in the last few minutes?') }, 'What did I miss?')),
+    h('span', { className: 'tag' }, 'Pro'),
+    askError && h('p', { className: 'note warn', role: 'alert' }, askError),
+    list.map(({ q, a }) => h('div', { className: 'qa' }, h('b', {}, q), h('p', {}, a))));
+}
+
+// "Speaker 2 might be Priya": one tap names them (meeting.rs name_hints).
+function hintChips(m) {
+  return Object.entries(m.name_hints || {}).map(([id, nm]) => h('button', { className: 'chip spk hint', type: 'button', title: `Name ${name(m, id)} ${nm}`, onclick: async () => {
+    try { await invoke('meeting_rename_speaker', { id: m.id, speaker: id, name: nm }); await load(m.id); } catch (e) { startError = String(e); }
+    render();
+  } }, dot(id), `${name(m, id)} is ${nm}?`));
+}
+
+const FORMATS = [['md', 'Markdown (.md)'], ['txt', 'Text (.txt)'], ['json', 'JSON (.json)'], ['srt', 'Subtitles (.srt)'], ['vtt', 'WebVTT (.vtt)']];
+
 // Consecutive lines by one speaker form a turn: their name once, then each line as a bubble.
 function turns(segments) {
   const out = [];
@@ -210,13 +253,16 @@ function viewMeeting(m) {
   const ids = Object.keys(m.speakers).filter(id => m.segments.some(s => s.speaker === id));
   const btn = (label, fn) => { const b = h('button', { className: 'btn', type: 'button' }, label); b.onclick = () => fn(b); return b; };
   const failed = e => { startError = String(e); render(); };
-  const saved = b => { b.textContent = 'Saved to Downloads'; setTimeout(() => (b.textContent = b.dataset.label), 1500); };
-  const save = fmt => b => { b.dataset.label = b.textContent; invoke('meeting_save', { id: m.id, format: fmt }).then(() => saved(b), failed); };
+  const saveAs = h('select', { 'aria-label': 'Save the transcript as', onchange: e => {
+    const fmt = e.target.value;
+    e.target.value = '';
+    if (fmt) invoke('meeting_save', { id: m.id, format: fmt }).then(() => { startError = ''; }, failed);
+  } }, h('option', { value: '' }, 'Save as…'), FORMATS.map(([v, l]) => h('option', { value: v }, l)));
   const meta = isLive
     ? [h('span', { className: 'rec-line' }, h('i', { className: 'rec-dot' }), 'Recording · ', h('span', { 'data-elapsed': '' }, clock(elapsed())))]
     : [`${when(m.started_ms)} · ${clock(m.duration_s)}`, STATE[m.state] && h('span', { className: 'tag' }, STATE[m.state])];
   return [
-    h('button', { className: 'btn quiet back', type: 'button', onclick: () => { open = null; startError = ''; show(); } }, '‹ Meetings'),
+    !windowMode && h('button', { className: 'btn quiet back', type: 'button', onclick: () => { open = null; startError = ''; show(); } }, '‹ Meetings'),
     h('div', { className: 'page-head' }, h('h1', { className: 'text' }, m.title),
       isLive ? h('button', { className: 'btn primary', type: 'button', onclick: stop }, 'Stop')
         : confirmDelete ? h('span', { className: 'confirm' }, 'Delete this meeting and its audio?',
@@ -226,17 +272,19 @@ function viewMeeting(m) {
             catch (e) { startError = String(e); render(); }
           } }, 'Delete'))
         : h('button', { className: 'btn quiet danger', type: 'button', disabled: m.state === 'processing', onclick: () => { confirmDelete = true; render(); } }, 'Delete')),
-    h('p', { className: 'meeting-meta' }, meta),
+    h('p', { className: 'meeting-meta' }, meta,
+      !windowMode && h('button', { className: 'btn quiet', type: 'button', onclick: () => invoke('meeting_window', { id: m.id }).catch(failed) }, 'Open in window')),
     ...m.notices.map(n => h('p', { className: 'note' }, n)),
     startError && h('p', { className: 'note warn', role: 'alert' }, startError),
     m.state === 'processing' && h('p', { className: 'note working' }, 'Telling speakers apart'),
     summaryCard(m),
+    askCard(m),
     exportsOf?.id === m.id && h('div', { className: 'export' },
       btn('Copy Markdown', b => copyText(exportsOf.md, b)),
       btn('Copy text', b => copyText(exportsOf.txt, b)),
-      btn('Save .md', save('md')),
-      btn('Save .txt', save('txt'))),
-    ids.length > 0 && h('div', { className: 'speakers' }, h('span', { className: 'speakers-label' }, 'Speakers'), ids.map(id => speakerChip(m, id))),
+      btn('Copy JSON', b => copyText(exportsOf.json, b)),
+      saveAs),
+    ids.length > 0 && h('div', { className: 'speakers' }, h('span', { className: 'speakers-label' }, 'Speakers'), ids.map(id => speakerChip(m, id)), hintChips(m)),
     h('div', { className: 'transcript text', 'aria-live': isLive ? 'polite' : null },
       m.segments.length ? turns(m.segments).map(t => h('div', { className: 'turn' },
         h('span', { className: 'who' }, dot(t.speaker), name(m, t.speaker), h('time', {}, clock(t.start))),

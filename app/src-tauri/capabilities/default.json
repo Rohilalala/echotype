@@ -3,7 +3,8 @@
   "identifier": "default",
   "description": "Settings window: core window controls plus every Echotype command",
   "windows": [
-    "main"
+    "main",
+    "meeting"
   ],
   "permissions": [
     "core:default",
@@ -70,6 +71,8 @@
     "allow-meeting-delete",
     "allow-meeting-export",
     "allow-meeting-save",
-    "allow-meeting-summarize"
+    "allow-meeting-summarize",
+    "allow-meeting-ask",
+    "allow-meeting-window"
   ]
 }

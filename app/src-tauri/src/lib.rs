@@ -856,14 +856,16 @@ fn show_main(app: &AppHandle) {
 
 /// Light, dark or the system's appearance for the settings window. The page's light/dark styles
 /// follow the window's appearance, so this is all it takes.
-fn apply_theme(app: &AppHandle, s: &Settings) {
+pub(crate) fn apply_theme(app: &AppHandle, s: &Settings) {
     let theme = match s.look.as_str() {
         "light" => Some(tauri::Theme::Light),
         "dark" => Some(tauri::Theme::Dark),
         _ => None,
     };
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.set_theme(theme);
+    for label in ["main", "meeting"] {
+        if let Some(w) = app.get_webview_window(label) {
+            let _ = w.set_theme(theme);
+        }
     }
 }
 
@@ -1923,6 +1925,8 @@ pub fn run() {
             meeting::meeting_export,
             meeting::meeting_save,
             meeting::meeting_summarize,
+            meeting::meeting_ask,
+            meeting::meeting_window,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Echotype");
