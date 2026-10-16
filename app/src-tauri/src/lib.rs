@@ -15,6 +15,7 @@ mod stats;
 mod speakers;
 mod stt;
 mod tray;
+mod wispr;
 
 use audio::{LevelStats, Quality};
 use hotkey::{Act, Ev};
@@ -1058,6 +1059,25 @@ async fn get_history(limit: Option<usize>) -> R<Vec<HistoryEntry>> {
     Ok(settings::get_history(limit.unwrap_or(100)))
 }
 
+/// What Echotype would bring over from Wispr Flow on this machine (None: not installed).
+#[tauri::command]
+async fn wispr_import_preview() -> Option<wispr::Found> {
+    tauri::async_runtime::spawn_blocking(wispr::detect).await.ok().flatten().filter(|f| !f.is_empty())
+}
+
+/// Imports it into the settings; returns what changed ("9 dictionary words", ...).
+#[tauri::command]
+async fn wispr_import(app: AppHandle) -> R<Vec<String>> {
+    let found = tauri::async_runtime::spawn_blocking(wispr::detect).await.map_err(|e| e.to_string())?.ok_or("Wispr Flow is not on this Mac")?;
+    let mut done = vec![];
+    commit_settings(&app, |old| {
+        let mut s = old.clone();
+        done = wispr::apply(&mut s, &found);
+        s
+    })?;
+    Ok(done)
+}
+
 #[tauri::command]
 async fn update_history(app: AppHandle, ts: u64, text: String) -> R<()> {
     let was = settings::update_history(ts, &text)?;
@@ -1870,6 +1890,8 @@ pub fn run() {
             list_input_devices,
             get_history,
             update_history,
+            wispr_import_preview,
+            wispr_import,
             clear_history,
             get_stats,
             clear_stats,

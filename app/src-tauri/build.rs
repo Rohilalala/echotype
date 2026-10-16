@@ -15,6 +15,8 @@ const COMMANDS: &[&str] = &[
     "list_input_devices",
     "get_history",
     "update_history",
+    "wispr_import_preview",
+    "wispr_import",
     "clear_history",
     "get_stats",
     "clear_stats",

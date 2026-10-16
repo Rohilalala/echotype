@@ -135,6 +135,15 @@ const commands = {
   // ?apps turns on "Match the app you're typing in", with a last dictation into Slack.
   last_app: () => (q.has('apps') ? { id: 'com.tinyspeck.slackmacgap', name: 'Slack', style: 'casual' } : null),
   get_history: ({ limit }) => (settings.history_enabled ? history.slice(0, limit) : []),
+  wispr_import_preview: () => (q.has('nowispr') ? null : {
+    words: ['Aditya Rohilla', 'Wispr Flow', 'ZopMop', 'Anshi', 'xoxoday'], replacements: [{ from: 'my email address', to: 'me@example.com' }],
+    languages: ['en'], app_styles: [{ id: 'com.tinyspeck.slackmacgap', name: 'Slack', style: 'casual' }, { id: 'net.whatsapp.WhatsApp', name: 'WhatsApp', style: 'casual' }],
+    talk_key: 'left_control', sounds: true, pause_music: false, autostart: true, look: 'light', display_name: 'Aditya',
+  }),
+  wispr_import: () => {
+    settings.display_name ||= 'Aditya';
+    return ['5 dictionary words', '1 snippet', 'your languages', 'styles for Slack, WhatsApp', 'your talk key (Left ⌃)'];
+  },
   update_history: ({ ts, text }) => {
     const e = history.find(x => x.ts === ts);
     if (!e) throw 'That entry is no longer in history.';
