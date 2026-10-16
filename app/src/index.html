@@ -110,8 +110,13 @@
     <section data-page="cleanup" hidden>
       <h1>Cleanup</h1>
       <p class="lede">A language model removes fillers, applies “no wait, I meant…” corrections and formats spoken lists. If it fails, you still get the raw text.</p>
+      <div class="group">
+        <label class="row"><span class="row-text"><span class="row-title">Clean up dictation</span></span>
+          <input type="checkbox" class="switch" data-bind="cleanup.enabled" /></label>
+      </div>
+
       <div id="cleanupSetup" hidden>
-        <h2 class="group-title" id="cleanupSetupTitle">Turn on cleanup</h2>
+        <h2 class="group-title">Finish setting up cleanup</h2>
         <p class="lede small">Pick any one. None is required, and nothing leaves this computer with a local server.</p>
         <div class="group">
           <div class="row" id="setupCloud"><span class="row-text"><span class="row-title">Echotype Cloud</span><span class="row-desc">Sign in with your email. Free includes 2,000 words a week.</span></span>
@@ -121,11 +126,6 @@
           <div class="row"><span class="row-text"><span class="row-title">A local server</span><span class="row-desc">Ollama or LM Studio running on this computer.</span></span>
             <button class="btn" type="button" data-setup="local">Use a local server</button></div>
         </div>
-      </div>
-
-      <div class="group">
-        <label class="row"><span class="row-text"><span class="row-title">Clean up dictation</span></span>
-          <input type="checkbox" class="switch" data-bind="cleanup.enabled" /></label>
       </div>
 
       <div id="cleanupBody">
