@@ -2,6 +2,7 @@
 const preview = !window.__TAURI__;
 if (preview) await import('./mock.js'); // browser preview for design QA
 const meetingsPage = await import('./meetings.js');
+const { h, copyText } = await import('./dom.js');
 const { createOrb } = await import('./orb.js'); // onboarding's orb
 
 const { invoke } = window.__TAURI__.core;
@@ -12,17 +13,6 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 // replaceChildren without the stray "false"/"undefined" text of an absent optional child.
 const fill = (el, ...kids) => el.replaceChildren(...kids.flat().filter(k => k != null && k !== false && k !== ''));
 // Tiny element builder. Strings become text nodes, so user text is never parsed as HTML.
-function h(tag, attrs = {}, ...kids) {
-  const el = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (v == null || v === false) continue;
-    if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
-    else if (k in el && k !== 'list') el[k] = v;
-    else el.setAttribute(k, v === true ? '' : v);
-  }
-  el.append(...kids.flat().filter(k => k != null && k !== false));
-  return el;
-}
 const svg = (d, w = 16) => {
   const el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   el.setAttribute('viewBox', `0 0 ${w} ${w}`);
@@ -2151,17 +2141,6 @@ function renderObModel() {
 }
 
 // ---------- clipboard ----------
-async function copyText(text, btn) {
-  try { await navigator.clipboard.writeText(text); }
-  catch {
-    const t = h('textarea', { value: text });
-    document.body.append(t); t.select(); document.execCommand('copy'); t.remove();
-  }
-  if (!btn) return;
-  const label = btn.textContent;
-  btn.textContent = 'Copied';
-  setTimeout(() => (btn.textContent = label), 1200);
-}
 
 // ---------- events ----------
 meetingsPage.init({ $, h, invoke, listen, copyText });

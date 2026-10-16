@@ -260,13 +260,19 @@ const doneMeeting = {
 };
 const liveMeeting = {
   id: '2026-10-15-091500-design-sync', title: 'Design sync', started_ms: now - 754000, duration_s: 754, state: 'recording',
-  speakers: { you: 'You', s1: 'Speaker 1', s2: 'Speaker 2' }, segments: sampleSegments.slice(0, 5), notices: [], summary: null,
+  speakers: { you: 'You', s1: 'Speaker 1', s2: 'Speaker 2' }, segments: sampleSegments.slice(0, 5), notices: [], summary: null, name_hints: { s1: 'Priya' },
 };
 let meetingList = mq === 'empty' ? [] : mq === 'live' ? [liveMeeting, doneMeeting] : [doneMeeting,
   { id: '2026-10-12-140000-hiring-loop', title: 'Hiring loop debrief', started_ms: now - 3 * 86400000, duration_s: 1520, state: 'done', speakers: {}, segments: [], notices: [], summary: null },
   { id: '2026-10-10-100000-meeting', title: 'Meeting', started_ms: now - 5 * 86400000, duration_s: 312, state: 'interrupted', speakers: {}, segments: [], notices: [], summary: null }];
 Object.assign(commands, {
   meeting_status: () => ({ live: mq === 'live' ? { id: liveMeeting.id, started_ms: liveMeeting.started_ms, recording: true } : null, computer_audio: !q.has('miconly'), speakers: !q.has('miconly'), screen_recording: !q.has('noscreen'), download_mb: mq === 'empty' ? 36 : 0, summaries: q.has('cloud') }),
+  meeting_window: () => null,
+  meeting_ask: async ({ question }) => {
+    if (!q.has('cloud')) throw 'Asking about a meeting is coming with Echotype Pro.';
+    await new Promise(r => setTimeout(r, 400));
+    return `Sample answer to "${question}" from the preview.`;
+  },
   meeting_summarize: async ({ id }) => {
     if (!q.has('cloud')) throw 'Meeting summaries are coming with Echotype Pro.';
     await new Promise(r => setTimeout(r, 600));
