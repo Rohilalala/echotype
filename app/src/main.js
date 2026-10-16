@@ -643,7 +643,7 @@ function renderModels() {
   renderAuto();
   $('#memline').hidden = $('#modelList').hidden = !S.advanced;
   $('#memline').replaceChildren('Free memory now ', h('b', {}, `${sys.available_ram_gb.toFixed(1)} GB`), ` of ${Math.round(sys.total_ram_gb)} GB. A model fits when it leaves 2 GB for everything else.`);
-  $('#modelList').replaceChildren(...models.map(m => modelRow(m)));
+  $('#modelList').replaceChildren(...models.filter(m => m.id !== 'tiny.en' || m.id === S.stt.local_model).map(m => modelRow(m))); // tiny.en: onboarding's practice model
   renderObModel();
 }
 
@@ -1935,9 +1935,9 @@ async function finishOnboarding(page, away = false) {
 // The model onboarding waits for: Automatic's pick for this Mac, or the manual pick (advanced).
 const obWanted = () => (S.advanced ? models.find(m => m.id === S.stt.local_model) : models.find(m => m.recommended));
 
-// The speed slider: the speech models from quickest to most accurate (Medium is left to Settings:
-// it is for translating). Nothing is disabled; each stop says whether this Mac can run it.
-const OB_SPEED = ['tiny.en', 'base.en', 'small', 'large-v3-turbo-q5_0', 'large-v3-turbo', 'large-v3-q5_0'];
+// The speed slider: the speech models from quickest to most accurate. Nothing is disabled; each
+// stop says whether this Mac can run it.
+const OB_SPEED = ['small', 'large-v3-turbo-q5_0'];
 const obSpeedModels = () => OB_SPEED.map(id => models.find(m => m.id === id)).filter(Boolean);
 const gb = mb => `${(mb / 1024).toFixed(1).replace(/\.0$/, '')} GB`;
 function obSpeedFit(m) {

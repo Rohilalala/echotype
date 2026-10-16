@@ -25,14 +25,12 @@ pub struct Model {
 /// Pinned whisper.cpp model repo revision, so a moved branch can't swap files under us.
 const HF_COMMIT: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
 
-/// Best first: `recommended` is the first entry that fits in RAM.
+/// The speech models offered: Automatic's two picks, and tiny.en for onboarding's first practice run.
+// ponytail: medium, large-v3 (full and Q5), full turbo and base.en were offered until 2026-10-16; the
+// app says more are coming. Their rows (and RAM_MB numbers) are in git history to bring back.
 pub const MODELS: &[Model] = &[
     Model { id: "large-v3-turbo-q5_0", label: "Large v3 Turbo (Q5)", size_mb: 547, note: "Best default: near-large accuracy, fast, 99 languages. Cannot translate.", sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2" },
-    Model { id: "large-v3-turbo", label: "Large v3 Turbo", size_mb: 1624, note: "Full-precision turbo. Slightly more accurate, twice the size. Cannot translate.", sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69" },
-    Model { id: "large-v3-q5_0", label: "Large v3 (Q5)", size_mb: 1031, note: "Most accurate, best for Hindi and other languages. Several times slower than Turbo; translates.", sha256: "d75795ecff3f83b5faa89d1900604ad8c780abd5739fae406de19f23ecd98ad1" },
-    Model { id: "medium", label: "Medium", size_mb: 1533, note: "Multilingual and translates to English (Hinglish → English).", sha256: "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208" },
-    Model { id: "small", label: "Small", size_mb: 488, note: "Multilingual, translates; lighter and less accurate than medium.", sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b" },
-    Model { id: "base.en", label: "Base (English)", size_mb: 148, note: "English only. For low-memory machines.", sha256: "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002" },
+    Model { id: "small", label: "Small", size_mb: 488, note: "Multilingual and translates. Lighter than Turbo, for 8 GB Macs.", sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b" },
     Model { id: "tiny.en", label: "Tiny (English)", size_mb: 78, note: "English only. Fastest, least accurate.", sha256: "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f" },
 ];
 
@@ -45,13 +43,7 @@ pub const MODELS: &[Model] = &[
 // llama.cpp, a model or llm::CONTEXT changes.
 pub const RAM_MB: &[(&str, u64)] = &[
     ("large-v3-turbo-q5_0", 761),
-    ("large-v3-turbo", 1840),
-    // 2026-10-16, same CLI run as the rest (peak footprint 1,608 MB, max RSS 1,579 MB); turbo-q5 read
-    // 806 MB in that session, so this machine's numbers had not drifted.
-    ("large-v3-q5_0", 1608),
-    ("medium", 1869),
     ("small", 717),
-    ("base.en", 316),
     ("tiny.en", 224),
     ("echotype-clean", 1113),
 ];
@@ -996,8 +988,7 @@ mod tests {
         let dest = models_dir().join("ggml-cancel-test.bin");
         cancel_download("cancel-test");
         assert!(take_cancel(&dest) && !take_cancel(&dest), "a cancel stops one download, not the next");
-        assert!(MODELS.iter().any(|m| m.id == "large-v3-q5_0" && translates(m.id)) && ram_of("large-v3-q5_0") > ram_of("large-v3-turbo-q5_0"));
-        assert_eq!(recommended(16 * 1024), "large-v3-turbo-q5_0", "adding large-v3 leaves Automatic's pick alone");
+        assert_eq!(MODELS.iter().map(|m| m.id).collect::<Vec<_>>(), ["large-v3-turbo-q5_0", "small", "tiny.en"], "Automatic's picks and the practice model");
     }
 
     #[test]
@@ -1052,23 +1043,23 @@ mod tests {
         assert_eq!(pick(24_576, &all), "large-v3-turbo-q5_0", "a 24 GB Mac: today's default");
         assert_eq!(pick(16_384, &all), "large-v3-turbo-q5_0");
         // Until the recommendation is downloaded, the closest downloaded model, smaller first.
-        assert_eq!(pick(8192, &|id| id == "large-v3-turbo-q5_0" || id == "base.en"), "base.en");
-        assert_eq!(pick(8192, &|id| id == "medium"), "medium", "a larger one beats none");
-        assert_eq!(pick(24_576, &|id| id == "small" || id == "medium"), "small");
+        assert_eq!(pick(8192, &|id| id == "large-v3-turbo-q5_0" || id == "tiny.en"), "tiny.en");
+        assert_eq!(pick(8192, &|id| id == "large-v3-turbo-q5_0"), "large-v3-turbo-q5_0", "a larger one beats none");
+        assert_eq!(pick(24_576, &|id| id == "small" || id == "tiny.en"), "small");
         let m8 = list_models_with(8192, 64_000, all);
         assert_eq!(m8.iter().filter(|m| m.recommended).count(), 1);
         assert!(m8.iter().find(|m| m.id == "small").unwrap().recommended);
-        // 3 GB free: turbo-q5 (+ 2048 headroom) fits, medium does not.
-        let tight = list_models_with(24_576, 3_000, all);
-        assert!(tight.iter().find(|m| m.id == "large-v3-turbo-q5_0").unwrap().fits);
-        assert!(!tight.iter().find(|m| m.id == "medium").unwrap().fits);
+        // 2.7 GB free: small (+ 2048 headroom) fits, turbo-q5 does not.
+        let tight = list_models_with(24_576, 2_780, all);
+        assert!(tight.iter().find(|m| m.id == "small").unwrap().fits);
+        assert!(!tight.iter().find(|m| m.id == "large-v3-turbo-q5_0").unwrap().fits);
     }
 
     #[test]
     fn bigger_models_warn_on_low_memory_macs_only() {
         let m8 = list_models_with(8192, 64_000, |_| true);
         let warn = |id: &str| m8.iter().find(|m| m.id == id).unwrap().warning.clone();
-        assert_eq!(warn("medium").unwrap(), format!("Uses about {} while dictating. On an 8 GB Mac this can slow other apps.", fmt_mb(ram_of("medium"))));
+        assert_eq!(warn("large-v3-turbo-q5_0").unwrap(), format!("Uses about {} while dictating. On an 8 GB Mac this can slow other apps.", fmt_mb(ram_of("large-v3-turbo-q5_0"))));
         assert!(warn("small").is_none() && warn("tiny.en").is_none(), "Automatic's pick and smaller ones carry no warning");
         assert!(list_models_with(24_576, 64_000, |_| true).iter().all(|m| m.warning.is_none()));
         assert_eq!(fmt_mb(800), "800 MB");
