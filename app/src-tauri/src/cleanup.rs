@@ -971,4 +971,28 @@ mod tests {
         assert!(!failed.no_cleanup && failed.text == "hello");
         assert_eq!(failed.warning.unwrap(), "Cleanup failed: Groq: 401 Unauthorized: bad key. Pasted the raw transcript instead.");
     }
+
+    /// Real local servers through the app's own cleanup path: `ECHOTYPE_TEST_LOCAL` is
+    /// provider=model pairs, comma-separated (ollama=gemma4:e4b,lmstudio=qwen2.5-1.5b-instruct).
+    #[test]
+    #[ignore]
+    fn local_servers_clean_up() {
+        let Ok(spec) = std::env::var("ECHOTYPE_TEST_LOCAL") else { return eprintln!("skipped") };
+        for pair in spec.split(',') {
+            let (provider, model) = pair.split_once('=').unwrap();
+            let mut s = Settings::default();
+            s.cleanup.enabled = true;
+            s.cleanup.provider = provider.into();
+            s.cleanup.model = String::new();
+            let err = cleanup(&s, "um so i think we should uh ship it on friday").unwrap_err();
+            assert!(err.starts_with("Enter the model to use in Settings"), "{provider}, no model: {err}");
+            s.cleanup.model = model.into();
+            for (said, want) in [("um so i think we should uh ship it on friday", "Friday"), ("send it to priya no wait to arnav by five", "Arnav")] {
+                let t = std::time::Instant::now();
+                let out = cleanup(&s, said).unwrap_or_else(|e| panic!("{provider}: {e}"));
+                eprintln!("{provider} {model} {:>5} ms: {said:?} -> {out:?}", t.elapsed().as_millis());
+                assert!(out.contains(want) && !out.to_lowercase().contains(" um "), "{provider}: {out}");
+            }
+        }
+    }
 }

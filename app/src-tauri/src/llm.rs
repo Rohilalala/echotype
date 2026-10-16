@@ -266,8 +266,11 @@ fn reap_when_idle() {
 /// or is not running, it answers one short request with the same system prompt (llama-server
 /// keeps that prefix cached), so it is warm by the time the speech is transcribed.
 pub fn prewarm(s: &Settings) {
-    if !(s.cleanup.enabled && s.cleanup.provider == "echotype") {
+    if !s.cleanup.enabled {
         return;
+    }
+    if s.cleanup.provider != "echotype" {
+        return prewarm_local_server(s);
     }
     let cold = SERVER.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_none_or(|v| v.last_used.elapsed() >= Duration::from_secs(20));
     if cold {
@@ -276,6 +279,27 @@ pub fn prewarm(s: &Settings) {
             let _ = crate::cleanup::chat(&s, &crate::cleanup::system_prompt(&s), "Okay.", Duration::from_secs(20));
         });
     }
+}
+
+/// Ollama and LM Studio unload an idle model (Ollama after 5 minutes), and the first cleanup after
+/// that waited on loading it: 7.1 s for gemma4:e4b against 244 ms warm. When a recording starts
+/// after a minute or more without one, a short request loads it while the user talks. API
+/// providers are never pinged: that would cost the user money.
+fn prewarm_local_server(s: &Settings) {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    let local = crate::settings::preset(&s.cleanup.provider).is_some_and(|p| !p.needs_key && p.id != "custom");
+    if !local || s.cleanup.model.trim().is_empty() {
+        return;
+    }
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if last.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+        return;
+    }
+    *last = Some(Instant::now());
+    let s = s.clone();
+    std::thread::spawn(move || {
+        let _ = crate::cleanup::chat(&s, &crate::cleanup::system_prompt(&s), "Okay.", Duration::from_secs(60));
+    });
 }
 
 /// After a cleanup: counts as use, so "Unload when idle" waits from the end of a long request.
