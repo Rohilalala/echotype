@@ -3,7 +3,6 @@
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::{Arc, Mutex, mpsc};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 pub const RATE: u32 = 16_000;
@@ -39,6 +38,11 @@ pub fn resample(x: &[f32], from: u32, to: u32) -> Vec<f32> {
 /// what `resample` gives for the whole input.
 pub struct StreamResampler {
     ratio: f64,
+    from: u64,
+    to: u64,
+    /// Filter taps per output phase (the input position's fraction, as `from * next % to`): computed
+    /// once, not 2 x 100 cos/sin per output sample, which took 60-100 ms at the end of a dictation.
+    taps: std::collections::HashMap<u64, Vec<f64>>,
     cutoff: f64,
     half: i64,
     /// Input not needed any more is dropped; `buf[0]` is input sample `base`.
@@ -52,7 +56,7 @@ impl StreamResampler {
     pub fn new(from: u32, to: u32) -> Self {
         let ratio = to as f64 / from.max(1) as f64;
         let cutoff = ratio.min(1.0) * 0.94; // fraction of the input Nyquist, small guard band
-        Self { ratio, cutoff, half: (16.0 / cutoff).ceil() as i64, buf: vec![], base: 0, total: 0, next: 0 }
+        Self { ratio, from: from as u64, to: to.max(1) as u64, taps: Default::default(), cutoff, half: (16.0 / cutoff).ceil() as i64, buf: vec![], base: 0, total: 0, next: 0 }
     }
 
     pub fn push(&mut self, x: &[f32]) -> Vec<f32> {
@@ -73,18 +77,27 @@ impl StreamResampler {
         let n_out = (self.total as f64 * self.ratio).floor() as usize;
         let mut out = vec![];
         while self.next < n_out {
-            let t = self.next as f64 / self.ratio;
-            let center = t.floor() as i64;
+            let num = self.next as u64 * self.from;
+            let (center, phase) = ((num / self.to) as i64, num % self.to);
             if !last && center + half > n - 1 {
                 break; // wait for the input to its right
             }
+            let (to, cutoff) = (self.to, self.cutoff);
+            // Tap j weighs input center - half + 1 + j, at distance d = half - 1 - j + phase / to.
+            let taps = self.taps.entry(phase).or_insert_with(|| {
+                (0..2 * half)
+                    .map(|j| {
+                        let d = (half - 1 - j) as f64 + phase as f64 / to as f64;
+                        let w = 0.5 * (1.0 + (std::f64::consts::PI * d / half as f64).cos());
+                        cutoff * sinc(cutoff * d) * w
+                    })
+                    .collect()
+            });
             let lo = (center - half + 1).max(0);
             let hi = (center + half).min(n - 1);
             let mut acc = 0.0;
             for k in lo..=hi {
-                let d = t - k as f64;
-                let w = 0.5 * (1.0 + (std::f64::consts::PI * d / half as f64).cos());
-                acc += self.buf[k as usize - self.base] as f64 * self.cutoff * sinc(self.cutoff * d) * w;
+                acc += self.buf[k as usize - self.base] as f64 * taps[(k - (center - half + 1)) as usize];
             }
             out.push(acc as f32);
             self.next += 1;
@@ -464,7 +477,9 @@ const MAX_REOPENS: u32 = 2;
 
 pub struct Recorder {
     stop: mpsc::Sender<()>,
-    handle: JoinHandle<(Vec<f32>, u32)>,
+    /// The recording, sent before the stream is torn down (CoreAudio takes 100-200 ms to stop a
+    /// stream, which the hand-back no longer waits for).
+    done: mpsc::Receiver<(Vec<f32>, u32)>,
 }
 
 impl Recorder {
@@ -473,14 +488,15 @@ impl Recorder {
     pub fn start(device: Option<String>, mut on_window: impl FnMut(f32, bool) + Send + 'static) -> Result<Self, String> {
         let (stop, stop_rx) = mpsc::channel::<()>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
-        let handle = std::thread::spawn(move || {
+        let (done_tx, done) = mpsc::channel::<(Vec<f32>, u32)>();
+        std::thread::spawn(move || {
             let buf = Arc::new(Mutex::new(Vec::<f32>::with_capacity(48_000 * 30)));
             let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let (mut stream, mut rate) = match open_stream(device.clone(), buf.clone(), lost.clone()) {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = ready_tx.send(Err(e));
-                    return (vec![], RATE);
+                    return;
                 }
             };
             let _ = ready_tx.send(Ok(()));
@@ -527,12 +543,12 @@ impl Recorder {
                 }
                 on_window(db, lost.load(std::sync::atomic::Ordering::SeqCst));
             }
-            drop(stream);
             let samples = std::mem::take(&mut *buf.lock().unwrap_or_else(|e| e.into_inner()));
-            (samples, rate)
+            let _ = done_tx.send((samples, rate));
+            drop(stream); // after the hand-back: the caller transcribes while CoreAudio stops it
         });
         match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self { stop, handle }),
+            Ok(Ok(())) => Ok(Self { stop, done }),
             Ok(Err(e)) => Err(e),
             Err(_) => Err("The audio thread stopped unexpectedly".into()),
         }
@@ -541,7 +557,7 @@ impl Recorder {
     /// Stops and returns the recording as 16 kHz mono.
     pub fn stop(self) -> Vec<f32> {
         let _ = self.stop.send(());
-        let (samples, rate) = self.handle.join().unwrap_or_default();
+        let (samples, rate) = self.done.recv().unwrap_or((vec![], RATE));
         resample(&samples, rate, RATE)
     }
 }
@@ -662,6 +678,40 @@ mod tests {
         assert_eq!(resample(&sine(440.0, 44_100, 1.0), 44_100, 16_000).len(), 16_000);
         let up = resample(&sine(440.0, 8_000, 1.0), 8_000, 16_000);
         assert!((rms(&up) - 0.7071).abs() < 0.02);
+    }
+
+    #[test]
+    fn cached_taps_match_the_direct_formula_and_are_fast() {
+        // The formula the taps replaced, one output sample at a time.
+        let direct = |x: &[f32], from: u32, to: u32| -> Vec<f32> {
+            let ratio = to as f64 / from as f64;
+            let cutoff = ratio.min(1.0) * 0.94;
+            let half = (16.0 / cutoff).ceil() as i64;
+            let n = x.len() as i64;
+            (0..(x.len() as f64 * ratio).floor() as usize)
+                .map(|i| {
+                    let t = i as f64 / ratio;
+                    let c = t.floor() as i64;
+                    ((c - half + 1).max(0)..=(c + half).min(n - 1))
+                        .map(|k| {
+                            let d = t - k as f64;
+                            x[k as usize] as f64 * cutoff * sinc(cutoff * d) * 0.5 * (1.0 + (std::f64::consts::PI * d / half as f64).cos())
+                        })
+                        .sum::<f64>() as f32
+                })
+                .collect()
+        };
+        for from in [48_000, 44_100] {
+            let x: Vec<f32> = (0..from as usize / 2).map(|i| ((i as f32 * 0.37).sin() * 0.5 + (i as f32 * 0.011).cos() * 0.3)).collect();
+            let (a, b) = (resample(&x, from, RATE), direct(&x, from, RATE));
+            assert_eq!(a.len(), b.len());
+            assert!(a.iter().zip(&b).all(|(p, q)| (p - q).abs() < 1e-5), "{from} Hz differs from the formula");
+        }
+        let long: Vec<f32> = (0..48_000 * 15).map(|i| (i as f32 * 0.01).sin()).collect();
+        let t = std::time::Instant::now();
+        let _ = resample(&long, 48_000, RATE);
+        // Timed only when optimised: a debug build takes ~500 ms either way.
+        assert!(cfg!(debug_assertions) || t.elapsed().as_millis() < 60, "15 s at 48 kHz took {} ms", t.elapsed().as_millis());
     }
 
     #[test]
