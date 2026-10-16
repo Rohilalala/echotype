@@ -314,6 +314,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                 Act::None => {}
                 Act::Start { id, locked } => match start_recording(&app, &s, id) {
                     Ok(mut l) => {
+                        llm::prewarm(&s); // warm while the user talks, not after
                         // Recording before anything shows, so the pill loop takes Esc for it (pill.rs owns Esc).
                         state(&app).recording.store(true, Ordering::SeqCst);
                         let _ = state(&app).pill_wake.send(());

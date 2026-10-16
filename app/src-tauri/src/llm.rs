@@ -228,6 +228,23 @@ fn reap_when_idle() {
     });
 }
 
+/// The first cleanup after a quiet spell took ~740 ms against 55-150 ms warm (live, M5): the
+/// weights and GPU go cold. Called when a recording starts: if the cleaner has been idle for 20 s
+/// or is not running, it answers one short request with the same system prompt (llama-server
+/// keeps that prefix cached), so it is warm by the time the speech is transcribed.
+pub fn prewarm(s: &Settings) {
+    if !(s.cleanup.enabled && s.cleanup.provider == "echotype") {
+        return;
+    }
+    let cold = SERVER.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_none_or(|v| v.last_used.elapsed() >= Duration::from_secs(20));
+    if cold {
+        let s = s.clone();
+        std::thread::spawn(move || {
+            let _ = crate::cleanup::chat(&s, &crate::cleanup::system_prompt(&s), "Okay.", Duration::from_secs(20));
+        });
+    }
+}
+
 /// After a cleanup: counts as use, so "Unload when idle" waits from the end of a long request.
 pub fn touch() {
     if let Some(s) = SERVER.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
