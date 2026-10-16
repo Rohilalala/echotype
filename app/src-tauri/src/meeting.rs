@@ -486,7 +486,15 @@ impl Session {
 
 /// "Speaker: text" lines, what the summary model reads.
 pub fn transcript_lines(m: &Meeting) -> String {
-    m.segments.iter().map(|s| format!("{}: {}", name(m, &s.speaker), s.text)).collect::<Vec<_>>().join("\n")
+    for_notes(m, "")
+}
+
+/// transcript_lines with You under the user's own name (`me`, Settings → display name), so the
+/// notes say "(Aditya) Send the questions" rather than "(You)".
+fn for_notes(m: &Meeting, me: &str) -> String {
+    let me = me.trim();
+    let line = |s: &Segment| format!("{}: {}", if s.speaker == ME && !me.is_empty() { me } else { name(m, &s.speaker) }, s.text);
+    m.segments.iter().map(line).collect::<Vec<_>>().join("\n")
 }
 
 fn name<'a>(m: &'a Meeting, id: &'a str) -> &'a str {
@@ -500,8 +508,8 @@ pub const SUMMARY_MAX_CHARS: usize = 48_000;
 /// The notes, or None when nobody said anything (the model is then never asked: with nothing to
 /// go on it would only make something up). `llm(transcript)`: Echotype Cloud's /v1/summary, which
 /// holds the prompt.
-pub fn summarize(m: &Meeting, llm: impl FnOnce(&str) -> Result<String, String>) -> Result<Option<String>, String> {
-    let mut text = transcript_lines(m);
+pub fn summarize(m: &Meeting, me: &str, llm: impl FnOnce(&str) -> Result<String, String>) -> Result<Option<String>, String> {
+    let mut text = for_notes(m, me);
     if !m.segments.iter().any(|s| crate::cleanup::has_speech(&s.text)) {
         return Ok(None);
     }
@@ -1073,7 +1081,8 @@ pub async fn meeting_export(id: String, format: String) -> R<String> {
 
 /// Echotype Pro: an answer about the meeting so far (or all of it), from Echotype Cloud.
 #[tauri::command]
-pub async fn meeting_ask(id: String, question: String) -> R<String> {
+pub async fn meeting_ask(app: AppHandle, id: String, question: String) -> R<String> {
+    let me = crate::current_settings(&app).display_name;
     blocking(move || {
         if !crate::settings::CLOUD {
             return Err("Asking about a meeting is coming with Echotype Pro.".into());
@@ -1083,7 +1092,7 @@ pub async fn meeting_ask(id: String, question: String) -> R<String> {
             return Err("Nothing has been said yet.".into());
         }
         // The latest part of a long meeting: "what did I miss?" is about the last few minutes.
-        let text = transcript_lines(&m);
+        let text = for_notes(&m, &me);
         let mut from = text.len().saturating_sub(SUMMARY_MAX_CHARS);
         while !text.is_char_boundary(from) {
             from += 1;
@@ -1119,7 +1128,8 @@ pub fn show_window(app: &AppHandle, id: &str) {
 
 /// Echotype Pro: the finished meeting's notes, written on request by Echotype Cloud and saved.
 #[tauri::command]
-pub async fn meeting_summarize(id: String) -> R<Meeting> {
+pub async fn meeting_summarize(app: AppHandle, id: String) -> R<Meeting> {
+    let me = crate::current_settings(&app).display_name;
     blocking(move || {
         if !crate::settings::CLOUD {
             return Err("Meeting summaries are coming with Echotype Pro.".into());
@@ -1129,7 +1139,7 @@ pub async fn meeting_summarize(id: String) -> R<Meeting> {
         if m.state != "done" {
             return Err("The meeting is still being written up.".into());
         }
-        let Some(notes) = summarize(&m, crate::cloud::summary)? else {
+        let Some(notes) = summarize(&m, &me, crate::cloud::summary)? else {
             return Err("Nothing was said, so there is nothing to summarise.".into());
         };
         if transcript_lines(&m).len() > SUMMARY_MAX_CHARS && !m.notices.iter().any(|n| n.contains("covers its first part")) {
@@ -1526,22 +1536,23 @@ mod tests {
     fn summary_never_asks_the_model_about_an_empty_meeting() {
         let mut m = sample();
         let seen = std::cell::RefCell::new(String::new());
-        let out = summarize(&m, |text| {
+        let out = summarize(&m, "", |text| {
             *seen.borrow_mut() = text.to_string();
             Ok(" ## Summary\nShip Friday. ".into())
         });
         assert_eq!(out.unwrap().as_deref(), Some("## Summary\nShip Friday."));
         assert_eq!(seen.into_inner(), "You: Shall we ship Friday?\nPriya: Yes, I'll send the deck.");
+        assert_eq!(for_notes(&m, "Aditya"), "Aditya: Shall we ship Friday?\nPriya: Yes, I'll send the deck.", "the notes use the user's name");
         let mut long = sample();
         long.segments = vec![Segment { start: 0.0, end: 1.0, speaker: "you".into(), text: "word ".repeat(9_000) }; 3];
-        summarize(&long, |text| {
+        summarize(&long, "", |text| {
             assert!(text.len() <= SUMMARY_MAX_CHARS && text.ends_with("word "), "cut at a line: {}", text.len());
             Ok(String::new())
         })
         .unwrap();
         for empty in [vec![], vec![Segment { start: 0.0, end: 1.0, speaker: "you".into(), text: " ... ".into() }]] {
             m.segments = empty;
-            assert_eq!(summarize(&m, |_| panic!("asked the model about nothing")).unwrap(), None);
+            assert_eq!(summarize(&m, "", |_| panic!("asked the model about nothing")).unwrap(), None);
         }
     }
 

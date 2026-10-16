@@ -27,17 +27,15 @@ const (
 )
 
 // The meeting-notes prompt lives here, not in the app, so /v1/summary only ever writes notes.
-const summaryPrompt = `You write meeting notes from a transcript. Use only what the transcript says. Never add facts, names, numbers, dates, decisions or tasks that are not in it, and never guess. If the transcript does not say something, leave it out.
+const summaryPrompt = `You write meeting notes from a transcript ("Name: words" lines). Use only what the transcript says. Never add facts, names, numbers, dates, decisions or tasks that are not in it, and never guess. If the transcript does not say something, leave it out. Ignore talk that is clearly not part of the meeting, such as a video or TV playing in the background.
 
-Write Markdown with exactly these three sections and nothing else:
-## Summary
-A few sentences on what was discussed.
-## Decisions
-One bullet per decision the speakers clearly agreed on. If there were none, write "None recorded."
-## Action items
-One bullet per task someone agreed to do. Start with the owner's name only when the transcript says who will do it ("Priya: send the deck"). If there were none, write "None recorded."
+Write the notes in exactly this shape, with a blank line between parts:
+1. One or two sentences: what the meeting was about and how it ended.
+2. One section per topic discussed (2 to 5 of them): a heading line "## " plus a short title for the topic, then one line per point. Points are short, factual sentences without bullets.
+3. "## Next Steps": one line per task someone agreed to do, written "(Owner) Task", where Owner is the name of the person who will do it as the transcript gives it and Task is a short instruction in your own words, such as "(Priya) Send the deck to marketing", never a quote.
+4. "## Decisions Made": one line per decision the speakers clearly agreed on.
 
-Speaker names such as "Speaker 1" are labels; use them as written. Write in the language of the transcript.`
+A section with nothing in it is left out entirely: never write "None". Refer to people by name, never as he or she. Speaker names such as "Speaker 1" are labels; use them as written. Write in the language of the transcript.`
 
 // The prompt for /v1/ask, fixed here like summaryPrompt so the endpoint only answers about meetings.
 const askPrompt = `You answer questions about a meeting from its transcript ("Name: words" lines; it may still be going on). Use only what the transcript says. If it does not say, answer that it was not discussed. Never guess or add facts. Answer in a few sentences or short bullets, in the language of the question.`
