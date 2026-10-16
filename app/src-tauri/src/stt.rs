@@ -277,6 +277,7 @@ pub fn download(id: &str, progress: impl FnMut(u64, Option<u64>)) -> Result<(), 
     let url = format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/{HF_COMMIT}/ggml-{id}.bin");
     fetch(&url, &models_dir().join(format!("ggml-{id}.bin")), want, progress)?;
     let _ = crate::speakers::ensure_vad(); // 1 MB; dictation works without it, just less guarded
+    let _ = ensure_lid(); // 32 MB; without it turbo picks the language itself, 260 ms slower
     Ok(())
 }
 
@@ -639,6 +640,45 @@ fn words_of(model: &Path, pcm: &[f32], languages: &[String], prompt: &str, vad: 
     })
 }
 
+/// whisper tiny (multilingual, Q5_1, 32 MB), only to pick the language before turbo transcribes
+/// with it set: 13 ms against turbo's own 273 ms detection pass on an M5, and as accurate
+/// (FLEURS en/hi/de/es/fr, 30 clips each: 149/150 at full length and 115/150 on their first 3 s,
+/// turbo 145 and 125; on 3 s of Hindi 18/30 against 15).
+const LID_FILE: &str = "ggml-tiny-q5_1.bin";
+const LID_SHA256: &str = "818710568da3ca15689e31a743197b520007872ff9576237bda97bd1b469c3d7";
+
+pub fn lid_path() -> PathBuf {
+    models_dir().join("lid").join(LID_FILE)
+}
+
+/// Fetches the language picker if it is missing; transcription works without it (turbo detects).
+pub fn ensure_lid() -> Result<(), String> {
+    if lid_path().is_file() {
+        return Ok(());
+    }
+    let url = format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/{HF_COMMIT}/{LID_FILE}");
+    fetch(&url, &lid_path(), LID_SHA256, |_, _| {})
+}
+
+static LID: Mutex<Option<(WhisperContext, WhisperState)>> = Mutex::new(None);
+
+/// The tiny model's language scores for the clip (whisper's language ids index them). None when
+/// it is not downloaded or fails, and the caller falls back to turbo's own detection.
+fn lid_probs(pcm: &[f32]) -> Option<Vec<f32>> {
+    let mut g = LID.lock().unwrap_or_else(|e| e.into_inner());
+    if g.is_none() {
+        let path = lid_path();
+        let mut cp = WhisperContextParameters::default();
+        cp.flash_attn(true);
+        let ctx = WhisperContext::new_with_params(path.to_str()?, cp).ok()?;
+        let state = ctx.create_state().ok()?;
+        *g = Some((ctx, state));
+    }
+    let (_, state) = g.as_mut()?;
+    state.pcm_to_mel(pcm, THREADS).ok()?;
+    state.lang_detect(0, THREADS).ok().map(|(_, probs)| probs)
+}
+
 /// whisper.cpp's own thread count (min(4, cores)), for the language check before a run.
 const THREADS: usize = 4;
 
@@ -688,9 +728,24 @@ fn run_local<T>(model: &Path, pcm: &[f32], languages: &[String], translate: bool
     engine.vad |= vad.is_some();
     let state = &mut engine.state;
     let mut p = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    let multilingual = engine.ctx.is_multilingual();
+    let tiny = (languages.len() != 1 && multilingual).then(|| lid_probs(pcm)).flatten();
     let lang = match languages {
-        [] => None, // whisper detects among all 99
         [one] => Some(one.replace('\0', "")),
+        _ if !multilingual => None, // an English-only model: nothing to pick
+        [] => match &tiny {
+            // The tiny model's pick, so turbo skips its own detection pass (273 ms on an M5).
+            Some(probs) => (0..probs.len()).max_by(|&a, &b| probs[a].total_cmp(&probs[b])).and_then(|i| whisper_rs::get_lang_str(i as i32)).map(String::from),
+            None => None, // whisper detects among all 99
+        },
+        several if tiny.is_some() => {
+            let mut last = LAST_LANG.lock().unwrap_or_else(|e| e.into_inner());
+            let pick = likeliest(tiny.as_deref().unwrap_or_default(), several, last.as_deref().filter(|_| sticky));
+            if sticky {
+                last.clone_from(&pick);
+            }
+            pick
+        }
         several => {
             // Whisper's own detection, scored over the first 30 s, read only for the user's languages:
             // a short Hindi clip once came out as Tibetan under auto.

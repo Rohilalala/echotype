@@ -1834,6 +1834,7 @@ pub fn run() {
             std::thread::spawn(move || {
                 if s.stt.provider == "local" {
                     let _ = speakers::ensure_vad(); // for installs from before dictation used it
+                    let _ = stt::ensure_lid(); // the fast language picker, same
                 }
                 stt::warm_up(&s);
                 llm::apply(&s);

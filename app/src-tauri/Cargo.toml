@@ -64,3 +64,8 @@ codegen-units = 1
 lto = true
 opt-level = 3
 strip = true
+
+# whisper-rs 0.16 bundles whisper.cpp 1.8.3, whose Metal probe turns the tensor API off on M5
+# (encoder 585 ms vs 272 ms on 1.9.5 for the same clip). Same crate, newer whisper.cpp (submodule).
+[patch.crates-io]
+whisper-rs-sys = { path = "vendor/whisper-rs-sys" }
