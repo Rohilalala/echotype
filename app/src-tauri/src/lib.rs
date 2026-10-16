@@ -8,6 +8,7 @@ mod hotkey;
 mod llm;
 mod meeting;
 mod music;
+mod notices;
 mod pill;
 mod platform;
 mod settings;
@@ -413,6 +414,9 @@ fn show_later(app: &AppHandle, id: u64, locked: bool, after: Duration) {
 /// Opens the mic for recording `id`, after checking a model or key is ready (no point recording
 /// what can't be transcribed). The error is the state to show.
 fn start_recording(app: &AppHandle, s: &Settings, id: u64) -> Result<Live, DictationState> {
+    if notices::blocked() {
+        return Err(hint("This version of Echotype is retired. Update it in Account to keep dictating.", Some("update")));
+    }
     // ponytail: a remote provider costs one keychain read per press (~ms); cache key presence if it shows up in start latency.
     if let Err(e) = stt::ready(s) {
         let downloading = lock(&state(app).downloads).get(&stt::model_id(&s.stt.local_model)).copied();
@@ -1792,6 +1796,7 @@ pub fn run() {
         )
         .setup(|app| {
             let s = Settings::load();
+            notices::start(app.handle());
             let (pill_wake, woken) = mpsc::channel();
             app.manage(AppState {
                 settings: Mutex::new(s.clone()),
@@ -1951,6 +1956,7 @@ pub fn run() {
             installed_apps,
             check_update,
             install_update,
+            notices::app_notices,
             mic_check,
             play_sound,
             reset_accessibility,

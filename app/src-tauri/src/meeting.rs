@@ -846,6 +846,9 @@ pub fn toggle(app: &AppHandle) {
 static STARTING: AtomicBool = AtomicBool::new(false);
 
 pub fn start(app: &AppHandle, title: Option<String>) -> Result<Meeting, String> {
+    if crate::notices::blocked() {
+        return Err("This version of Echotype is retired. Update it in Account to take meeting notes.".into());
+    }
     if let Some(l) = lock(&LIVE).as_ref() {
         return Err(if l.capture.is_some() { "A meeting is already being transcribed" } else { "Still writing up the last meeting. Try again in a moment." }.into());
     }

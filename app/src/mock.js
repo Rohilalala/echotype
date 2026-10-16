@@ -130,6 +130,7 @@ const commands = {
   relaunch: () => null,
   // ?apps turns on "Match the app you're typing in", with a last dictation into Slack.
   installed_apps: () => [{ id: 'com.apple.mail', name: 'Mail', style: 'formal' }, { id: 'com.tinyspeck.slackmacgap', name: 'Slack', style: 'casual' }, { id: 'com.apple.TextEdit', name: 'TextEdit', style: '' }],
+  app_notices: () => ({ current: '0.1.0', blocked: q.has('retired'), min_version: q.has('retired') ? '0.2.0' : '0.1.0', notices: q.has('nonotice') ? [] : [{ id: 'models-1', title: 'Echotype models are here', body: 'Download Echotype Tiny or Medium for better cleanup on this Mac.', action_label: 'Open Models', action: 'page:speech' }] }),
   check_update: () => ({ current: '0.1.0', version: q.has('update') ? '0.2.0' : null, notes: null }),
   install_update: () => { throw 'Browser preview: updates install in the app.'; },
   last_app: () => (q.has('apps') ? { id: 'com.tinyspeck.slackmacgap', name: 'Slack', style: 'casual' } : null),

@@ -53,6 +53,7 @@
     "allow-installed-apps",
     "allow-check-update",
     "allow-install-update",
+    "allow-app-notices",
     "allow-mic-check",
     "allow-play-sound",
     "allow-reset-accessibility",
