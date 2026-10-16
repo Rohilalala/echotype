@@ -387,8 +387,7 @@ function renderRaw() {
   if (!S) return;
   $('#cloudMoved').hidden = !S.cloud_moved;
   $('#rawBanner').hidden = !noCleanup() || S.dismissed.includes('no_cleanup_banner');
-  $('#cleanupSetup').hidden = !noCleanup();
-  $('#cleanupSetupTitle').textContent = S.cleanup.enabled ? 'Finish setting up cleanup' : 'Turn on cleanup';
+  $('#cleanupSetup').hidden = !S.cleanup.enabled || !noCleanup(); // on, but the provider still needs a key
 }
 $('#rawDismiss').append(svg(CROSS));
 $('#cloudMovedOk').append(svg(CROSS));
