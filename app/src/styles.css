@@ -276,7 +276,7 @@ button { font: inherit; color: inherit; }
 .btn.quiet.danger:hover, .btn.quiet.danger[data-armed] { color: var(--bad); }
 .actions { display: flex; gap: 6px; align-items: center; flex: none; }
 
-input[type="text"], input[type="url"], input[type="email"], input[type="tel"], input[type="password"], input[type="number"], select, textarea {
+input[type="text"], input[type="url"], input[type="password"], input[type="number"], select, textarea {
   font: inherit;
   color: var(--fg);
   background: var(--pane);
@@ -784,9 +784,6 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .ob-wide .ob-tile { align-items: center; text-align: center; min-height: 48px; padding: 10px 8px; }
 .ob-tiles.six { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
 
-/* Dictionary → About you: a detail per row, the field on the right. */
-.row.about input { width: min(55%, 320px); }
-
 /* Wispr Flow import: what would come over. */
 .ob-wispr { margin: 4px 0 12px; padding-left: 18px; color: var(--fg-2); font-size: 13px; line-height: 1.55; }
 .ob-wispr b { color: var(--fg); font-weight: var(--fw-med); }
@@ -908,7 +905,7 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
   .hero { margin-top: 4vh; }
   .hero-line { font-size: 24px; }
   .row { flex-wrap: wrap; }
-  .row > select, .row > input[type="text"], .row > input[type="url"], .row > input[type="email"], .row > input[type="tel"] { width: 100%; }
+  .row > select, .row > input[type="text"], .row > input[type="url"] { width: 100%; }
   .model { flex-wrap: nowrap; }
   #cloudAccount .actions { flex: 1 1 100%; flex-wrap: wrap; }
   #cloudAccount .actions input { flex: 1; min-width: 0; }

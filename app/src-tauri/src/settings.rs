@@ -50,8 +50,6 @@ pub struct Settings {
     pub cleanup: Cleanup,
     pub dictionary: Vec<String>,
     pub replacements: Vec<Replacement>,
-    /// "About you": typed when the user says "my email address" and the like (cleanup::PERSONAL).
-    pub personal: Personal,
     pub restore_clipboard: bool,
     pub history_enabled: bool,
     /// Count words and speaking speed on this computer (stats.rs). Counts only; on for upgraders too.
@@ -229,16 +227,6 @@ pub fn app_style<'a>(c: &'a Cleanup, id: Option<&str>) -> &'a str {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(default)]
-pub struct Personal {
-    pub email: String,
-    pub phone: String,
-    pub address: String,
-    pub website: String,
-    pub linkedin: String,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
-#[serde(default)]
 pub struct Replacement {
     pub from: String,
     pub to: String,
@@ -260,7 +248,6 @@ impl Default for Settings {
             cleanup: Cleanup::default(),
             dictionary: vec![],
             replacements: vec![],
-            personal: Personal::default(),
             restore_clipboard: true,
             history_enabled: true,
             usage_stats: true,

@@ -21,8 +21,6 @@ pub struct Found {
     pub autostart: Option<bool>,
     pub look: Option<String>,
     pub display_name: Option<String>,
-    /// The Wispr account's email, for "About you".
-    pub email: Option<String>,
 }
 
 impl Found {
@@ -86,7 +84,6 @@ pub fn from_config(u: &Value, bundle_id: impl Fn(&str) -> Option<String>) -> Fou
     f.autostart = u["openAtLogin"].as_bool();
     f.look = u["theme"].as_str().filter(|t| matches!(*t, "light" | "dark" | "system")).map(String::from);
     f.display_name = u["firstName"].as_str().map(str::trim).filter(|n| !n.is_empty()).map(String::from);
-    f.email = u["email"].as_str().map(str::trim).filter(|e| e.contains('@')).map(String::from);
     f
 }
 
@@ -194,12 +191,6 @@ pub fn apply(s: &mut Settings, f: &Found) -> Vec<String> {
     {
         s.display_name = n.clone();
     }
-    if s.personal.email.trim().is_empty()
-        && let Some(e) = &f.email
-    {
-        s.personal.email = e.clone();
-        done.push("your email (say \"my email address\")".into());
-    }
     if let Some(v) = f.sounds {
         s.sounds = v;
     }
@@ -229,7 +220,7 @@ mod tests {
                 "other": { "name": "Others", "appNames": [], "stylePreference": "casual" }
             },
             "shortcuts": { "53": "dismiss", "59": "ptt", "4098": "ptt", "55+59+9": "paste_last_text" },
-            "enableSounds": false, "shouldPauseAudio": true, "openAtLogin": true, "theme": "dark", "firstName": " Aditya ", "email": "me@example.com"
+            "enableSounds": false, "shouldPauseAudio": true, "openAtLogin": true, "theme": "dark", "firstName": " Aditya "
         })
     }
 
@@ -247,7 +238,7 @@ mod tests {
         assert_eq!(styles, [("Microsoft Outlook", "formal"), ("Slack", "casual")], "installed apps only");
         assert_eq!(f.talk_key.as_deref(), Some("left_control"), "Wispr's push-to-talk on Left Control (keycode 59)");
         assert_eq!((f.sounds, f.pause_music, f.autostart), (Some(false), Some(true), Some(true)));
-        assert_eq!((f.look.as_deref(), f.display_name.as_deref(), f.email.as_deref()), (Some("dark"), Some("Aditya"), Some("me@example.com")));
+        assert_eq!((f.look.as_deref(), f.display_name.as_deref()), (Some("dark"), Some("Aditya")));
         assert!(from_config(&serde_json::json!({}), |_| None).is_empty(), "an empty config imports nothing");
     }
 
@@ -280,7 +271,6 @@ mod tests {
             app_styles: vec![AppStyle { id: "com.tinyspeck.slackmacgap".into(), name: "Slack".into(), style: "casual".into() }],
             talk_key: Some("left_control".into()),
             display_name: Some("Aditya".into()),
-            email: Some("me@example.com".into()),
             ..Default::default()
         };
         let done = apply(&mut s, &f);
@@ -290,8 +280,7 @@ mod tests {
         assert_eq!(s.languages, ["en", "hi"]);
         assert!(s.cleanup.match_app && s.cleanup.app_styles.len() == 1);
         assert_eq!((s.talk_key.as_str(), s.display_name.as_str()), ("left_control", "Aditya"));
-        assert_eq!(s.personal.email, "me@example.com");
-        assert_eq!(done.len(), 6, "{done:?}");
+        assert_eq!(done.len(), 5, "{done:?}");
         // A second import changes nothing; set languages and talk key are not overwritten.
         s.languages = vec!["fr".into()];
         assert!(apply(&mut s, &f).is_empty());
