@@ -40,13 +40,24 @@
     ],
     "linux": {
       "deb": {
-        "depends": ["libasound2"]
+        "depends": [
+          "libasound2"
+        ]
       }
     },
     "macOS": {
       "entitlements": "Entitlements.plist",
       "signingIdentity": "-",
       "minimumSystemVersion": "13.0"
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJBNDJCMjJBOEZDREI1RTMKUldUanRjMlBLckpDS3I2aGpuQ0NISGVzT0FsWC82QW9nU1VyK2Fyd3UyZXRUS3pza3oyUkpLT3AK",
+      "endpoints": [
+        "https://github.com/Rohilalala/echotype/releases/latest/download/latest.json"
+      ]
     }
   }
 }

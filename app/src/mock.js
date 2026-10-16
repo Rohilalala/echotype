@@ -130,6 +130,8 @@ const commands = {
   relaunch: () => null,
   // ?apps turns on "Match the app you're typing in", with a last dictation into Slack.
   installed_apps: () => [{ id: 'com.apple.mail', name: 'Mail', style: 'formal' }, { id: 'com.tinyspeck.slackmacgap', name: 'Slack', style: 'casual' }, { id: 'com.apple.TextEdit', name: 'TextEdit', style: '' }],
+  check_update: () => ({ current: '0.1.0', version: q.has('update') ? '0.2.0' : null, notes: null }),
+  install_update: () => { throw 'Browser preview: updates install in the app.'; },
   last_app: () => (q.has('apps') ? { id: 'com.tinyspeck.slackmacgap', name: 'Slack', style: 'casual' } : null),
   get_history: ({ limit }) => (settings.history_enabled ? history.slice(0, limit) : []),
   wispr_import_preview: () => (q.has('nowispr') ? null : {

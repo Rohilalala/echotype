@@ -1372,6 +1372,23 @@ function showOnboarding(on) {
   document.documentElement.classList.toggle('ob-on', on);
 }
 
+// Settings → Startup → Updates: check GitHub Releases, then install and restart on request.
+async function checkUpdate() {
+  const desc = $('#updateDesc'), btn = $('#checkUpdate');
+  btn.disabled = true; desc.textContent = 'Checking…'; desc.classList.remove('error');
+  try {
+    const u = await invoke('check_update');
+    desc.textContent = u.version ? `Echotype ${u.version} is available (you have ${u.current}).` : `Echotype ${u.current} is the latest version.`;
+    $('#installUpdate').hidden = !u.version;
+  } catch (e) { desc.textContent = String(e); desc.classList.add('error'); }
+  btn.disabled = false;
+}
+$('#checkUpdate').addEventListener('click', checkUpdate);
+$('#installUpdate').addEventListener('click', async e => {
+  const desc = $('#updateDesc');
+  e.target.disabled = true; desc.textContent = 'Downloading the update…';
+  try { await invoke('install_update'); } catch (err) { desc.textContent = String(err); desc.classList.add('error'); e.target.disabled = false; }
+});
 $('#rerunSetup').addEventListener('click', () => startOnboarding(1));
 
 function startOnboarding(step) {

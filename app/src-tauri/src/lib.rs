@@ -1451,6 +1451,29 @@ async fn installed_apps() -> R<Vec<serde_json::Value>> {
     blocking(|| Ok(platform::installed_apps().into_iter().map(|f| serde_json::json!({ "style": settings::builtin_style(&f.id).unwrap_or(""), "id": f.id, "name": f.name })).collect())).await
 }
 
+/// Settings → Updates: this version and the newer one on GitHub Releases, if any. The update's
+/// signature is checked against tauri.conf.json's updater pubkey before it installs.
+#[tauri::command]
+async fn check_update(app: AppHandle) -> R<serde_json::Value> {
+    use tauri_plugin_updater::UpdaterExt;
+    let current = app.package_info().version.to_string();
+    let update = app.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| format!("Couldn't check for updates: {e}"))?;
+    Ok(serde_json::json!({ "current": current, "version": update.as_ref().map(|u| u.version.clone()), "notes": update.and_then(|u| u.body) }))
+}
+
+/// Downloads and installs the newer version, then restarts into it. Never mid-meeting.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> R<()> {
+    use tauri_plugin_updater::UpdaterExt;
+    if meeting::recording() {
+        return Err("Stop the meeting notes first; the update restarts Echotype.".into());
+    }
+    let update = app.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| format!("Couldn't check for updates: {e}"))?;
+    let Some(update) = update else { return Err("Echotype is up to date.".into()) };
+    update.download_and_install(|_, _| {}, || {}).await.map_err(|e| format!("The update didn't install: {e}"))?;
+    app.restart()
+}
+
 /// Windows (50 ms each) a sound check runs before it stops by itself: two minutes.
 // ponytail: the recorder keeps its audio in memory (~23 MB at 48 kHz for two minutes); the cap is the bound.
 const MIC_CHECK_WINDOWS: u32 = 2400;
@@ -1744,6 +1767,7 @@ pub fn run() {
     })) };
     let app = builder
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -1925,6 +1949,8 @@ pub fn run() {
             focus_main,
             last_app,
             installed_apps,
+            check_update,
+            install_update,
             mic_check,
             play_sound,
             reset_accessibility,
