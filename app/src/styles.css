@@ -954,16 +954,12 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .chip.spk.editing { padding: 0 2px 0 10px; }
 .chip.spk input { height: 22px; width: 140px; font-size: 12.5px; }
 .spk-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; }
-.transcript { margin: 6px 0 0; display: flex; flex-direction: column; }
-.transcript .line { display: grid; grid-template-columns: 44px 120px 1fr; gap: 10px; padding: 7px 2px; line-height: 1.5; }
-.transcript .line + .line { border-top: 1px solid var(--line); }
-.transcript time { color: var(--fg-3); font-size: 12px; font-variant-numeric: tabular-nums; padding-top: 1px; }
-.transcript .who { display: inline-flex; align-items: baseline; gap: 6px; font-weight: var(--fw-med); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.transcript .who .spk-dot { transform: translateY(-1px); }
-@media (max-width: 620px) {
-  .transcript .line { grid-template-columns: 40px 1fr; }
-  .transcript .said { grid-column: 2; }
-}
+.transcript { margin: 10px 0 0; display: flex; flex-direction: column; gap: 16px; }
+.transcript .turn { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.transcript .who { display: inline-flex; align-items: center; gap: 6px; font-weight: var(--fw-med); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.transcript time { color: var(--fg-3); font-size: 12px; font-weight: var(--fw); font-variant-numeric: tabular-nums; }
+.transcript .said { margin: 0; max-width: min(85%, 640px); padding: 8px 12px; border-radius: var(--r-card); background: var(--soft); line-height: 1.5; }
+.summary-card { margin-top: 16px; }
 
 /* Settings → Pill size sliders. */
 .range { display: flex; align-items: center; gap: 10px; flex: none; }
