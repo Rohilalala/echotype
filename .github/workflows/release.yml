@@ -148,6 +148,11 @@ jobs:
           dir="$(cygpath -u "$CARGO_TARGET_DIR")/release"
           ls "$dir"
           test -f "$dir/echotype.exe" && test -f "$dir/llama-server.exe" && test -f "$dir/vulkan-1.dll"
+      # upload-artifact wants every file under the workspace (D:), and C:\t is on another drive.
+      - name: Bring the Windows installers into the workspace
+        if: runner.os == 'Windows'
+        shell: bash
+        run: mkdir -p dist && cp "$(cygpath -u "$CARGO_TARGET_DIR")"/release/bundle/msi/*.msi "$(cygpath -u "$CARGO_TARGET_DIR")"/release/bundle/nsis/*.exe dist/
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: echotype-${{ matrix.name }}
@@ -157,5 +162,4 @@ jobs:
             app/src-tauri/target/**/release/bundle/deb/*.deb
             app/src-tauri/target/**/release/bundle/msi/*.msi
             app/src-tauri/target/**/release/bundle/nsis/*.exe
-            C:/t/release/bundle/msi/*.msi
-            C:/t/release/bundle/nsis/*.exe
+            dist/*
