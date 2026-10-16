@@ -359,6 +359,8 @@
           <input type="checkbox" class="switch" id="autostart" data-bind="autostart" /></label>
         <div class="row"><span class="row-text"><span class="row-title">Setup</span><span class="row-desc">Walk through it again: permissions, a practice dictation and your preferences.</span></span>
           <button class="btn" id="rerunSetup" type="button">Run setup again</button></div>
+        <div class="row" id="wisprRow" hidden><span class="row-text"><span class="row-title">Import from Wispr Flow</span><span class="row-desc" id="wisprDesc"></span></span>
+          <button class="btn" id="wisprImport" type="button">Import</button></div>
       </div>
 
       <h2 class="group-title">Privacy</h2>
@@ -464,6 +466,16 @@
           <div class="ob-orb" aria-hidden="true"></div>
           <div class="ob-body">
             <p class="ob-count" id="obCount"></p>
+
+            <div class="ob-q" data-q="wispr" hidden>
+              <h2 id="obQWispr" tabindex="-1">Bring your Wispr Flow setup?</h2>
+              <p class="lede" id="obWisprLede" aria-live="polite">Found on this Mac. Wispr Flow itself is not changed.</p>
+              <ul class="ob-wispr" id="obWisprList"></ul>
+              <div class="ob-tiles" role="radiogroup" aria-labelledby="obQWispr">
+                <button type="button" class="ob-tile" role="radio" data-v="yes"><b>Import</b><span>Adds to Echotype, replaces nothing</span></button>
+                <button type="button" class="ob-tile" role="radio" data-v="no"><b>Start fresh</b><span>Or later, in Settings → Startup</span></button>
+              </div>
+            </div>
 
             <div class="ob-q" data-q="name">
               <h2 id="obT4" tabindex="-1">What should I call you?</h2>

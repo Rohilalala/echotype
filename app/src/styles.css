@@ -784,6 +784,10 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .ob-wide .ob-tile { align-items: center; text-align: center; min-height: 48px; padding: 10px 8px; }
 .ob-tiles.six { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
 
+/* Wispr Flow import: what would come over. */
+.ob-wispr { margin: 4px 0 12px; padding-left: 18px; color: var(--fg-2); font-size: 13px; line-height: 1.55; }
+.ob-wispr b { color: var(--fg); font-weight: var(--fw-med); }
+
 /* Onboarding's speed slider: one speech model per stop, quicker to more accurate. */
 .ob-speed { width: 100%; margin: 6px 0 0; accent-color: var(--fg); }
 .ob-speed-ends { display: flex; justify-content: space-between; font-size: 12px; color: var(--fg-3); margin-top: 2px; }

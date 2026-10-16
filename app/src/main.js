@@ -869,6 +869,49 @@ window.addEventListener('focus', () => S && renderRecent()); // relative times m
 // ---------- language ----------
 const LANGS = [['auto', 'Auto-detect'], ['en', 'English'], ['hi', 'Hindi'], ['ar', 'Arabic'], ['bn', 'Bengali'], ['zh', 'Chinese'], ['nl', 'Dutch'], ['fr', 'French'], ['de', 'German'], ['gu', 'Gujarati'], ['id', 'Indonesian'], ['it', 'Italian'], ['ja', 'Japanese'], ['kn', 'Kannada'], ['ko', 'Korean'], ['ml', 'Malayalam'], ['mr', 'Marathi'], ['pa', 'Punjabi'], ['pl', 'Polish'], ['pt', 'Portuguese'], ['ru', 'Russian'], ['es', 'Spanish'], ['ta', 'Tamil'], ['te', 'Telugu'], ['tr', 'Turkish'], ['uk', 'Ukrainian'], ['ur', 'Urdu'], ['vi', 'Vietnamese']];
 
+// Wispr Flow import (onboarding's first question and Settings → Startup): what its data on this
+// Mac would bring over, read by the core (wispr.rs). null when Wispr Flow is not installed.
+let wispr = null;
+const talkLabel = k => $(`#talkKey option[value="${k}"]`)?.textContent ?? k;
+function wisprLines(f) {
+  const few = (a, n = 4) => a.slice(0, n).join(', ') + (a.length > n ? ` and ${a.length - n} more` : '');
+  return [
+    f.words.length && ['Dictionary', `${f.words.length} ${f.words.length === 1 ? 'word' : 'words'}: ${few(f.words)}`],
+    f.replacements.length && ['Snippets', few(f.replacements.map(r => `“${r.from}”`))],
+    f.languages.length && ['Languages', f.languages.map(langName).join(', ')],
+    f.app_styles.length && ['Styles', few(f.app_styles.map(a => `${a.style} in ${a.name}`), 3)],
+    f.talk_key && ['Talk key', `hold ${talkLabel(f.talk_key)} (quit Wispr Flow so only one listens)`],
+    [f.sounds != null && `sounds ${f.sounds ? 'on' : 'off'}`, f.autostart && 'open at login', f.look && `${f.look} look`].some(Boolean)
+      && ['Also', [f.sounds != null && `sounds ${f.sounds ? 'on' : 'off'}`, f.autostart && 'open at login', f.look && `${f.look} look`].filter(Boolean).join(', ')],
+  ].filter(Boolean);
+}
+async function wisprImport() {
+  const done = await invoke('wispr_import');
+  return done.length ? `Imported ${done.join(', ')}.` : 'Nothing new to import: it is all here already.';
+}
+function renderWispr() {
+  $('#wisprRow').hidden = !wispr;
+  if (wispr && !$('#wisprImport').disabled) $('#wisprDesc').textContent = wisprLines(wispr).map(([k, v]) => `${k}: ${v}`).join(' · ');
+}
+invoke('wispr_import_preview').then(f => { wispr = f || null; renderWispr(); }).catch(() => {});
+$('#wisprImport').addEventListener('click', async e => {
+  const b = e.currentTarget;
+  b.disabled = true;
+  try { $('#wisprDesc').textContent = await wisprImport(); } catch (err) { $('#wisprDesc').textContent = `Couldn't import: ${err}`; b.disabled = false; }
+});
+async function obWisprPick(v) {
+  ob.wispr = v;
+  obTilesRender();
+  const lede = $('#obWisprLede');
+  if (v !== 'yes') return (lede.textContent = 'Found on this Mac. Wispr Flow itself is not changed.');
+  lede.textContent = 'Importing…';
+  try {
+    lede.textContent = await wisprImport();
+    // The name question comes next: start it from the imported name once the save is back.
+    setTimeout(() => { if (!$('#obName').value) { $('#obName').value = S.display_name || ''; obHello(); } }, 400);
+  } catch (err) { lede.textContent = `Couldn't import: ${err}`; ob.wispr = ''; obTilesRender(); }
+}
+
 // Languages: detect any, or listen for up to 3 (each clip goes to the likeliest of them).
 const LANG_MAX = 3;
 const langName = c => LANGS.find(([v]) => v === c)?.[1] ?? c;
@@ -1277,7 +1320,7 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
 const local = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { return null; } };
 let obStep = 1, orb = null, obPoll = 0, obSeq = 0;
 const obT = {}; // timers by name
-const ob = { cleanHow: 'off', mic: null, heard: 0, checked: false, quiet: false, paused: false, ax: null, axSince: 0, asked: false, pressed: false, offerClick: false, watched: false, recAt: 0, secs: 0, hinglish: false, mine: false };
+const ob = { cleanHow: 'off', mic: null, heard: 0, checked: false, quiet: false, paused: false, ax: null, axSince: 0, asked: false, pressed: false, offerClick: false, watched: false, recAt: 0, secs: 0, hinglish: false, mine: false, wispr: '' };
 const later = (name, ms, fn) => { clearTimeout(obT[name]); obT[name] = setTimeout(fn, ms); };
 // Show something that appears within a step with a short rise.
 function pop(el, on = true) {
@@ -1682,7 +1725,7 @@ $('#obReset').addEventListener('click', async () => {
 // One question at a time (.ob-q). A tile saves as it's picked and stays on screen, so every
 // choice can be tried; Continue moves on. The pill's questions are macOS-only (data-only).
 let obQ = 0;
-const obQs = () => $$('.ob-q').filter(q => !q.dataset.only || (isMac && (q.dataset.only === 'mac' || S.show_in !== 'menubar')));
+const obQs = () => $$('.ob-q').filter(q => (q.dataset.q !== 'wispr' || !!wispr) && (!q.dataset.only || (isMac && (q.dataset.only === 'mac' || S.show_in !== 'menubar'))));
 function obPrefsRender() {
   $('#obName').value = S.display_name || '';
   obHello();
@@ -1694,6 +1737,7 @@ function obPrefsRender() {
     obLang('hinglish');
   }
   obLangRender();
+  if (wispr) $('#obWisprList').replaceChildren(...wisprLines(wispr).map(([k, v]) => h('li', {}, h('b', {}, `${k}: `), v)));
   renderObSpeed();
   obCleanRender();
   // Back from the recap lands on the last question.
@@ -1738,6 +1782,7 @@ function obTilesRender() {
     const on = t => key === 'ball_size' ? Math.abs(S.ball_size - obVal(t, key)) < 0.1
       : key ? S[key] === obVal(t, key)
       : q === 'lang' ? v(t) === (obMine() ? 'mine' : 'auto')
+      : q === 'wispr' ? v(t) === ob.wispr
       : q === 'clean' ? (v(t) === 'yes' ? obCleanOn() : !obCleanOn() && !S.cleanup.enabled)
       : v(t) === (S.sounds ? S.sound_pack : 'off'); // sound
     const ts = [...g.children];
@@ -1751,6 +1796,7 @@ function obPick(g, t) {
   const key = g.dataset.key, q = g.closest('.ob-q').dataset.q, v = obVal(t, key);
   if (key) { S[key] = v; save(); syncBound(); changed(key); }
   else if (q === 'lang') obLangPick(v);
+  else if (q === 'wispr') obWisprPick(v);
   else if (q === 'clean') obCleanPick(v === 'yes');
   else { // sound: tapping one plays it, again if it's already the one
     S.sounds = v !== 'off';
