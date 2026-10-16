@@ -33,9 +33,10 @@ pub const CLEANERS: &[Cleaner] = &[
     Cleaner { id: "echotype-medium", label: "Echotype Medium", file: "echotype-medium-q4_k_m.gguf", size_mb: 940, sha256: "944fa5a9221b7a1c0e8b8617392df071ef57323a64dc3e99f5a563e02ace6f37", note: "1.5B. Catches more; uses about twice the memory." },
 ];
 
-/// Where the cleaner files are served from (Cloudflare R2), `{DOWNLOAD_URL}/{file}`.
-// ponytail: None until the files are uploaded; the Models page says downloads are coming soon.
-pub const DOWNLOAD_URL: Option<&str> = None;
+/// Where the cleaner files are served from: the echotype-models Cloudflare R2 bucket (uploaded with
+/// app/scripts/r2-put.sh, beside Qwen's LICENSE and a NOTICE), `{DOWNLOAD_URL}/{file}`.
+// ponytail: the bucket's r2.dev address, which Cloudflare rate-limits; a custom domain for launch.
+pub const DOWNLOAD_URL: Option<&str> = Some("https://pub-da62fbe34de644598313554b0a5ccc51.r2.dev");
 
 pub fn find(id: &str) -> Option<&'static Cleaner> {
     CLEANERS.iter().find(|c| c.id == id)
@@ -592,5 +593,21 @@ mod tests {
         assert_ne!(first, second);
         stop();
         assert!(!kill("-0", second), "stop() ended the server");
+    }
+
+    /// The real download from the bucket into a scratch data folder: URL, SHA-256 and file name.
+    /// `cargo test -- --ignored downloads_a_cleaner` (401 MB).
+    #[test]
+    #[ignore]
+    fn downloads_a_cleaner_from_the_bucket() {
+        let dir = std::env::temp_dir().join(format!("echotype-dl-test-{}", std::process::id()));
+        // SAFETY: an ignored test run on its own; nothing else reads the environment meanwhile.
+        unsafe { std::env::set_var("ECHOTYPE_CONFIG_DIR", &dir) };
+        let mut seen = 0;
+        download("echotype-tiny", |d, _| seen = d).unwrap();
+        let c = find("echotype-tiny").unwrap();
+        assert!(installed(c) && model_path(c).starts_with(&dir), "{}", model_path(c).display());
+        assert_eq!(seen, 420_086_208);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
