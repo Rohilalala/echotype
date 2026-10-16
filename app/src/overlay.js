@@ -12,6 +12,11 @@ const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
 // `cur`: the last dictation state. `view`: what pill.rs says to show (idle ball or that state,
 // hover, near, the hint); null in the browser preview, where the state alone decides.
 let cur = { state: 'idle' }, view = null, muted = false;
+// Transcribing and cleanup usually finish in well under 200 ms: until then the pill goes back to
+// the ball, so a quick dictation goes listening → pasted without a flash of the thinking orb.
+const THINK_AFTER_MS = 200;
+const thinking = s => s === 'transcribing' || s === 'cleaning';
+let hush = null;
 // The guard's card (cur.cleaned): Copy cleaned was pressed, so the card says what is on the clipboard.
 let cleanedCopied = false;
 const PASTE = /Mac/.test(navigator.platform) ? '⌘V' : 'Ctrl+V';
@@ -33,7 +38,7 @@ function reason(w) {
 }
 
 function render() {
-  const active = cur.state !== 'idle' && (view ? view.active : true);
+  const active = cur.state !== 'idle' && (view ? view.active : true) && !(hush && thinking(cur.state));
   pill.classList.toggle('active', active);
   pill.classList.toggle('expand', !active && !!view?.expand);
   pill.classList.toggle('hover', !!view?.hover);
@@ -67,6 +72,13 @@ function render() {
 }
 
 listen('dictation-state', ({ payload: p }) => {
+  if (thinking(p.state) && !thinking(cur.state)) {
+    clearTimeout(hush);
+    hush = setTimeout(() => { hush = null; render(); }, THINK_AFTER_MS);
+  } else if (!thinking(p.state)) {
+    clearTimeout(hush);
+    hush = null;
+  }
   cur = p;
   // A new state shows at once; pill.rs confirms (or ends it) with its next `pill` event.
   if (view && p.state !== 'idle') view = { ...view, active: true };
