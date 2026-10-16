@@ -779,9 +779,10 @@ fn open(app: &AppHandle, title: Option<String>) -> Result<Meeting, String> {
     m.notices.extend(notice);
     *lock(&session.meeting) = m.clone();
     let stopped = Arc::new(AtomicBool::new(false));
+    let notes = capture.notes.clone();
     *lock(&LIVE) = Some(Live { id: id.clone(), started_ms, started, capture: Some(capture), stopped: stopped.clone(), meeting: session.meeting.clone() });
     let app2 = app.clone();
-    std::thread::spawn(move || run(app2, session, rx, stopped, system));
+    std::thread::spawn(move || run(app2, session, rx, stopped, system, notes));
     tick(app);
     crate::emit_state(app, crate::hint("Meeting notes on. Let everyone know this meeting is being transcribed.", None));
     emit(app, &id, "recording");
@@ -845,7 +846,7 @@ fn tick(app: &AppHandle) {
 }
 
 /// The worker: owns the session, so audio, transcription and saving happen in order.
-fn run(app: AppHandle, mut session: Session, rx: mpsc::Receiver<Piece>, stopped: Arc<AtomicBool>, system: bool) {
+fn run(app: AppHandle, mut session: Session, rx: mpsc::Receiver<Piece>, stopped: Arc<AtomicBool>, system: bool, notes: Arc<Mutex<Vec<String>>>) {
     /// However the worker ends, even by a panic, LIVE is cleared so a new meeting can start (the
     /// saved state then reads "interrupted") and the capture threads are told to stop.
     struct Done;
@@ -870,11 +871,16 @@ fn run(app: AppHandle, mut session: Session, rx: mpsc::Receiver<Piece>, stopped:
             Err(e) => note(session, format!("Other voices are labelled Others: the speaker models are not available ({e})")),
         }
     };
+    let capture_notes = |session: &Session| {
+        let new: Vec<String> = lock(&notes).drain(..).collect();
+        lock(&session.meeting).notices.extend(new);
+    };
     loop {
         if let Ok(r) = models.try_recv() {
             waiting = false;
             take_models(&mut session, r);
         }
+        capture_notes(&session);
         let piece = match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(p) => p,
             Err(mpsc::RecvTimeoutError::Timeout) if stopped.load(Ordering::SeqCst) => match rx.try_recv() {
@@ -888,6 +894,7 @@ fn run(app: AppHandle, mut session: Session, rx: mpsc::Receiver<Piece>, stopped:
             emit(&app, &id, "recording");
         }
     }
+    capture_notes(&session); // the capture threads have ended: their last notices are in
     lock(&session.meeting).state = "processing".into();
     emit(&app, &id, "processing");
     if waiting {

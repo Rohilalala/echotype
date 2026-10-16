@@ -607,7 +607,7 @@ pub fn transcribe_words(model: &Path, pcm: &[f32], languages: &[String], prompt:
 
 fn words_of(model: &Path, pcm: &[f32], languages: &[String], prompt: &str, vad: Option<&Path>, spans: Option<&[(f32, f32)]>) -> Result<Vec<Word>, String> {
     run_local(model, pcm, languages, false, prompt, true, false, vad, |state| {
-        let mut words: Vec<Word> = vec![];
+        let mut tokens: Vec<(Vec<u8>, f32, f32)> = vec![];
         for i in 0..state.full_n_segments() {
             let Some(seg) = state.get_segment(i) else { continue };
             let (t0, t1) = (seg.start_timestamp() as f32 / 100.0, seg.end_timestamp() as f32 / 100.0);
@@ -616,28 +616,37 @@ fn words_of(model: &Path, pcm: &[f32], languages: &[String], prompt: &str, vad: 
             }
             for j in 0..seg.n_tokens() {
                 let Some(tok) = seg.get_token(j) else { continue };
-                let text = tok.to_str_lossy().map_err(|e| e.to_string())?;
-                if text.starts_with("[_") || text.starts_with("<|") {
-                    continue; // [_BEG_], [_TT_123], <|endoftext|>
-                }
                 let d = tok.token_data();
-                let (t0, t1) = (d.t0 as f32 / 100.0, d.t1 as f32 / 100.0);
-                match words.last_mut() {
-                    Some(w) if !text.starts_with(' ') => {
-                        w.text.push_str(&text);
-                        w.end = w.end.max(t1);
-                    }
-                    _ => words.push(Word { start: t0, end: t1.max(t0), text: text.trim_start().to_string() }),
-                }
+                tokens.push((tok.to_bytes().map_err(|e| e.to_string())?.to_vec(), d.t0 as f32 / 100.0, d.t1 as f32 / 100.0));
             }
         }
-        // "[BLANK_AUDIO]" and "[Music]" arrive as ordinary tokens; a lone "." or "-" is noise.
-        words.retain_mut(|w| {
-            w.text = clean_text(&w.text);
-            w.text.chars().any(char::is_alphanumeric)
-        });
-        Ok(words)
+        Ok(join_tokens(&tokens))
     })
+}
+
+/// Whisper tokens (bytes, start, end) → words: a token starting with a space starts a word. A
+/// word's bytes are decoded together, since one Devanagari or emoji character can span two tokens
+/// (decoding each token alone turned Hindi into "��हा��").
+fn join_tokens(tokens: &[(Vec<u8>, f32, f32)]) -> Vec<Word> {
+    let mut words: Vec<(Word, Vec<u8>)> = vec![];
+    for (bytes, t0, t1) in tokens {
+        if bytes.starts_with(b"[_") || bytes.starts_with(b"<|") {
+            continue; // [_BEG_], [_TT_123], <|endoftext|>
+        }
+        match words.last_mut() {
+            Some((w, b)) if !bytes.starts_with(b" ") => {
+                b.extend_from_slice(bytes);
+                w.end = w.end.max(*t1);
+            }
+            _ => words.push((Word { start: *t0, end: t1.max(*t0), text: String::new() }, bytes.clone())),
+        }
+    }
+    // "[BLANK_AUDIO]" and "[Music]" arrive as ordinary tokens; a lone "." or "-" is noise.
+    words
+        .into_iter()
+        .map(|(w, b)| Word { text: clean_text(String::from_utf8_lossy(&b).trim_start()), ..w })
+        .filter(|w| w.text.chars().any(char::is_alphanumeric))
+        .collect()
 }
 
 /// whisper tiny (multilingual, Q5_1, 32 MB), only to pick the language before turbo transcribes
@@ -989,6 +998,15 @@ mod tests {
         let text = transcribe_local(Path::new(&model), &pcm, &mine, false, "", None).unwrap();
         eprintln!("en+hi: {text}");
         assert!(text.chars().any(|c| ('\u{0900}'..='\u{097F}').contains(&c)), "Devanagari expected: {text:?}");
+    }
+
+    #[test]
+    fn a_character_split_across_tokens_stays_whole() {
+        let ha = "हाँ".as_bytes(); // 9 bytes: whisper can cut it mid-character
+        let toks = vec![(b" ".iter().chain(&ha[..4]).copied().collect::<Vec<u8>>(), 0.0, 0.2), (ha[4..].to_vec(), 0.2, 0.4), (b" ok".to_vec(), 0.5, 0.7), (b"[_TT_50]".to_vec(), 0.7, 0.7)];
+        let w = join_tokens(&toks);
+        assert_eq!(w.iter().map(|w| w.text.as_str()).collect::<Vec<_>>(), ["हाँ", "ok"]);
+        assert_eq!((w[0].start, w[0].end), (0.0, 0.4));
     }
 
     #[test]
