@@ -67,6 +67,7 @@ const COMMANDS: &[&str] = &[
     "meeting_delete",
     "meeting_export",
     "meeting_save",
+    "meeting_summarize",
 ];
 
 fn main() {

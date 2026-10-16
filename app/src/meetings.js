@@ -6,6 +6,7 @@ let open = null; // the meeting being viewed
 let editing = null; // speaker id being renamed
 let confirmDelete = false, startError = '', timer, starting = false, draftTitle = '';
 let exportsOf = null; // { id, md, txt }, fetched with the meeting so Copy runs inside the click
+let summarizing = null, summaryError = ''; // the meeting whose Pro summary is being written
 
 const clock = s => {
   s = Math.max(0, Math.floor(s));
@@ -53,8 +54,11 @@ async function refresh() {
 function render() {
   clearInterval(timer);
   if (live()) timer = setInterval(tick, 1000);
-  const root = $('#meetings');
+  const root = $('#meetings'), main = $('#main');
+  // Live: keep following the conversation unless the reader has scrolled up.
+  const follow = open && live()?.id === open.id && main.scrollHeight - main.scrollTop - main.clientHeight < 120;
   root.replaceChildren(...(open ? viewMeeting(open) : viewList()).filter(k => k != null && k !== false && k !== ''));
+  if (follow) main.scrollTop = main.scrollHeight;
 }
 
 function tick() {
@@ -127,7 +131,16 @@ async function openMeeting(id) {
   editing = null; confirmDelete = false; startError = '';
   try { await load(id); } catch (e) { startError = String(e); open = null; await refresh(); }
   render();
-  $('#main').scrollTop = 0;
+  $('#main').scrollTop = live()?.id === id ? $('#main').scrollHeight : 0;
+}
+
+async function summarize(id) {
+  summarizing = id; summaryError = '';
+  render();
+  try { await invoke('meeting_summarize', { id }); if (open?.id === id) await load(id); }
+  catch (e) { summaryError = String(e); }
+  summarizing = null;
+  render();
 }
 
 // ---------- one meeting ----------
@@ -167,6 +180,31 @@ function summary(md) {
   return h('div', { className: 'summary text' }, out);
 }
 
+// Echotype Pro: notes on request once the meeting is written up; free builds say it's coming.
+function summaryCard(m) {
+  if (m.summary) return summary(m.summary);
+  if (m.state !== 'done' || !m.segments.length) return null;
+  const busy = summarizing === m.id;
+  const desc = !status.summaries ? 'A summary, decisions and action items from this meeting. Coming soon with Echotype Pro.'
+    : busy ? 'Writing the summary…' : 'A summary, decisions and action items from this meeting.';
+  return h('div', { className: 'group summary-card' }, h('div', { className: 'row' },
+    h('span', { className: 'row-text' },
+      h('span', { className: 'row-title' }, 'Summary ', h('span', { className: 'tag' }, 'Pro')),
+      h('span', { className: 'row-desc' }, desc),
+      summaryError && !busy && h('span', { className: 'row-desc error', role: 'alert' }, summaryError)),
+    status.summaries && h('button', { className: 'btn', type: 'button', disabled: busy, onclick: () => summarize(m.id) }, busy ? 'Writing…' : 'Summarize')));
+}
+
+// Consecutive lines by one speaker form a turn: their name once, then each line as a bubble.
+function turns(segments) {
+  const out = [];
+  for (const s of segments) {
+    if (out.at(-1)?.speaker === s.speaker) out.at(-1).lines.push(s.text);
+    else out.push({ speaker: s.speaker, start: s.start, lines: [s.text] });
+  }
+  return out;
+}
+
 function viewMeeting(m) {
   const isLive = live()?.id === m.id;
   const ids = Object.keys(m.speakers).filter(id => m.segments.some(s => s.speaker === id));
@@ -191,8 +229,8 @@ function viewMeeting(m) {
     h('p', { className: 'meeting-meta' }, meta),
     ...m.notices.map(n => h('p', { className: 'note' }, n)),
     startError && h('p', { className: 'note warn', role: 'alert' }, startError),
-    m.state === 'processing' && h('p', { className: 'note working' }, 'Telling speakers apart and writing the summary'),
-    m.summary && summary(m.summary),
+    m.state === 'processing' && h('p', { className: 'note working' }, 'Telling speakers apart'),
+    summaryCard(m),
     exportsOf?.id === m.id && h('div', { className: 'export' },
       btn('Copy Markdown', b => copyText(exportsOf.md, b)),
       btn('Copy text', b => copyText(exportsOf.txt, b)),
@@ -200,10 +238,9 @@ function viewMeeting(m) {
       btn('Save .txt', save('txt'))),
     ids.length > 0 && h('div', { className: 'speakers' }, h('span', { className: 'speakers-label' }, 'Speakers'), ids.map(id => speakerChip(m, id))),
     h('div', { className: 'transcript text', 'aria-live': isLive ? 'polite' : null },
-      m.segments.length ? m.segments.map(s => h('div', { className: 'line' },
-        h('time', {}, clock(s.start)),
-        h('span', { className: 'who' }, dot(s.speaker), name(m, s.speaker)),
-        h('span', { className: 'said' }, s.text)))
-        : h('p', { className: 'empty' }, isLive ? 'Listening. The first lines appear about 25 seconds in.' : 'Nothing was said.')),
+      m.segments.length ? turns(m.segments).map(t => h('div', { className: 'turn' },
+        h('span', { className: 'who' }, dot(t.speaker), name(m, t.speaker), h('time', {}, clock(t.start))),
+        t.lines.map(text => h('p', { className: 'said' }, text))))
+        : h('p', { className: 'empty' }, isLive ? 'Listening. Lines show up a few seconds after each pause.' : 'Nothing was said.')),
   ];
 }

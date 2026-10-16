@@ -250,7 +250,7 @@ const sampleSegments = [
 const doneMeeting = {
   id: '2026-10-14-083000-launch-review', title: 'Launch review', started_ms: now - 26 * 3600000, duration_s: 2873, state: 'done',
   speakers: { you: 'You', s1: 'Priya', s2: 'Speaker 2' }, segments: sampleSegments, notices: [],
-  summary: '## Summary\nThe beta went out last week and the crash rate dropped. Testers liked onboarding but found the permissions screen confusing.\n## Decisions\n- Ship next month if the new permissions screen is ready.\n## Action items\n- Speaker 2: redesign the permissions screen and share a draft by Thursday.\n- Priya: update the release notes and send them to marketing tomorrow.',
+  summary: q.has('nosummary') ? null : '## Summary\nThe beta went out last week and the crash rate dropped. Testers liked onboarding but found the permissions screen confusing.\n## Decisions\n- Ship next month if the new permissions screen is ready.\n## Action items\n- Speaker 2: redesign the permissions screen and share a draft by Thursday.\n- Priya: update the release notes and send them to marketing tomorrow.',
 };
 const liveMeeting = {
   id: '2026-10-15-091500-design-sync', title: 'Design sync', started_ms: now - 754000, duration_s: 754, state: 'recording',
@@ -260,7 +260,14 @@ let meetingList = mq === 'empty' ? [] : mq === 'live' ? [liveMeeting, doneMeetin
   { id: '2026-10-12-140000-hiring-loop', title: 'Hiring loop debrief', started_ms: now - 3 * 86400000, duration_s: 1520, state: 'done', speakers: {}, segments: [], notices: [], summary: null },
   { id: '2026-10-10-100000-meeting', title: 'Meeting', started_ms: now - 5 * 86400000, duration_s: 312, state: 'interrupted', speakers: {}, segments: [], notices: [], summary: null }];
 Object.assign(commands, {
-  meeting_status: () => ({ live: mq === 'live' ? { id: liveMeeting.id, started_ms: liveMeeting.started_ms, recording: true } : null, computer_audio: !q.has('miconly'), speakers: !q.has('miconly'), screen_recording: !q.has('noscreen'), download_mb: mq === 'empty' ? 36 : 0 }),
+  meeting_status: () => ({ live: mq === 'live' ? { id: liveMeeting.id, started_ms: liveMeeting.started_ms, recording: true } : null, computer_audio: !q.has('miconly'), speakers: !q.has('miconly'), screen_recording: !q.has('noscreen'), download_mb: mq === 'empty' ? 36 : 0, summaries: q.has('cloud') }),
+  meeting_summarize: async ({ id }) => {
+    if (!q.has('cloud')) throw 'Meeting summaries are coming with Echotype Pro.';
+    await new Promise(r => setTimeout(r, 600));
+    const m = meetingList.find(x => x.id === id);
+    m.summary = '## Summary\nSample notes from the preview.\n## Decisions\nNone recorded.\n## Action items\nNone recorded.';
+    return structuredClone(m);
+  },
   meeting_list: () => meetingList.map(m => ({ ...m, segments: [], summary: null })),
   meeting_get: ({ id }) => structuredClone(meetingList.find(m => m.id === id)),
   meeting_start: () => { throw 'Browser preview: meetings are not recorded here.'; },

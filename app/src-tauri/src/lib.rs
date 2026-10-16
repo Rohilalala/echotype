@@ -1922,6 +1922,7 @@ pub fn run() {
             meeting::meeting_delete,
             meeting::meeting_export,
             meeting::meeting_save,
+            meeting::meeting_summarize,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Echotype");

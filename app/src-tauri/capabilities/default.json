@@ -69,6 +69,7 @@
     "allow-meeting-rename-speaker",
     "allow-meeting-delete",
     "allow-meeting-export",
-    "allow-meeting-save"
+    "allow-meeting-save",
+    "allow-meeting-summarize"
   ]
 }
