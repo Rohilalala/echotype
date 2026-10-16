@@ -629,6 +629,13 @@ fn choose<'a>(list: &'a [Screen], cursor: Option<(f64, f64)>, follow: bool, home
     cursor.and_then(|c| list.iter().find(|m| m.rect.contains(c))).or_else(|| if placed { None } else { primary() })
 }
 
+/// Whether the pill may move to the cursor's display now: always when hidden, and on screen too
+/// (listening, thinking, Pasted) unless a card with buttons is up or the hover hint is out, which
+/// would jump away from the pointer about to click them.
+fn follows_now(shown: bool, card: bool, expanded: bool) -> bool {
+    !shown || (!card && !expanded)
+}
+
 /// The cursor in global points, or None if the OS won't say.
 pub(crate) fn cursor_now(app: &AppHandle) -> Option<(f64, f64)> {
     let primary = app.primary_monitor().ok().flatten().map_or(1.0, |m| m.scale_factor());
@@ -813,11 +820,12 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
                         }
                     }
                 } else if let Some(t) = target {
-                    // F4: follow the cursor's display while idle; a recording or notice stays put.
+                    // F4: follow the cursor's display, dictating included (the orb goes where the user
+                    // is looking); a card with buttons or the hover hint stays under the cursor.
                     // A new saved place for this display (a drop, a double-click) applies at once.
                     let saved = if cfg!(target_os = "macos") { s.pill_positions.get(&t.key).copied() } else { None };
                     let other = placed_on != Some(t.work);
-                    if (other && (!shown || (!active && !expanded))) || (!other && saved != placed_saved) {
+                    if (other && follows_now(shown, card, expanded)) || (!other && saved != placed_saved) {
                         if dock.is_none_or(|(t, _)| now.duration_since(t) > Duration::from_secs(60)) {
                             dock = Some((now, read_dock()));
                         }
@@ -1303,6 +1311,14 @@ mod tests {
         s.pill_positions.remove("Bimawen-16");
         assert_eq!(spot(portrait, s.pill_positions.get("Bimawen-16").copied(), 0.0), place(portrait, 0.0));
         assert_eq!(spot(laptop, s.pill_positions.get("Built-in Retina Display").copied(), 0.0), clamp(laptop, (0.1 * (1512.0 - win().0), 25.0 + 0.1 * (957.0 - win().1))));
+    }
+
+    #[test]
+    fn a_dictating_orb_follows_the_cursor_but_a_card_stays_put() {
+        assert!(follows_now(false, false, false), "hidden: always");
+        assert!(follows_now(true, false, false), "listening or thinking on screen: moves with the cursor");
+        assert!(!follows_now(true, true, false), "a card's buttons stay under the pointer");
+        assert!(!follows_now(true, false, true), "the hover hint too");
     }
 
     #[test]
