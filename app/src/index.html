@@ -14,7 +14,7 @@
   <aside class="sidebar" data-tauri-drag-region="deep">
     <nav aria-label="Sections" id="nav">
       <button data-page="home"><svg viewBox="0 0 16 16"><path d="M2.5 7.2 8 2.5l5.5 4.7V13a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1Z"/><path d="M6.3 14v-3.6h3.4V14"/></svg>Home</button>
-      <button data-page="speech"><svg viewBox="0 0 16 16"><path d="M2.5 6.5v3M5.25 4v8M8 2v12M10.75 5v6M13.5 7v2"/></svg>Speech model</button>
+      <button data-page="speech"><svg viewBox="0 0 16 16"><path d="M2.5 6.5v3M5.25 4v8M8 2v12M10.75 5v6M13.5 7v2"/></svg>Models</button>
       <button data-page="cleanup"><svg viewBox="0 0 16 16"><path d="M10.4 2.6l3 3L6 13H3v-3z"/><path d="M8.6 4.4l3 3"/></svg>Cleanup</button>
       <button data-page="language"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.75"/><ellipse cx="8" cy="8" rx="2.4" ry="5.75"/><path d="M2.4 8h11.2"/></svg>Language</button>
       <button data-page="dictionary"><svg viewBox="0 0 16 16"><path d="M3 12V4a1.5 1.5 0 0 1 1.5-1.5H13v9H4.5A1.5 1.5 0 0 0 3 13a1.5 1.5 0 0 0 1.5 1.5H13"/></svg>Dictionary</button>
@@ -81,15 +81,15 @@
 
     <!-- Speech model -->
     <section data-page="speech" hidden>
-      <h1>Speech model</h1>
-      <p class="lede">Turns your voice into text. A local model runs on this Mac and nothing leaves it; a service gets your audio to transcribe it.</p>
+      <h1>Models</h1>
+      <p class="lede">A speech model turns your voice into text; a cleanup model tidies it. Local models run on this Mac and nothing leaves it.</p>
+      <h2 class="group-title">Speech models</h2>
       <div class="seg" id="sttProvider" role="radiogroup" aria-label="Speech provider"></div>
 
       <div id="sttLocal">
         <div class="group" id="sttAuto"></div>
         <p class="memline" id="memline"></p>
         <div class="list" id="modelList"></div>
-        <p class="note">More models coming soon.</p>
       </div>
 
       <div id="sttRemote" class="group" hidden>
@@ -105,6 +105,11 @@
         <p class="lede small">Free includes 2,000 words a week. Pro has unlimited words for $6 a month or $60 a year. Echotype Cloud keeps word and audio-time counts, not your audio or text.</p>
         <div class="group elev" id="cloudAccount"></div>
       </div>
+
+      <h2 class="group-title">Cleanup models</h2>
+      <p class="lede small">Echotype's own cleanup models, run on this Mac. To use one, pick Echotype model under Cleanup.</p>
+      <div class="list" id="cleanerList"></div>
+      <p class="note">More models coming soon.</p>
     </section>
 
     <!-- Cleanup -->

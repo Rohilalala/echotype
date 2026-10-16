@@ -483,8 +483,7 @@ function setProvider(kind, id) {
   const p = preset(id), cfg = S[kind];
   cfg.provider = id;
   if (id !== 'custom') cfg.base_url = ''; // presets carry their own URL
-  const def = p?.[kind === 'stt' ? 'default_stt_model' : 'default_cleanup_model'];
-  if (def) cfg.model = def;
+  cfg.model = ''; // the user names the model; the preset's shows as a faded example
   save();
   if (kind === 'stt') renderStt(); else fillRemote('cleanup');
   renderLangNote();
@@ -505,7 +504,8 @@ function fillRemote(kind) {
   if (kind === 'cleanup') renderCleaner();
   const model = $(`#${kind}Model`);
   model.value = cfg.model;
-  model.placeholder = p?.[kind === 'stt' ? 'default_stt_model' : 'default_cleanup_model'] || 'model name';
+  const example = p?.[kind === 'stt' ? 'default_stt_model' : 'default_cleanup_model'];
+  model.placeholder = example ? `e.g. ${example}` : 'Model name';
   renderKey(kind);
 }
 for (const kind of ['stt', 'cleanup']) {
@@ -638,7 +638,39 @@ function renderAuto() {
     h('span', { className: 'actions' }, action)));
 }
 
+// Models → Cleanup models: Echotype's cleaners, downloadable once they are hosted (llm::DOWNLOAD_URL).
+// The one in use mirrors llm::cleaner: the manual pick with advanced settings on, else Automatic's.
+function cleanerRow(c) {
+  const list = sys?.cleaners ?? [];
+  const current = (S.advanced && list.find(x => x.id === S.cleanup.model)) || list.find(x => x.automatic);
+  const inUse = S.cleanup.enabled && S.cleanup.provider === 'echotype' && current?.id === c.id;
+  const p = progress[c.id], err = modelErr[c.id];
+  const use = () => { S.cleanup.enabled = true; setProvider('cleanup', 'echotype'); S.cleanup.model = c.id; syncBound(); save(); renderModels(); renderRaw(); };
+  const del = h('button', { className: 'btn quiet danger', type: 'button' }, 'Delete');
+  del.onclick = async () => {
+    if (!del.dataset.armed) { del.dataset.armed = 1; del.textContent = 'Click again to delete'; return setTimeout(() => { del.textContent = 'Delete'; delete del.dataset.armed; }, 3000); }
+    try { await invoke('delete_model', { id: c.id }); } catch (e) { modelErr[c.id] = String(e); }
+    await refreshModels();
+  };
+  const actions = p != null ? [h('span', { className: 'pct', 'data-pct': c.id }, `${Math.round(p * 100)}%`),
+      h('span', { className: 'ring', role: 'progressbar', 'aria-label': `Downloading ${c.label}`, 'aria-valuenow': Math.round(p * 100), 'data-progress': c.id, style: `--p:${p}` })]
+    : !c.installed ? [c.downloadable ? h('button', { className: err ? 'btn' : 'round', type: 'button', title: 'Download', 'aria-label': `Download ${c.label}, ${fmtMB(c.size_mb)}`, onclick: () => download(c.id) }, err ? 'Retry' : svg(DOWN))
+      : h('span', { className: 'tag' }, 'Download coming soon')]
+    : inUse ? [h('span', { className: 'in-use' }, svg(CHECK), 'In use')]
+    : [S.advanced && h('button', { className: 'btn', type: 'button', onclick: use }, 'Use'), del];
+  return h('div', { className: 'row model' },
+    h('span', { className: 'tile', 'aria-hidden': 'true' }, svg(WAVE)),
+    h('span', { className: 'row-text' },
+      h('span', { className: 'model-name' }, c.label, c.automatic && h('span', { className: 'tag rec' }, 'Recommended')),
+      h('span', { className: 'row-desc' }, c.note),
+      h('span', { className: 'model-meta' }, h('span', {}, fmtMB(c.size_mb)), h('span', {}, `about ${fmtMB(c.ram_mb)} RAM`)),
+      c.warning && h('span', { className: 'row-desc warn' }, c.warning),
+      err && h('span', { className: 'row-desc error', role: 'alert' }, err)),
+    h('span', { className: 'actions' }, actions));
+}
+
 function renderModels() {
+  $('#cleanerList').replaceChildren(...(sys?.cleaners ?? []).map(cleanerRow));
   renderAuto();
   $('#memline').hidden = $('#modelList').hidden = !S.advanced;
   $('#memline').replaceChildren('Free memory now ', h('b', {}, `${sys.available_ram_gb.toFixed(1)} GB`), ` of ${Math.round(sys.total_ram_gb)} GB. A model fits when it leaves 2 GB for everything else.`);
@@ -960,7 +992,10 @@ $('#langAuto').addEventListener('change', e => {
   changed('languages');
 });
 
+// Translating needs a model that can; none of the offered local ones does yet (more coming).
+const canTranslate = () => S.stt.provider !== 'local' || models.some(m => m.translates);
 function renderLangNote() {
+  $('[data-bind="translate_to_english"]').closest('.row').hidden = !canTranslate();
   const note = $('#translateNote');
   const m = sttModel();
   note.hidden = !(S.translate_to_english && S.stt.provider === 'local' && m && !m.translates);
@@ -1736,7 +1771,7 @@ $('#obReset').addEventListener('click', async () => {
 // One question at a time (.ob-q). A tile saves as it's picked and stays on screen, so every
 // choice can be tried; Continue moves on. The pill's questions are macOS-only (data-only).
 let obQ = 0;
-const obQs = () => $$('.ob-q').filter(q => (q.dataset.q !== 'wispr' || !!wispr) && (!q.dataset.only || (isMac && (q.dataset.only === 'mac' || S.show_in !== 'menubar'))));
+const obQs = () => $$('.ob-q').filter(q => (q.dataset.q !== 'wispr' || !!wispr) && (!q.dataset.only || (isMac && (q.dataset.only === 'mac' || S.show_in !== 'menubar'))) && (q.dataset.q !== 'speed' || obSpeedModels().length > 1)); // one model: nothing to choose
 function obPrefsRender() {
   $('#obName').value = S.display_name || '';
   obHello();
@@ -1889,7 +1924,7 @@ function obLangRender() {
   obTilesRender();
   $('#obLangChips').hidden = !obMine();
   if (obMine()) langChips($('#obLangChips'), OB_LANGS);
-  $('#obHinglishRow').hidden = !S.languages.includes('hi');
+  $('#obHinglishRow').hidden = !S.languages.includes('hi') || !obHinglishModel();
   $('#obHinglish').checked = obHinglishOn();
   const m = obHinglishModel();
   $('#obLangDesc').classList.toggle('warn', langFull);
@@ -1994,7 +2029,7 @@ const obWanted = () => (S.advanced ? models.find(m => m.id === S.stt.local_model
 
 // The speed slider: the speech models from quickest to most accurate. Nothing is disabled; each
 // stop says whether this Mac can run it.
-const OB_SPEED = ['small', 'large-v3-turbo-q5_0'];
+const OB_SPEED = ['large-v3-turbo-q5_0'];
 const obSpeedModels = () => OB_SPEED.map(id => models.find(m => m.id === id)).filter(Boolean);
 const gb = mb => `${(mb / 1024).toFixed(1).replace(/\.0$/, '')} GB`;
 function obSpeedFit(m) {
