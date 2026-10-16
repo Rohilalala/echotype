@@ -154,13 +154,13 @@ function go(page) {
   if (page === 'history') renderHistory();
   if (page === 'meetings') meetingsPage.show();
   if (page === 'settings') { refreshPerms(); refreshApi(); refreshStatus(); }
-  if (page === 'speech' || page === 'cleanup') refreshCloud();
+  if (page === 'account' || page === 'cleanup') refreshCloud(); // the account box moved to Account
   if (page === 'cleanup') refreshLastApp();
   history.replaceState(null, '', '#' + page);
   document.dispatchEvent(new CustomEvent('echotype:page', { detail: page })); // stats.js refreshes on its page
   window.__TAURI__.event.emit?.('main-page', page); // Home shows the live state, so the pill steps aside there (D14)
 }
-$('#nav').addEventListener('click', e => { const b = e.target.closest('button'); if (b) go(b.dataset.page); });
+for (const n of ['#nav', '#navFoot']) $(n).addEventListener('click', e => { const b = e.target.closest('button'); if (b) go(b.dataset.page); });
 $('#nav').addEventListener('keydown', e => {
   if (!['ArrowDown', 'ArrowUp'].includes(e.key)) return;
   const bs = $$('nav button'), i = bs.indexOf(document.activeElement);
@@ -311,6 +311,7 @@ const ACTIONS = {
   cleanup: ['Open Cleanup', () => go('cleanup')],
   automatic: ['Switch to automatic', () => { S.advanced = false; syncBound(); save(); changed('advanced'); }],
   settings: ['Open Settings', () => go('settings')],
+  update: ['Update', () => { go('account'); checkUpdate(); }],
 };
 const actionBtn = kind => ACTIONS[kind] && h('button', { className: 'btn', type: 'button', onclick: ACTIONS[kind][1] }, ACTIONS[kind][0]);
 let muted = false;
@@ -1293,7 +1294,39 @@ function showOnboarding(on) {
   document.documentElement.classList.toggle('ob-on', on);
 }
 
-// Settings → Startup → Updates: check GitHub Releases, then install and restart on request.
+// ---------- notices and retired versions (notices.rs, app.json in the models bucket) ----------
+let notices = { notices: [], blocked: false };
+async function refreshNotices() {
+  notices = await invoke('app_notices').catch(() => notices);
+  renderNotice();
+}
+// One notice at a time above Account and Settings: its button and a ✕ that dismisses it for good.
+function renderNotice() {
+  const box = $('#sideNotice');
+  const n = (notices.notices || []).find(x => !S.dismissed.includes(`notice:${x.id}`));
+  $('#retired').hidden = !notices.blocked;
+  box.hidden = !n;
+  if (!n) return box.replaceChildren();
+  box.replaceChildren(
+    h('button', { className: 'icon-btn notice-x', type: 'button', 'aria-label': `Dismiss: ${n.title}`, onclick: () => { dismiss(`notice:${n.id}`); renderNotice(); } }, svg(CROSS)),
+    h('b', {}, n.title),
+    n.body && h('p', {}, n.body),
+    n.action_label && n.action && h('button', { className: 'btn', type: 'button', onclick: () => noticeAction(n.action) }, n.action_label));
+}
+// "update", "page:<page>" or an https link; anything else does nothing.
+function noticeAction(a) {
+  if (a === 'update') return ACTIONS.update[1]();
+  if (a.startsWith('page:')) return go(a.slice(5));
+  if (/^https:\/\//.test(a)) invoke('plugin:opener|open_url', { url: a }).catch(() => {});
+}
+listen('notices', refreshNotices);
+$('#retiredUpdate').addEventListener('click', async e => {
+  e.target.disabled = true; $('#retiredText').textContent = 'Downloading the update…';
+  try { await invoke('install_update'); }
+  catch (err) { $('#retiredText').textContent = String(err); e.target.disabled = false; }
+});
+
+// Account → Version → Updates: check GitHub Releases, then install and restart on request.
 async function checkUpdate() {
   const desc = $('#updateDesc'), btn = $('#checkUpdate');
   btn.disabled = true; desc.textContent = 'Checking…'; desc.classList.remove('error');
@@ -2233,6 +2266,7 @@ syncBound();
 renderAll();
 renderRecent();
 refreshCloud();
+refreshNotices();
 renderMics();
 refreshPerms();
 refreshStatus();

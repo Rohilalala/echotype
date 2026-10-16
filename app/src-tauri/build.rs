@@ -34,6 +34,7 @@ const COMMANDS: &[&str] = &[
     "last_app",
     "check_update",
     "install_update",
+    "app_notices",
     "mic_check",
     "play_sound",
     "reset_accessibility",
