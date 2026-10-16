@@ -42,9 +42,24 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev libxdo-dev libssl-dev cmake clang
+      # Whisper's CPU code for any AVX2 PC, not just the build machine's CPU (cross builds already are).
+      - name: Portable CPU build
+        if: runner.os != 'macOS'
+        shell: bash
+        run: echo GGML_NATIVE=OFF >> "$GITHUB_ENV"
+      - name: Vulkan SDK, for the Windows GPU build (and Lavapipe, a software GPU for the smoke test)
+        if: runner.os == 'Windows'
+        uses: jakoch/install-vulkan-sdk-action@37effcfa045411f8bfbbda26df2fd1b3bf3436fa # v1.6.0
+        with:
+          vulkan_version: 1.4.341.1
+          install_runtime: true
+          install_lavapipe: false
+          cache: true
       - name: llama-server sidecar for the built-in cleanup model
-        if: runner.os == 'macOS'
-        run: app/scripts/build-llama-server.sh "${ARGS#--target }"
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          case "$ARGS" in --target*) app/scripts/build-llama-server.sh "${ARGS#--target }" ;; *) app/scripts/build-llama-server.sh ;; esac
         env:
           ARGS: ${{ matrix.args }}
       - run: npm ci
@@ -89,10 +104,35 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev libxdo-dev libssl-dev cmake clang
+      # Whisper's CPU code for any AVX2 PC, not just the build machine's CPU (cross builds already are).
+      - name: Portable CPU build
+        if: runner.os != 'macOS'
+        shell: bash
+        run: echo GGML_NATIVE=OFF >> "$GITHUB_ENV"
+      - name: Vulkan SDK, for the Windows GPU build (and Lavapipe, a software GPU for the smoke test)
+        if: runner.os == 'Windows'
+        uses: jakoch/install-vulkan-sdk-action@37effcfa045411f8bfbbda26df2fd1b3bf3436fa # v1.6.0
+        with:
+          vulkan_version: 1.4.341.1
+          install_runtime: true
+          install_lavapipe: false
+          cache: true
+      - name: llama-server sidecar for the built-in cleanup model
+        if: runner.os == 'Windows'
+        shell: bash
+        run: app/scripts/build-llama-server.sh
       - run: npm ci
         working-directory: app
       - run: npm run tauri build -- ${{ matrix.args }}
         working-directory: app
+      - name: The installer puts the cleanup runner and the Vulkan loader next to Echotype.exe
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cmd //c start //wait "" "$(cygpath -w app/src-tauri/target/release/bundle/nsis/*.exe)" /S
+          dir="$(cygpath -u "$LOCALAPPDATA")/Echotype"
+          ls "$dir"
+          test -f "$dir/llama-server.exe" && test -f "$dir/vulkan-1.dll"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: echotype-${{ matrix.name }}

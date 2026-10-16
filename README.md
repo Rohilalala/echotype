@@ -79,7 +79,7 @@ scripts/build-llama-server.sh    # Mac only: the runner for Echotype's cleanup m
 npm run tauri build
 ```
 
-Needs Rust, CMake and Node 20+, and macOS 13 or later on a Mac. `build-llama-server.sh` builds a pinned llama.cpp release (MIT) into `src-tauri/binaries/`, which the Mac build bundles. Transcribe a file without opening the window:
+Needs Rust, CMake and Node 20+, and macOS 13 or later on a Mac. `build-llama-server.sh` builds a pinned llama.cpp release (MIT) into `src-tauri/binaries/`, which the Mac and Windows builds bundle. On Windows it runs from Git Bash and needs Visual Studio and the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home); speech and cleanup then use the GPU through Vulkan (NVIDIA, AMD or Intel), or the CPU when there is none. Transcribe a file without opening the window:
 
 ```sh
 echotype --transcribe note.opus

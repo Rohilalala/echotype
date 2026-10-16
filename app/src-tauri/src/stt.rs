@@ -991,6 +991,25 @@ mod tests {
         assert!(text.chars().any(|c| ('\u{0900}'..='\u{097F}').contains(&c)), "Devanagari expected: {text:?}");
     }
 
+    /// CI on Windows: speech works with no GPU (on the CPU) and on a Vulkan device (Lavapipe stands
+    /// in for one there). ECHOTYPE_TEST_TINY is a ggml tiny model; ECHOTYPE_TEST_VULKAN=1 expects a device.
+    #[test]
+    #[ignore]
+    fn transcribes_the_jfk_sample() {
+        let Ok(model) = std::env::var("ECHOTYPE_TEST_TINY") else { return eprintln!("skipped") };
+        #[cfg(windows)]
+        if std::env::var("ECHOTYPE_TEST_VULKAN").is_ok() {
+            let gpus: Vec<String> = whisper_rs::vulkan::list_devices().into_iter().map(|d| d.name).collect();
+            eprintln!("vulkan devices: {gpus:?}");
+            assert!(!gpus.is_empty(), "a Vulkan device");
+        }
+        let wav = concat!(env!("CARGO_MANIFEST_DIR"), "/vendor/whisper-rs-sys/whisper.cpp/samples/jfk.wav");
+        let pcm = crate::audio::decode(std::fs::read(wav).unwrap(), Some("wav")).unwrap();
+        let text = transcribe_local(Path::new(&model), &pcm, &["en".to_string()], false, "", None).unwrap();
+        eprintln!("{text}");
+        assert!(text.to_lowercase().contains("ask not what your country"), "{text}");
+    }
+
     #[test]
     fn a_cancelled_download_stops_once() {
         let dest = models_dir().join("ggml-cancel-test.bin");

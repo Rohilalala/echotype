@@ -32,7 +32,33 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev libxdo-dev libssl-dev cmake clang
-      - name: llama-server sidecar (macOS bundles it, so the build needs it)
-        if: runner.os == 'macOS'
+      - name: Vulkan SDK, for the Windows GPU build (and Lavapipe, a software GPU for the smoke test)
+        if: runner.os == 'Windows'
+        uses: jakoch/install-vulkan-sdk-action@37effcfa045411f8bfbbda26df2fd1b3bf3436fa # v1.6.0
+        with:
+          vulkan_version: 1.4.341.1
+          install_runtime: true
+          install_lavapipe: true
+          cache: true
+      - name: llama-server sidecar (macOS and Windows bundle it, so the build needs it)
+        if: runner.os != 'Linux'
+        shell: bash
         run: ../scripts/build-llama-server.sh
+      - name: Vulkan loader on PATH for the Windows test binaries
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "$VULKAN_SDK\runtime\x64" >> "$GITHUB_PATH"
       - run: cargo test --locked
+      # The runner has no GPU: speech must work on the CPU, then on Lavapipe as a stand-in Vulkan GPU
+      # (GGML_VK_VISIBLE_DEVICES: ggml skips CPU-type Vulkan devices unless named); llama-server must see it too.
+      - name: Windows GPU smoke test
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/tiny.en.bin" https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny.en.bin
+          export ECHOTYPE_TEST_TINY="$RUNNER_TEMP/tiny.en.bin"
+          cargo test --locked transcribes_the_jfk_sample -- --ignored --nocapture
+          export VK_DRIVER_FILES='C:\lavapipe\share\vulkan\icd.d\lvp_icd.x86_64.json' GGML_VK_VISIBLE_DEVICES=0 ECHOTYPE_TEST_VULKAN=1
+          cargo test --locked transcribes_the_jfk_sample -- --ignored --nocapture
+          binaries/llama-server-x86_64-pc-windows-msvc.exe --list-devices 2>&1 | tee devices.txt
+          grep -q Vulkan0 devices.txt

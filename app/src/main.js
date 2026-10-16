@@ -501,7 +501,7 @@ function fillRemote(kind) {
   url.placeholder = custom ? 'http://localhost:8000/v1' : '';
   $(`#${kind}UrlDesc`).textContent = custom
     ? `Any OpenAI-compatible ${kind === 'stt' ? '/audio/transcriptions' : '/chat/completions'} endpoint.`
-    : cfg.provider === 'echotype' ? `Built in: runs on this Mac, nothing to start. ${sys?.echotype_model_installed ? `Installed, ${fmtMB(sys.echotype_model_mb)}.` : `Not installed (${fmtMB(sys?.echotype_model_mb ?? 940)}).`}`
+    : cfg.provider === 'echotype' ? `Built in: runs on this ${isMac ? 'Mac' : 'computer'}, nothing to start. ${sys?.echotype_model_installed ? `Installed, ${fmtMB(sys.echotype_model_mb)}.` : `Not installed (${fmtMB(sys?.echotype_model_mb ?? 940)}).`}`
     : `Set by the ${p?.label ?? ''} preset.`;
   if (kind === 'cleanup') renderCleaner();
   const model = $(`#${kind}Model`);
@@ -1846,7 +1846,7 @@ function obLangRender() {
 // local server (or, by the link, a key) once onboarding finishes.
 function obBuiltIn() {
   const c = sys.cleaners?.find(x => x.automatic);
-  return isMac && !!sys.echotype_model_installed && !!c && c.ram_mb + 2048 <= sys.available_ram_gb * 1024;
+  return !/linux/i.test(sys.os) && !!sys.echotype_model_installed && !!c && c.ram_mb + 2048 <= sys.available_ram_gb * 1024;
 }
 const obCleanOn = () => (obBuiltIn() ? S.cleanup.enabled && S.cleanup.provider === 'echotype' : ob.cleanHow !== 'off');
 function obCleanPick(yes) {
