@@ -47,6 +47,12 @@ jobs:
         if: runner.os != 'macOS'
         shell: bash
         run: echo GGML_NATIVE=OFF >> "$GITHUB_ENV"
+      # ggml's Vulkan shader tool builds deep inside cargo's target dir, past the 260 characters
+      # MSBuild's file tracker can handle (FTK1011): build in a short folder on Windows.
+      - name: Short build path on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo 'CARGO_TARGET_DIR=C:\t' >> "$GITHUB_ENV"
       - name: Vulkan SDK, for the Windows GPU build (and Lavapipe, a software GPU for the smoke test)
         if: runner.os == 'Windows'
         uses: jakoch/install-vulkan-sdk-action@37effcfa045411f8bfbbda26df2fd1b3bf3436fa # v1.6.0
@@ -109,6 +115,12 @@ jobs:
         if: runner.os != 'macOS'
         shell: bash
         run: echo GGML_NATIVE=OFF >> "$GITHUB_ENV"
+      # ggml's Vulkan shader tool builds deep inside cargo's target dir, past the 260 characters
+      # MSBuild's file tracker can handle (FTK1011): build in a short folder on Windows.
+      - name: Short build path on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo 'CARGO_TARGET_DIR=C:\t' >> "$GITHUB_ENV"
       - name: Vulkan SDK, for the Windows GPU build (and Lavapipe, a software GPU for the smoke test)
         if: runner.os == 'Windows'
         uses: jakoch/install-vulkan-sdk-action@37effcfa045411f8bfbbda26df2fd1b3bf3436fa # v1.6.0
@@ -129,7 +141,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          cmd //c start //wait "" "$(cygpath -w app/src-tauri/target/release/bundle/nsis/*.exe)" /S
+          cmd //c start //wait "" "$(cygpath -w "$(cygpath -u "$CARGO_TARGET_DIR")"/release/bundle/nsis/*.exe)" /S
           dir="$(cygpath -u "$LOCALAPPDATA")/Echotype"
           ls "$dir"
           test -f "$dir/llama-server.exe" && test -f "$dir/vulkan-1.dll"
@@ -142,3 +154,5 @@ jobs:
             app/src-tauri/target/**/release/bundle/deb/*.deb
             app/src-tauri/target/**/release/bundle/msi/*.msi
             app/src-tauri/target/**/release/bundle/nsis/*.exe
+            C:/t/release/bundle/msi/*.msi
+            C:/t/release/bundle/nsis/*.exe
