@@ -679,6 +679,45 @@ fn lid_probs(pcm: &[f32]) -> Option<Vec<f32>> {
     state.lang_detect(0, THREADS).ok().map(|(_, probs)| probs)
 }
 
+/// Another language's score that takes a clip away from the likely ones. Detecting among all 99 put
+/// the owner's short English and Hinglish clips into Thai, Swedish and French; on FLEURS
+/// (de/es/fr, 90 clips) every full-length clip clears 0.8, and 50 of 90 of their first 3 s do.
+const OTHER_LANGUAGE_P: f32 = 0.8;
+
+/// "Detect any language": the likeliest of `likely` (and the last language, `last`), unless another
+/// language scores OTHER_LANGUAGE_P or more.
+fn auto_pick(probs: &[f32], likely: &[String], last: Option<&str>) -> Option<String> {
+    let top = (0..probs.len()).max_by(|&a, &b| probs[a].total_cmp(&probs[b]))?;
+    let top_code = whisper_rs::get_lang_str(top as i32)?;
+    if likely.iter().any(|l| l == top_code) || probs[top] >= OTHER_LANGUAGE_P || likely.is_empty() {
+        return Some(top_code.to_string());
+    }
+    likeliest(probs, likely, last)
+}
+
+/// The languages this user likely speaks: the Mac's preferred languages, English, and the region's
+/// main other language where Echotype's users speak it mixed with English (India: Hindi).
+// ponytail: macOS only, one region rule; other platforms and regions fall back to English.
+fn likely_languages() -> &'static [String] {
+    static LIKELY: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    LIKELY.get_or_init(|| {
+        let read = |key: &str| std::process::Command::new("/usr/bin/defaults").args(["read", "-g", key]).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+        likely_from(&read("AppleLanguages"), &read("AppleLocale"))
+    })
+}
+
+/// `likely_languages` from `defaults read -g AppleLanguages` / `AppleLocale` output.
+fn likely_from(apple_languages: &str, apple_locale: &str) -> Vec<String> {
+    let mut out = vec!["en".to_string()];
+    let codes = apple_languages.split(['"', ',', '(', ')', '\n', ' ']).filter(|c| c.len() >= 2).map(|c| c[..2].to_lowercase());
+    for c in codes.chain((apple_locale.contains("_IN") || apple_locale.contains("rg=in")).then(|| "hi".to_string())) {
+        if whisper_rs::get_lang_id(&c).is_some() && !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// whisper.cpp's own thread count (min(4, cores)), for the language check before a run.
 const THREADS: usize = 4;
 
@@ -734,8 +773,20 @@ fn run_local<T>(model: &Path, pcm: &[f32], languages: &[String], translate: bool
         [one] => Some(one.replace('\0', "")),
         _ if !multilingual => None, // an English-only model: nothing to pick
         [] => match &tiny {
-            // The tiny model's pick, so turbo skips its own detection pass (273 ms on an M5).
-            Some(probs) => (0..probs.len()).max_by(|&a, &b| probs[a].total_cmp(&probs[b])).and_then(|i| whisper_rs::get_lang_str(i as i32)).map(String::from),
+            // The tiny model's pick, so turbo skips its own detection pass (273 ms on an M5), among
+            // the languages this user is likely to speak unless another is clearly what was said.
+            Some(probs) => {
+                let mut last = LAST_LANG.lock().unwrap_or_else(|e| e.into_inner());
+                let mut likely = likely_languages().to_vec();
+                if let Some(l) = last.as_ref().filter(|l| sticky && !likely.contains(l)) {
+                    likely.push(l.clone());
+                }
+                let pick = auto_pick(probs, &likely, last.as_deref().filter(|_| sticky));
+                if sticky {
+                    last.clone_from(&pick);
+                }
+                pick
+            }
             None => None, // whisper detects among all 99
         },
         several if tiny.is_some() => {
@@ -998,6 +1049,25 @@ mod tests {
         assert!(take_cancel(&dest) && !take_cancel(&dest), "a cancel stops one download, not the next");
         assert!(MODELS.iter().any(|m| m.id == "large-v3-q5_0" && translates(m.id)) && ram_of("large-v3-q5_0") > ram_of("large-v3-turbo-q5_0"));
         assert_eq!(recommended(16 * 1024), "large-v3-turbo-q5_0", "adding large-v3 leaves Automatic's pick alone");
+    }
+
+    #[test]
+    fn detect_any_stays_with_the_users_languages_unless_another_is_clear() {
+        assert_eq!(likely_from("(\n    \"en-US\",\n    \"en-IN\"\n)", "en_US@rg=inzzzz"), ["en", "hi"], "the owner's Mac");
+        assert_eq!(likely_from("(\"de-DE\", \"fr-FR\")", "de_DE"), ["en", "de", "fr"]);
+        assert_eq!(likely_from("", ""), ["en"]);
+        let mut probs = vec![0.0f32; whisper_rs::get_lang_max_id() as usize + 1];
+        let id = |c: &str| whisper_rs::get_lang_id(c).unwrap() as usize;
+        let likely = ["en".to_string(), "hi".to_string()];
+        probs[id("th")] = 0.45; // a short Hinglish clip once came out in Thai
+        probs[id("hi")] = 0.30;
+        probs[id("en")] = 0.20;
+        assert_eq!(auto_pick(&probs, &likely, None).as_deref(), Some("hi"));
+        probs[id("th")] = 0.85;
+        assert_eq!(auto_pick(&probs, &likely, None).as_deref(), Some("th"), "clearly Thai is Thai");
+        probs[id("th")] = 0.0;
+        probs[id("en")] = 0.6;
+        assert_eq!(auto_pick(&probs, &likely, None).as_deref(), Some("en"));
     }
 
     #[test]
