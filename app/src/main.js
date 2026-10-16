@@ -484,8 +484,7 @@ function setProvider(kind, id) {
   const p = preset(id), cfg = S[kind];
   cfg.provider = id;
   if (id !== 'custom') cfg.base_url = ''; // presets carry their own URL
-  const def = p?.[kind === 'stt' ? 'default_stt_model' : 'default_cleanup_model'];
-  if (def) cfg.model = def;
+  cfg.model = ''; // the user names the model; the preset's shows as a faded example
   save();
   if (kind === 'stt') renderStt(); else fillRemote('cleanup');
   renderLangNote();
@@ -506,7 +505,8 @@ function fillRemote(kind) {
   if (kind === 'cleanup') renderCleaner();
   const model = $(`#${kind}Model`);
   model.value = cfg.model;
-  model.placeholder = p?.[kind === 'stt' ? 'default_stt_model' : 'default_cleanup_model'] || 'model name';
+  const example = p?.[kind === 'stt' ? 'default_stt_model' : 'default_cleanup_model'];
+  model.placeholder = example ? `e.g. ${example}` : 'Model name';
   renderKey(kind);
 }
 for (const kind of ['stt', 'cleanup']) {
