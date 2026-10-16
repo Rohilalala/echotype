@@ -1731,7 +1731,14 @@ pub fn run() {
     // On-screen tests (ECHOTYPE_NO_MAIN) run beside the installed app instead of opening its window.
     let builder = if std::env::var_os("ECHOTYPE_NO_MAIN").is_some() { builder } else { builder.plugin(tauri_plugin_single_instance::init(|app, args, _| {
         // `echotype --toggle` from a desktop shortcut: on Wayland the global shortcut only fires in X11 apps.
-        if args.iter().any(|a| a == "--toggle") { send(app, Cmd::Key(Ev::Toggle)) } else { show_main(app) }
+        // `--toggle-meeting` starts or stops meeting notes (Shortcuts, scripts, tests).
+        if args.iter().any(|a| a == "--toggle") {
+            send(app, Cmd::Key(Ev::Toggle))
+        } else if args.iter().any(|a| a == "--toggle-meeting") {
+            meeting::toggle(app)
+        } else {
+            show_main(app)
+        }
     })) };
     let app = builder
         .plugin(tauri_plugin_opener::init())
