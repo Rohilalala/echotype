@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const RATE: usize = audio::RATE as usize;
 /// Live lines: a chunk is transcribed at the first pause once this much audio waits...
@@ -62,6 +62,9 @@ pub struct Meeting {
     pub summary: Option<String>,
     /// Shown above the transcript: mic-only, summary skipped, speaker models missing...
     pub notices: Vec<String>,
+    /// Names heard for speakers still called "Speaker N" (name_hints), offered to the user.
+    #[serde(skip_deserializing, skip_serializing_if = "BTreeMap::is_empty")]
+    pub name_hints: BTreeMap<String, String>,
 }
 
 pub fn default_name(id: &str) -> String {
@@ -483,7 +486,15 @@ impl Session {
 
 /// "Speaker: text" lines, what the summary model reads.
 pub fn transcript_lines(m: &Meeting) -> String {
-    m.segments.iter().map(|s| format!("{}: {}", name(m, &s.speaker), s.text)).collect::<Vec<_>>().join("\n")
+    for_notes(m, "")
+}
+
+/// transcript_lines with You under the user's own name (`me`, Settings → display name), so the
+/// notes say "(Aditya) Send the questions" rather than "(You)".
+fn for_notes(m: &Meeting, me: &str) -> String {
+    let me = me.trim();
+    let line = |s: &Segment| format!("{}: {}", if s.speaker == ME && !me.is_empty() { me } else { name(m, &s.speaker) }, s.text);
+    m.segments.iter().map(line).collect::<Vec<_>>().join("\n")
 }
 
 fn name<'a>(m: &'a Meeting, id: &'a str) -> &'a str {
@@ -497,8 +508,8 @@ pub const SUMMARY_MAX_CHARS: usize = 48_000;
 /// The notes, or None when nobody said anything (the model is then never asked: with nothing to
 /// go on it would only make something up). `llm(transcript)`: Echotype Cloud's /v1/summary, which
 /// holds the prompt.
-pub fn summarize(m: &Meeting, llm: impl FnOnce(&str) -> Result<String, String>) -> Result<Option<String>, String> {
-    let mut text = transcript_lines(m);
+pub fn summarize(m: &Meeting, me: &str, llm: impl FnOnce(&str) -> Result<String, String>) -> Result<Option<String>, String> {
+    let mut text = for_notes(m, me);
     if !m.segments.iter().any(|s| crate::cleanup::has_speech(&s.text)) {
         return Ok(None);
     }
@@ -533,6 +544,110 @@ pub fn markdown(m: &Meeting) -> String {
 pub fn plain(m: &Meeting) -> String {
     let lines: Vec<String> = m.segments.iter().map(|s| format!("[{}] {}: {}", clock(s.start), name(m, &s.speaker), s.text)).collect();
     format!("{}\n\n{}\n", m.title, lines.join("\n"))
+}
+
+/// "00:01:02,345" (SRT, `sep` ',') or "00:01:02.345" (WebVTT, '.').
+fn timecode(secs: f32, sep: char) -> String {
+    let ms = (secs.max(0.0) * 1000.0).round() as u64;
+    format!("{:02}:{:02}:{:02}{sep}{:03}", ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000)
+}
+
+/// The transcript as subtitles, one cue a line, "Name: text".
+pub fn srt(m: &Meeting) -> String {
+    let cues: Vec<String> = m.segments.iter().enumerate().map(|(i, s)| format!("{}\n{} --> {}\n{}: {}\n", i + 1, timecode(s.start, ','), timecode(s.end, ','), name(m, &s.speaker), s.text)).collect();
+    cues.join("\n")
+}
+
+/// WebVTT with voice tags, which players and agents read as speakers.
+pub fn vtt(m: &Meeting) -> String {
+    let cues: Vec<String> = m.segments.iter().map(|s| format!("{} --> {}\n<v {}>{}\n", timecode(s.start, '.'), timecode(s.end, '.'), name(m, &s.speaker), s.text)).collect();
+    format!("WEBVTT\n\n{}", cues.join("\n"))
+}
+
+/// Everything an agent needs, speaker names resolved.
+pub fn json(m: &Meeting) -> String {
+    let segments: Vec<_> = m.segments.iter().map(|s| serde_json::json!({ "start": s.start, "end": s.end, "speaker": name(m, &s.speaker), "text": s.text })).collect();
+    let v = serde_json::json!({ "title": m.title, "started_ms": m.started_ms, "duration_s": m.duration_s, "summary": m.summary, "segments": segments });
+    serde_json::to_string_pretty(&v).unwrap_or_default() + "\n"
+}
+
+/// The meeting in `format` (md, txt, json, srt, vtt) and its file extension. Exports are free.
+pub fn export(m: &Meeting, format: &str) -> Result<(String, &'static str), String> {
+    Ok(match format {
+        "md" => (markdown(m), "md"),
+        "txt" => (plain(m), "txt"),
+        "json" => (json(m), "json"),
+        "srt" => (srt(m), "srt"),
+        "vtt" => (vtt(m), "vtt"),
+        other => return Err(format!("Unknown export format '{other}'")),
+    })
+}
+
+// ---------- names ----------
+
+/// Capitalised words that open sentences or follow "I'm" without being anyone's name.
+const NOT_NAMES: &[&str] = &[
+    "I", "So", "Yeah", "Yes", "No", "Okay", "Ok", "Sure", "Sir", "Madam", "Guys", "Everyone", "All", "Team", "Bro", "Dude", "Man", "God", "Sorry", "Fine", "Good",
+    "Great", "Here", "There", "Just", "Not", "Going", "Done", "Back", "Ready", "Also", "Well", "Hello", "Hi", "Hey", "Thanks", "Thank", "Right", "Cool", "Perfect", "The",
+    "This", "That", "It", "We", "You", "He", "She", "They", "My", "Your", "Mr", "Mrs", "Ms", "Dr", "Doctor", "Today", "Monday", "Tuesday", "Wednesday", "Thursday",
+    "Friday", "Saturday", "Sunday", "Again", "Now", "Then", "Sounds", "Exactly", "Absolutely", "Totally", "Really", "Very", "Everybody", "Folks", "Mate", "Boss",
+];
+
+/// A name at words[i]: one capitalised word of letters, not a sentence opener.
+fn name_at(words: &[&str], i: usize) -> Option<String> {
+    let w = words.get(i)?.trim_matches(|c: char| !c.is_alphanumeric());
+    let mut cs = w.chars();
+    let ok = w.len() >= 2 && cs.next().is_some_and(char::is_uppercase) && cs.all(char::is_lowercase) && !NOT_NAMES.contains(&w);
+    ok.then(|| w.to_string())
+}
+
+/// Names for the speakers, from what was said: "I'm Priya" or "my name is Priya" names who said
+/// it; "Thanks, Priya" names the last other voice; "Priya, can you…" the next one. Suggestions
+/// only (the user confirms each), never for You, and each name goes to one speaker.
+// ponytail: English phrasings only; a calendar invite's attendees would catch the rest.
+pub fn name_hints(m: &Meeting) -> BTreeMap<String, String> {
+    let mut votes: BTreeMap<(String, String), u32> = BTreeMap::new();
+    let mut vote = |speaker: Option<&str>, name: Option<String>, w: u32| {
+        if let (Some(sp), Some(n)) = (speaker.filter(|s| *s != ME), name) {
+            *votes.entry((sp.to_string(), n)).or_default() += w;
+        }
+    };
+    let other = |i: usize, back: bool| -> Option<&str> {
+        let me = &m.segments[i].speaker;
+        let found = if back { m.segments[..i].iter().rev().find(|s| &s.speaker != me) } else { m.segments[i + 1..].iter().find(|s| &s.speaker != me) };
+        found.map(|s| s.speaker.as_str())
+    };
+    for (i, seg) in m.segments.iter().enumerate() {
+        let words: Vec<&str> = seg.text.split_whitespace().collect();
+        let low: Vec<String> = words.iter().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'').to_lowercase()).collect();
+        let at = |j: usize, s: &str| low.get(j).is_some_and(|w| w == s);
+        for j in 0..low.len() {
+            if at(j, "i'm") || (at(j, "i") && at(j + 1, "am")) {
+                vote(Some(&seg.speaker), name_at(&words, j + if at(j, "i") { 2 } else { 1 }), 3);
+            }
+            if at(j, "my") && at(j + 1, "name") && at(j + 2, "is") {
+                vote(Some(&seg.speaker), name_at(&words, j + 3), 3);
+            }
+            if at(j, "thanks") || (at(j, "thank") && at(j + 1, "you")) {
+                vote(other(i, true), name_at(&words, j + if at(j, "thanks") { 1 } else { 2 }), 1);
+            }
+        }
+        // "Priya, can you…": a name opening the line, then a comma and a question.
+        let asks = ["can", "could", "what", "how", "do", "would", "will", "are", "did", "is"];
+        if words.first().is_some_and(|w| w.ends_with(',')) && low.get(1).is_some_and(|w| asks.contains(&w.as_str())) {
+            vote(other(i, false), name_at(&words, 0), 1);
+        }
+    }
+    let mut best: Vec<((String, String), u32)> = votes.into_iter().collect();
+    best.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut out = BTreeMap::new();
+    let mut taken = HashSet::new();
+    for ((speaker, name), _) in best {
+        if !out.contains_key(&speaker) && taken.insert(name.clone()) {
+            out.insert(speaker, name);
+        }
+    }
+    out
 }
 
 // ---------- storage ----------
@@ -773,6 +888,7 @@ fn open(app: &AppHandle, title: Option<String>) -> Result<Meeting, String> {
     tick(app);
     crate::emit_state(app, crate::hint("Meeting notes on. Let everyone know this meeting is being transcribed.", None));
     emit(app, &id, "recording");
+    show_window(app, &id);
     Ok(m)
 }
 
@@ -931,7 +1047,13 @@ pub async fn meeting_list() -> R<Vec<Meeting>> {
 
 #[tauri::command]
 pub async fn meeting_get(id: String) -> R<Meeting> {
-    blocking(move || load(&id)).await
+    blocking(move || {
+        let mut m = load(&id)?;
+        let unnamed = |sp: &String| m.speakers.get(sp).is_none_or(|n| *n == default_name(sp));
+        m.name_hints = name_hints(&m).into_iter().filter(|(sp, _)| unnamed(sp)).collect();
+        Ok(m)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -947,16 +1069,60 @@ pub async fn meeting_delete(id: String) -> R<()> {
 /// The meeting as Markdown ("md") or plain text ("txt"), for Copy.
 #[tauri::command]
 pub async fn meeting_export(id: String, format: String) -> R<String> {
+    blocking(move || export(&load(&id)?, &format).map(|(body, _)| body)).await
+}
+
+/// Echotype Pro: an answer about the meeting so far (or all of it), from Echotype Cloud.
+#[tauri::command]
+pub async fn meeting_ask(app: AppHandle, id: String, question: String) -> R<String> {
+    let me = crate::current_settings(&app).display_name;
     blocking(move || {
+        if !crate::settings::CLOUD {
+            return Err("Asking about a meeting is coming with Echotype Pro.".into());
+        }
         let m = load(&id)?;
-        Ok(if format == "md" { markdown(&m) } else { plain(&m) })
+        if !m.segments.iter().any(|s| crate::cleanup::has_speech(&s.text)) {
+            return Err("Nothing has been said yet.".into());
+        }
+        // The latest part of a long meeting: "what did I miss?" is about the last few minutes.
+        let text = for_notes(&m, &me);
+        let mut from = text.len().saturating_sub(SUMMARY_MAX_CHARS);
+        while !text.is_char_boundary(from) {
+            from += 1;
+        }
+        crate::cloud::ask(&text[from..], question.trim())
     })
     .await
 }
 
+/// Opens the meeting window, or brings it forward on meeting `id`.
+#[tauri::command]
+pub async fn meeting_window(app: AppHandle, id: String) -> R<()> {
+    show_window(&app, &id);
+    Ok(())
+}
+
+/// The meeting window (like Wispr Flow's): the live transcript, Stop, Summary and Ask beside the
+/// call, opened when meeting notes start. It shows meeting `id`; a second call switches it.
+pub fn show_window(app: &AppHandle, id: &str) {
+    if let Some(w) = app.get_webview_window("meeting") {
+        let _ = app.emit_to("meeting", "meeting-show", id);
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        return;
+    }
+    let url = WebviewUrl::App(format!("meeting.html?id={id}").into());
+    match WebviewWindowBuilder::new(app, "meeting", url).title("Meeting notes").inner_size(440.0, 720.0).min_inner_size(340.0, 420.0).build() {
+        Ok(_) => crate::apply_theme(app, &crate::current_settings(app)),
+        Err(e) => eprintln!("echotype: meeting window: {e}"),
+    }
+}
+
 /// Echotype Pro: the finished meeting's notes, written on request by Echotype Cloud and saved.
 #[tauri::command]
-pub async fn meeting_summarize(id: String) -> R<Meeting> {
+pub async fn meeting_summarize(app: AppHandle, id: String) -> R<Meeting> {
+    let me = crate::current_settings(&app).display_name;
     blocking(move || {
         if !crate::settings::CLOUD {
             return Err("Meeting summaries are coming with Echotype Pro.".into());
@@ -966,7 +1132,7 @@ pub async fn meeting_summarize(id: String) -> R<Meeting> {
         if m.state != "done" {
             return Err("The meeting is still being written up.".into());
         }
-        let Some(notes) = summarize(&m, crate::cloud::summary)? else {
+        let Some(notes) = summarize(&m, &me, crate::cloud::summary)? else {
             return Err("Nothing was said, so there is nothing to summarise.".into());
         };
         if transcript_lines(&m).len() > SUMMARY_MAX_CHARS && !m.notices.iter().any(|n| n.contains("covers its first part")) {
@@ -985,7 +1151,7 @@ pub async fn meeting_save(app: AppHandle, id: String, format: String) -> R<Strin
     blocking(move || {
         use tauri_plugin_opener::OpenerExt;
         let m = load(&id)?;
-        let (body, ext) = if format == "md" { (markdown(&m), "md") } else { (plain(&m), "txt") };
+        let (body, ext) = export(&m, &format)?;
         let dir = dirs::download_dir().ok_or("No Downloads folder")?;
         let path = dir.join(format!("{}-{}.{ext}", slug(&m.title), &stamp(m.started_ms)[..10]));
         std::fs::write(&path, body).map_err(|e| format!("Could not save: {e}"))?;
@@ -1303,6 +1469,39 @@ mod tests {
     }
 
     #[test]
+    fn names_come_from_introductions_thanks_and_questions() {
+        let seg = |sp: &str, t: &str| Segment { start: 0.0, end: 1.0, speaker: sp.into(), text: t.into() };
+        let mut m = Meeting::default();
+        m.segments = vec![
+            seg("you", "Hi everyone, I'm Aditya."),
+            seg("s1", "Hey, this is the plan. I'm Priya from design."),
+            seg("s2", "Sounds good to me."),
+            seg("you", "Thanks, Rahul. Okay, so we ship Friday."),
+            seg("you", "Meera, can you send the deck?"),
+            seg("s3", "Sure, I'm sorry it's late. I'm going to send it today."),
+        ];
+        let hints = name_hints(&m);
+        assert_eq!(hints.get("s1").map(String::as_str), Some("Priya"), "an introduction names who said it");
+        assert_eq!(hints.get("s2").map(String::as_str), Some("Rahul"), "thanks names the last other voice");
+        assert_eq!(hints.get("s3").map(String::as_str), Some("Meera"), "a question by name goes to the next voice");
+        assert!(!hints.contains_key("you"), "You is never renamed: {hints:?}");
+        assert!(!hints.values().any(|n| n == "Sorry" || n == "Going"), "lowercase and filler words are not names");
+    }
+
+    #[test]
+    fn exports_for_agents_cover_subtitles_and_json() {
+        let m = sample();
+        assert_eq!(srt(&m), "1\n00:00:02,000 --> 00:00:04,000\nYou: Shall we ship Friday?\n\n2\n00:01:05,000 --> 00:01:08,000\nPriya: Yes, I'll send the deck.\n");
+        assert!(vtt(&m).starts_with("WEBVTT\n\n00:00:02.000 --> 00:00:04.000\n<v You>Shall we ship Friday?\n"));
+        let v: serde_json::Value = serde_json::from_str(&json(&m)).unwrap();
+        assert_eq!((v["segments"][1]["speaker"].as_str(), v["title"].as_str()), (Some("Priya"), Some("Launch sync")));
+        for f in ["md", "txt", "json", "srt", "vtt"] {
+            assert!(export(&m, f).is_ok(), "{f}");
+        }
+        assert!(export(&m, "docx").is_err());
+    }
+
+    #[test]
     fn a_rename_reaches_every_line_and_the_summary_but_never_rewrites_you() {
         let mut m = sample();
         m.speakers.insert("s2".into(), "Speaker 2".into());
@@ -1330,22 +1529,23 @@ mod tests {
     fn summary_never_asks_the_model_about_an_empty_meeting() {
         let mut m = sample();
         let seen = std::cell::RefCell::new(String::new());
-        let out = summarize(&m, |text| {
+        let out = summarize(&m, "", |text| {
             *seen.borrow_mut() = text.to_string();
             Ok(" ## Summary\nShip Friday. ".into())
         });
         assert_eq!(out.unwrap().as_deref(), Some("## Summary\nShip Friday."));
         assert_eq!(seen.into_inner(), "You: Shall we ship Friday?\nPriya: Yes, I'll send the deck.");
+        assert_eq!(for_notes(&m, "Aditya"), "Aditya: Shall we ship Friday?\nPriya: Yes, I'll send the deck.", "the notes use the user's name");
         let mut long = sample();
         long.segments = vec![Segment { start: 0.0, end: 1.0, speaker: "you".into(), text: "word ".repeat(9_000) }; 3];
-        summarize(&long, |text| {
+        summarize(&long, "", |text| {
             assert!(text.len() <= SUMMARY_MAX_CHARS && text.ends_with("word "), "cut at a line: {}", text.len());
             Ok(String::new())
         })
         .unwrap();
         for empty in [vec![], vec![Segment { start: 0.0, end: 1.0, speaker: "you".into(), text: " ... ".into() }]] {
             m.segments = empty;
-            assert_eq!(summarize(&m, |_| panic!("asked the model about nothing")).unwrap(), None);
+            assert_eq!(summarize(&m, "", |_| panic!("asked the model about nothing")).unwrap(), None);
         }
     }
 

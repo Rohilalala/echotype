@@ -781,6 +781,33 @@ func TestSummaryIsProOnlyWithTheServersPrompt(t *testing.T) {
 	}
 }
 
+func TestAskIsProOnlyAndBounded(t *testing.T) {
+	x := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&lastSeen.body)
+		io.WriteString(w, `{"choices":[{"message":{"content":"Priya will send the deck."}}]}`)
+	})
+	key := x.signIn(t, "a@b.co")
+	body := `{"transcript":"Priya: I'll send the deck","question":"Who sends the deck?"}`
+	if w := x.json("POST", "/v1/ask", body, bearer(key)...); w.Code != 402 || errType(t, w) != "pro_required" {
+		t.Fatalf("free: %d %s", w.Code, w.Body)
+	}
+	x.s.db.Exec(`UPDATE accounts SET plan = 'pro' WHERE id = ?`, accountID(t, x, "a@b.co"))
+	w := x.json("POST", "/v1/ask", body, bearer(key)...)
+	if w.Code != 200 || decode(t, w)["answer"] != "Priya will send the deck." {
+		t.Fatalf("pro: %d %s", w.Code, w.Body)
+	}
+	msgs, _ := lastSeen.body["messages"].([]any)
+	sys, _ := msgs[0].(map[string]any)
+	user, _ := msgs[1].(map[string]any)
+	if !strings.HasPrefix(sys["content"].(string), "You answer questions about a meeting") || !strings.HasSuffix(user["content"].(string), "Question: Who sends the deck?") {
+		t.Fatalf("upstream got %v", lastSeen.body)
+	}
+	long := `{"transcript":"x","question":"` + strings.Repeat("a", 501) + `"}`
+	if w := x.json("POST", "/v1/ask", long, bearer(key)...); w.Code != 400 {
+		t.Fatalf("long question: %d", w.Code)
+	}
+}
+
 // ---------- Stripe ----------
 
 func sign(payload []byte, secret string, ts int64) string {

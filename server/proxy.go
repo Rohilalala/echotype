@@ -27,17 +27,20 @@ const (
 )
 
 // The meeting-notes prompt lives here, not in the app, so /v1/summary only ever writes notes.
-const summaryPrompt = `You write meeting notes from a transcript. Use only what the transcript says. Never add facts, names, numbers, dates, decisions or tasks that are not in it, and never guess. If the transcript does not say something, leave it out.
+const summaryPrompt = `You write meeting notes from a transcript ("Name: words" lines). Use only what the transcript says. Never add facts, names, numbers, dates, decisions or tasks that are not in it, and never guess. If the transcript does not say something, leave it out. Ignore talk that is clearly not part of the meeting, such as a video or TV playing in the background.
 
-Write Markdown with exactly these three sections and nothing else:
-## Summary
-A few sentences on what was discussed.
-## Decisions
-One bullet per decision the speakers clearly agreed on. If there were none, write "None recorded."
-## Action items
-One bullet per task someone agreed to do. Start with the owner's name only when the transcript says who will do it ("Priya: send the deck"). If there were none, write "None recorded."
+Write the notes in exactly this shape, with a blank line between parts:
+1. One or two sentences: what the meeting was about and how it ended.
+2. One section per topic discussed (2 to 5 of them): a heading line "## " plus a short title for the topic, then one line per point. Points are short, factual sentences without bullets.
+3. "## Next Steps": one line per task someone agreed to do, written "(Owner) Task", where Owner is the name of the person who will do it as the transcript gives it and Task is a short instruction in your own words, such as "(Priya) Send the deck to marketing", never a quote.
+4. "## Decisions Made": one line per decision the speakers clearly agreed on.
 
-Speaker names such as "Speaker 1" are labels; use them as written. Write in the language of the transcript.`
+A section with nothing in it is left out entirely: never write "None". Refer to people by name, never as he or she. Speaker names such as "Speaker 1" are labels; use them as written. Write in the language of the transcript.`
+
+// The prompt for /v1/ask, fixed here like summaryPrompt so the endpoint only answers about meetings.
+const askPrompt = `You answer questions about a meeting from its transcript ("Name: words" lines; it may still be going on). Use only what the transcript says. If it does not say, answer that it was not discussed. Never guess or add facts. Answer in a few sentences or short bullets, in the language of the question.`
+
+const maxQuestionBytes = 500
 
 // GET /v1/models
 func (s *server) models(w http.ResponseWriter, _ *http.Request, _ account) {
@@ -249,43 +252,74 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request, a account) {
 // POST /v1/summary {"transcript": "Name: words\n..."} → {"summary": "Markdown"}: meeting notes,
 // Pro only, from the token budget cleanup uses.
 func (s *server) summary(w http.ResponseWriter, r *http.Request, a account) {
-	if a.Plan != "pro" {
-		apiError(w, http.StatusPaymentRequired, "pro_required", "Meeting summaries are part of Echotype Pro.")
+	var in struct {
+		Transcript string `json:"transcript"`
+	}
+	if !s.readNotesRequest(w, r, a, "Meeting summaries are part of Echotype Pro.", &in, &in.Transcript) {
 		return
 	}
+	s.notes(w, r, a, summaryPrompt, in.Transcript, "summary")
+}
+
+// POST /v1/ask {"transcript": "...", "question": "What did I miss?"} → {"answer": "..."}: Pro only.
+func (s *server) ask(w http.ResponseWriter, r *http.Request, a account) {
+	var in struct {
+		Transcript string `json:"transcript"`
+		Question   string `json:"question"`
+	}
+	if !s.readNotesRequest(w, r, a, "Asking about a meeting is part of Echotype Pro.", &in, &in.Transcript) {
+		return
+	}
+	q := strings.TrimSpace(in.Question)
+	if q == "" || len(q) > maxQuestionBytes {
+		apiError(w, http.StatusBadRequest, "invalid_request_error", "Ask a question of up to 500 characters.")
+		return
+	}
+	s.notes(w, r, a, askPrompt, "Transcript:\n"+in.Transcript+"\n\nQuestion: "+q, "answer")
+}
+
+// readNotesRequest checks Pro and the per-key limit and reads the JSON body into `in`, whose
+// transcript must be 1 byte to 64 KB. On false the client has been answered.
+func (s *server) readNotesRequest(w http.ResponseWriter, r *http.Request, a account, proMsg string, in any, transcript *string) bool {
+	if a.Plan != "pro" {
+		apiError(w, http.StatusPaymentRequired, "pro_required", proMsg)
+		return false
+	}
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxSummaryBytes+2<<10))
+	if err != nil {
+		if tooLarge(err) {
+			apiError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Transcripts are limited to 64 KB.")
+		} else {
+			apiError(w, http.StatusBadRequest, "invalid_request_error", "Could not read the request body.")
+		}
+		return false
+	}
+	if json.Unmarshal(raw, in) != nil || strings.TrimSpace(*transcript) == "" {
+		apiError(w, http.StatusBadRequest, "invalid_request_error", `Send {"transcript": "..."}.`)
+		return false
+	}
+	if len(*transcript) > maxSummaryBytes {
+		apiError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Transcripts are limited to 64 KB.")
+		return false
+	}
+	return true
+}
+
+// notes runs one fixed-prompt call for a Pro account and answers {key: text}.
+func (s *server) notes(w http.ResponseWriter, r *http.Request, a account, system, user, key string) {
 	release, ok := s.limitKey(w, a)
 	if !ok {
 		return
 	}
 	defer release()
-	var in struct {
-		Transcript string `json:"transcript"`
-	}
-	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxSummaryBytes+1<<10))
-	if err != nil {
-		if tooLarge(err) {
-			apiError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Summaries are limited to 64 KB of transcript.")
-		} else {
-			apiError(w, http.StatusBadRequest, "invalid_request_error", "Could not read the request body.")
-		}
-		return
-	}
-	if json.Unmarshal(raw, &in) != nil || strings.TrimSpace(in.Transcript) == "" {
-		apiError(w, http.StatusBadRequest, "invalid_request_error", `Send {"transcript": "..."}.`)
-		return
-	}
-	if len(in.Transcript) > maxSummaryBytes {
-		apiError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Summaries are limited to 64 KB of transcript.")
-		return
-	}
 	payload, _ := json.Marshal(map[string]any{
 		"model":            s.cfg.LLMModel,
 		"stream":           false,
 		"max_tokens":       maxSummaryTokens,
 		"reasoning_effort": "low",
 		"messages": []map[string]string{
-			{"role": "system", "content": summaryPrompt},
-			{"role": "user", "content": in.Transcript},
+			{"role": "system", "content": system},
+			{"role": "user", "content": user},
 		},
 	})
 	body, ok := s.meteredChat(w, r, a, payload, maxSummaryTokens)
@@ -300,10 +334,10 @@ func (s *server) summary(w http.ResponseWriter, r *http.Request, a account) {
 		} `json:"choices"`
 	}
 	if json.Unmarshal(body, &resp) != nil || len(resp.Choices) == 0 || strings.TrimSpace(resp.Choices[0].Message.Content) == "" {
-		apiError(w, http.StatusBadGateway, "upstream_error", "The summary came back empty. Try again.")
+		apiError(w, http.StatusBadGateway, "upstream_error", "The model sent back nothing. Try again.")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"summary": strings.TrimSpace(resp.Choices[0].Message.Content)})
+	writeJSON(w, http.StatusOK, map[string]string{key: strings.TrimSpace(resp.Choices[0].Message.Content)})
 }
 
 // meteredChat reserves the most a chat call can cost (about 3 bytes per input token, plus the

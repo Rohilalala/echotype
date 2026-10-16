@@ -60,6 +60,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/audio/translations", s.authed(s.audio("translations")))
 	mux.HandleFunc("POST /v1/chat/completions", s.authed(s.chat))
 	mux.HandleFunc("POST /v1/summary", s.authed(s.summary))
+	mux.HandleFunc("POST /v1/ask", s.authed(s.ask))
 	mux.HandleFunc("POST /v1/billing/checkout", s.authed(s.checkout))
 	mux.HandleFunc("POST /v1/billing/portal", s.authed(s.portal))
 	mux.HandleFunc("POST /webhooks/stripe", s.stripeWebhook)

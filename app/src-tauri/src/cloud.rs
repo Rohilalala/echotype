@@ -82,6 +82,12 @@ pub fn summary(transcript: &str) -> Result<String, String> {
     v["summary"].as_str().map(String::from).ok_or_else(|| "Echotype Cloud sent no summary. Try again.".into())
 }
 
+/// Pro: an answer to `question` from a "Name: words" transcript (POST /v1/ask).
+pub fn ask(transcript: &str, question: &str) -> Result<String, String> {
+    let v = authed(Method::POST, "/ask", Some(json!({ "transcript": transcript, "question": question })))?;
+    v["answer"].as_str().map(String::from).ok_or_else(|| "Echotype Cloud sent no answer. Try again.".into())
+}
+
 /// Stripe Checkout (`plan` = "pro_monthly" | "pro_yearly") or the billing portal: the URL to open.
 pub fn billing_url(plan: Option<&str>) -> Result<String, String> {
     let v = match plan {
