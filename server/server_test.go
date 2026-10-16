@@ -745,6 +745,42 @@ func TestChatTokensMeteredAndCapped(t *testing.T) {
 	}
 }
 
+func TestSummaryIsProOnlyWithTheServersPrompt(t *testing.T) {
+	x := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&lastSeen.body)
+		io.WriteString(w, `{"choices":[{"message":{"content":"  ## Summary\nShipped it.  "}}],"usage":{"prompt_tokens":900,"completion_tokens":100}}`)
+	})
+	key := x.signIn(t, "a@b.co")
+	id := accountID(t, x, "a@b.co")
+	body := `{"transcript":"You: we ship friday\nSpeaker 1: agreed"}`
+	if w := x.json("POST", "/v1/summary", body, bearer(key)...); w.Code != 402 || errType(t, w) != "pro_required" {
+		t.Fatalf("free: %d %s", w.Code, w.Body)
+	}
+	if w := x.json("POST", "/v1/summary", body); w.Code != 401 {
+		t.Fatalf("no key: %d", w.Code)
+	}
+	x.s.db.Exec(`UPDATE accounts SET plan = 'pro' WHERE id = ?`, id)
+	w := x.json("POST", "/v1/summary", body, bearer(key)...)
+	if w.Code != 200 || decode(t, w)["summary"] != "## Summary\nShipped it." {
+		t.Fatalf("pro: %d %s", w.Code, w.Body)
+	}
+	msgs, _ := lastSeen.body["messages"].([]any)
+	sys, _ := msgs[0].(map[string]any)
+	if len(msgs) != 2 || !strings.HasPrefix(sys["content"].(string), "You write meeting notes") || lastSeen.body["max_tokens"] != float64(4096) {
+		t.Fatalf("upstream got %v", lastSeen.body)
+	}
+	if me := decode(t, x.do("GET", "/v1/me", nil, bearer(key)...)); me["tokens_used"] != float64(1000) {
+		t.Fatalf("metered: %v", me)
+	}
+	big := `{"transcript":"` + strings.Repeat("a", 64<<10+1) + `"}`
+	if w := x.json("POST", "/v1/summary", big, bearer(key)...); w.Code != 413 {
+		t.Fatalf("64 KB+: %d", w.Code)
+	}
+	if w := x.json("POST", "/v1/summary", `{"transcript":"  "}`, bearer(key)...); w.Code != 400 {
+		t.Fatalf("empty: %d", w.Code)
+	}
+}
+
 // ---------- Stripe ----------
 
 func sign(payload []byte, secret string, ts int64) string {

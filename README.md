@@ -161,7 +161,7 @@ On the 198 hand-written test cases in `model/eval/handwritten.jsonl`, measured o
 | Echotype model | 70.7% | 6.5% | 94.9% |
 | Same base model, prompted | 7.1% | 42.6% | 35.4% |
 
-It answers in about 100 ms on average and uses about 1.1 GB of memory. Its weak spot is translating Hinglish to English, where it can drop a negation and flip the meaning, so check those results. Style and custom instructions are not used with this model, since it was trained on one short prompt, and it does not write meeting summaries.
+It answers in about 100 ms on average and uses about 1.1 GB of memory. Its weak spot is translating Hinglish to English, where it can drop a negation and flip the meaning, so check those results. Style and custom instructions are not used with this model, since it was trained on one short prompt.
 
 It runs inside Echotype: pick **Echotype model (local)** as the cleanup provider and Echotype starts it on your Mac when needed, through a bundled llama.cpp `llama-server` that only Echotype can talk to. There is nothing to install or start.
 
@@ -177,7 +177,7 @@ $L/bin/llama-quantize out/echotype-clean-f16.gguf \
 
 ## Meeting notes
 
-Start meeting notes from the menu bar, the pill's right-click menu or the **Meetings** page. Your microphone is labelled **You**; everyone else is heard through the computer's audio and told apart as Speaker 1, Speaker 2 and so on, which you can rename. The transcript appears as people talk, and when you stop, the configured cleanup model writes a summary with decisions and action items. Without cleanup set up you still get the full transcript. Copy or save any meeting as Markdown or text.
+Start meeting notes from the menu bar, the pill's right-click menu or the **Meetings** page. Your microphone is labelled **You**; everyone else is heard through the computer's audio and told apart as Speaker 1, Speaker 2 and so on, which you can rename. The transcript appears as people talk, a few seconds after each pause. With Echotype Pro, a finished meeting can be summarised on request, with decisions and action items. Copy or save any meeting as Markdown or text.
 
 When Zoom, Teams, Google Meet, a Slack huddle, FaceTime or another call app starts using the microphone, Echotype offers to take notes; it only checks which app has the microphone (and a browser's window title), never listens, and records nothing until you click Start. When that call ends it asks to stop them, or stops them by itself if you choose so under Settings → Meetings (macOS 14.2 or later).
 

@@ -18,9 +18,11 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 const RATE: usize = audio::RATE as usize;
-/// A chunk is transcribed once this much audio waits (whisper reads 30 s windows).
+/// Live lines: a chunk is transcribed at the first pause once this much audio waits...
+const MIN_CHUNK_S: usize = 4;
+/// ...or, with no pause, once this much waits (whisper reads 30 s windows).
 const CHUNK_S: usize = 25;
-/// It ends at the quietest 300 ms of its last LOOK_S seconds when that is a pause...
+/// That one ends at the quietest 300 ms of its last LOOK_S seconds when that is a pause...
 const LOOK_S: usize = 8;
 /// ...else hard at CHUNK_S, and the next chunk starts OVERLAP_S earlier; each side keeps the
 /// words whose middle falls on its side of the overlap's midpoint.
@@ -72,19 +74,29 @@ pub fn default_name(id: &str) -> String {
 
 // ---------- chunking ----------
 
-/// Where the next chunk of `pcm` (16 kHz) ends and whether it ends in a pause. None until a
-/// chunk's worth is waiting; with `flush`, whatever is left is the last chunk.
+/// Where the next chunk of `pcm` (16 kHz) ends and whether it ends in a pause: at the last pause
+/// after MIN_CHUNK_S, so lines show up as people pause; else once CHUNK_S waits. None until then;
+/// with `flush`, whatever is left is the last chunk.
+// ponytail: each chunk is a whisper call with a 30 s encoder pass, so short chunks cost more GPU
+// (two tracks, a call every few seconds: ~10% of an M5); a final full-audio pass would read better.
 pub fn next_cut(pcm: &[f32], flush: bool) -> Option<(usize, bool)> {
-    if pcm.len() < CHUNK_S * RATE {
-        return (flush && !pcm.is_empty()).then_some((pcm.len(), true));
+    let rest = (flush && !pcm.is_empty()).then_some((pcm.len(), true));
+    if pcm.len() < MIN_CHUNK_S * RATE {
+        return rest;
     }
+    let full = pcm.len() >= CHUNK_S * RATE;
     let win = RATE / 20;
-    let db: Vec<f32> = pcm[..CHUNK_S * RATE].chunks(win).map(audio::dbfs).collect();
+    let db: Vec<f32> = pcm[..pcm.len().min(CHUNK_S * RATE)].chunks(win).map(audio::dbfs).collect();
     let mut sorted = db.clone();
     sorted.sort_by(f32::total_cmp);
     // A pause: within 8 dB of the chunk's quiet floor and 15 dB under its speech.
     let pause = (sorted[sorted.len() / 10] + 8.0).max(-55.0).min(sorted[sorted.len() * 9 / 10] - 15.0);
     let span = 6; // 300 ms
+    if !full {
+        let first = MIN_CHUNK_S * 20 - span / 2;
+        let last = (first..=db.len().saturating_sub(span)).rev().find(|&i| db[i..i + span].iter().all(|&d| d <= pause));
+        return last.map(|i| ((i + span / 2) * win, true)).or(rest);
+    }
     let quietest = ((CHUNK_S - LOOK_S) * 20..=db.len() - span)
         .map(|i| (i, db[i..i + span].iter().copied().fold(f32::MIN, f32::max)))
         .min_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0))); // latest of equals: longer chunks
@@ -469,18 +481,6 @@ impl Session {
 
 // ---------- notes and export ----------
 
-const SUMMARY_PROMPT: &str = "You write meeting notes from a transcript. Use only what the transcript says. Never add facts, names, numbers, dates, decisions or tasks that are not in it, and never guess. If the transcript does not say something, leave it out.
-
-Write Markdown with exactly these three sections and nothing else:
-## Summary
-A few sentences on what was discussed.
-## Decisions
-One bullet per decision the speakers clearly agreed on. If there were none, write \"None recorded.\"
-## Action items
-One bullet per task someone agreed to do. Start with the owner's name only when the transcript says who will do it (\"Priya: send the deck\"). If there were none, write \"None recorded.\"
-
-Speaker names such as \"Speaker 1\" are labels; use them as written. Write in the language of the transcript.";
-
 /// "Speaker: text" lines, what the summary model reads.
 pub fn transcript_lines(m: &Meeting) -> String {
     m.segments.iter().map(|s| format!("{}: {}", name(m, &s.speaker), s.text)).collect::<Vec<_>>().join("\n")
@@ -490,26 +490,14 @@ fn name<'a>(m: &'a Meeting, id: &'a str) -> &'a str {
     m.speakers.get(id).map_or(id, String::as_str)
 }
 
-/// Why a finished meeting gets no summary, or None to write one. The Echotype model only knows cleanup.
-fn no_summary_reason(s: &Settings) -> Option<&'static str> {
-    if !s.cleanup.enabled || crate::cleanup::keyless(s) {
-        Some("Set up cleanup to get summaries")
-    } else if s.cleanup.provider == "echotype" && crate::settings::CLOUD {
-        Some("Summaries need a general model, such as Echotype Cloud or Ollama, as the cleanup provider")
-    } else if s.cleanup.provider == "echotype" {
-        Some("Summaries need a general model, such as Ollama or an API key, as the cleanup provider")
-    } else {
-        None
-    }
-}
-
 /// About 12k tokens, roughly 80 minutes of talk; the rest of a longer meeting is not summarised.
 // ponytail: one call with a cap; summarise in parts and merge if long meetings need full notes.
 pub const SUMMARY_MAX_CHARS: usize = 48_000;
 
 /// The notes, or None when nobody said anything (the model is then never asked: with nothing to
-/// go on it would only make something up). `llm(system, transcript)`.
-pub fn summarize(m: &Meeting, llm: impl FnOnce(&str, &str) -> Result<String, String>) -> Result<Option<String>, String> {
+/// go on it would only make something up). `llm(transcript)`: Echotype Cloud's /v1/summary, which
+/// holds the prompt.
+pub fn summarize(m: &Meeting, llm: impl FnOnce(&str) -> Result<String, String>) -> Result<Option<String>, String> {
     let mut text = transcript_lines(m);
     if !m.segments.iter().any(|s| crate::cleanup::has_speech(&s.text)) {
         return Ok(None);
@@ -521,7 +509,7 @@ pub fn summarize(m: &Meeting, llm: impl FnOnce(&str, &str) -> Result<String, Str
         }
         text.truncate(text[..cut].rfind('\n').unwrap_or(cut));
     }
-    let notes = llm(SUMMARY_PROMPT, &text)?;
+    let notes = llm(&text)?;
     Ok((!notes.trim().is_empty()).then(|| notes.trim().to_string()))
 }
 
@@ -815,6 +803,7 @@ pub fn status() -> serde_json::Value {
         "speakers": SPEAKERS,
         "screen_recording": capture::screen_recording_allowed(),
         "download_mb": download_mb,
+        "summaries": crate::settings::CLOUD,
     })
 }
 
@@ -901,21 +890,6 @@ fn run(app: AppHandle, mut session: Session, rx: mpsc::Receiver<Piece>, stopped:
     if let Err(e) = session.finish(can_diarize.then_some(&mut diarize as _), None) {
         note(&session, format!("Speakers were not re-checked at the end: {e}"));
     }
-    let s = crate::current_settings(&app);
-    let snapshot = lock(&session.meeting).clone();
-    match no_summary_reason(&s) {
-        None => {
-            if transcript_lines(&snapshot).len() > SUMMARY_MAX_CHARS {
-                note(&session, "The meeting is long, so the summary covers its first part only".into());
-            }
-            match summarize(&snapshot, |sys, text| crate::cleanup::chat(&s, sys, text, Duration::from_secs(180))) {
-                Ok(summary) => lock(&session.meeting).summary = summary,
-                Err(e) => note(&session, format!("No summary: {e}")),
-            }
-        }
-        Some(why) if !snapshot.segments.is_empty() => note(&session, why.into()),
-        Some(_) => {}
-    }
     {
         let mut m = lock(&session.meeting);
         m.state = "done".into();
@@ -976,6 +950,31 @@ pub async fn meeting_export(id: String, format: String) -> R<String> {
     blocking(move || {
         let m = load(&id)?;
         Ok(if format == "md" { markdown(&m) } else { plain(&m) })
+    })
+    .await
+}
+
+/// Echotype Pro: the finished meeting's notes, written on request by Echotype Cloud and saved.
+#[tauri::command]
+pub async fn meeting_summarize(id: String) -> R<Meeting> {
+    blocking(move || {
+        if !crate::settings::CLOUD {
+            return Err("Meeting summaries are coming with Echotype Pro.".into());
+        }
+        let dir = dir_of(&id)?;
+        let mut m = load(&id)?;
+        if m.state != "done" {
+            return Err("The meeting is still being written up.".into());
+        }
+        let Some(notes) = summarize(&m, crate::cloud::summary)? else {
+            return Err("Nothing was said, so there is nothing to summarise.".into());
+        };
+        if transcript_lines(&m).len() > SUMMARY_MAX_CHARS && !m.notices.iter().any(|n| n.contains("covers its first part")) {
+            m.notices.push("The meeting is long, so the summary covers its first part only".into());
+        }
+        m.summary = Some(notes);
+        save(&dir, &m);
+        Ok(m)
     })
     .await
 }
@@ -1131,11 +1130,23 @@ mod tests {
     }
 
     #[test]
-    fn chunks_wait_for_25_s_and_end_at_a_pause() {
-        assert_eq!(next_cut(&tone(10.0, -20.0), false), None);
+    fn chunks_end_at_the_first_pause_after_4_s_else_at_25_s() {
+        assert_eq!(next_cut(&tone(10.0, -20.0), false), None, "no pause yet: wait");
         assert_eq!(next_cut(&tone(10.0, -20.0), true), Some((10 * RATE, true)), "flush takes the rest");
+        assert_eq!(next_cut(&tone(3.0, -20.0), true), Some((3 * RATE, true)));
         assert_eq!(next_cut(&[], true), None);
-        // Speech with a 0.6 s pause at 20 s: cut in the pause.
+        // A live line: 5 s of speech, a 0.6 s pause, more speech: cut in the pause.
+        let mut pcm = tone(5.0, -20.0);
+        pcm.extend(vec![0.0; RATE * 6 / 10]);
+        pcm.extend(tone(1.0, -20.0));
+        let (cut, pause) = next_cut(&pcm, false).unwrap();
+        assert!(pause && cut > 5 * RATE && cut < 5 * RATE + RATE * 6 / 10, "cut at {cut}");
+        // A pause before 4 s is too early for a line of its own.
+        let mut early = tone(2.0, -20.0);
+        early.extend(vec![0.0; RATE * 6 / 10]);
+        early.extend(tone(3.0, -20.0));
+        assert_eq!(next_cut(&early, false), None);
+        // Speech with a 0.6 s pause at 20 s, all of it waiting (25 s+): cut in the pause.
         let mut pcm = tone(20.0, -20.0);
         pcm.extend(vec![0.0; RATE * 6 / 10]);
         pcm.extend(tone(10.0, -20.0));
@@ -1316,38 +1327,25 @@ mod tests {
     }
 
     #[test]
-    fn the_echotype_model_never_writes_summaries() {
-        let mut s = Settings::default();
-        assert_eq!(no_summary_reason(&s), Some("Set up cleanup to get summaries"));
-        s.cleanup.enabled = true;
-        s.cleanup.provider = "echotype".into();
-        assert!(no_summary_reason(&s).unwrap().starts_with("Summaries need a general model"));
-        s.cleanup.provider = "ollama".into();
-        assert_eq!(no_summary_reason(&s), None);
-    }
-
-    #[test]
-    fn summary_never_asks_the_model_about_an_empty_meeting_and_forbids_invention() {
+    fn summary_never_asks_the_model_about_an_empty_meeting() {
         let mut m = sample();
         let seen = std::cell::RefCell::new(String::new());
-        let out = summarize(&m, |sys, text| {
-            *seen.borrow_mut() = format!("{sys}\n---\n{text}");
+        let out = summarize(&m, |text| {
+            *seen.borrow_mut() = text.to_string();
             Ok(" ## Summary\nShip Friday. ".into())
         });
         assert_eq!(out.unwrap().as_deref(), Some("## Summary\nShip Friday."));
-        let seen = seen.into_inner();
-        assert!(seen.contains("Never add facts") && seen.contains("never guess") && seen.contains("None recorded."));
-        assert!(seen.ends_with("You: Shall we ship Friday?\nPriya: Yes, I'll send the deck."));
+        assert_eq!(seen.into_inner(), "You: Shall we ship Friday?\nPriya: Yes, I'll send the deck.");
         let mut long = sample();
         long.segments = vec![Segment { start: 0.0, end: 1.0, speaker: "you".into(), text: "word ".repeat(9_000) }; 3];
-        summarize(&long, |_, text| {
+        summarize(&long, |text| {
             assert!(text.len() <= SUMMARY_MAX_CHARS && text.ends_with("word "), "cut at a line: {}", text.len());
             Ok(String::new())
         })
         .unwrap();
         for empty in [vec![], vec![Segment { start: 0.0, end: 1.0, speaker: "you".into(), text: " ... ".into() }]] {
             m.segments = empty;
-            assert_eq!(summarize(&m, |_, _| panic!("asked the model about nothing")).unwrap(), None);
+            assert_eq!(summarize(&m, |_| panic!("asked the model about nothing")).unwrap(), None);
         }
     }
 
