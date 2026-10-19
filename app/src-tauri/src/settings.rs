@@ -128,6 +128,9 @@ pub struct Settings {
     pub detect_meetings: bool,
     /// When a call whose notes are running ends: "ask" | "auto" (stop them).
     pub meeting_end: String,
+    /// Meeting audio is deleted this many days after the meeting ends (7 or 30); 0 keeps it.
+    /// The transcript, speakers and summary stay either way (meeting.rs prune_audio).
+    pub meeting_audio_days: u32,
 }
 
 /// The orb's styles: the thinking-orbs states (app/src/vendor/thinking-orbs.js STATE_TO_MODE).
@@ -285,6 +288,7 @@ impl Default for Settings {
             greetings: true,
             detect_meetings: true,
             meeting_end: "ask".into(),
+            meeting_audio_days: 30,
         }
     }
 }
@@ -382,6 +386,9 @@ impl Settings {
         }
         if !matches!(self.cleaner_memory.as_str(), "save" | "ready") {
             self.cleaner_memory = "ready".into();
+        }
+        if !matches!(self.meeting_audio_days, 0 | 7 | 30) {
+            self.meeting_audio_days = 30;
         }
         // No Echotype Cloud in this build: its users land on this Mac's own models, on Automatic.
         if !CLOUD && self.stt.provider == "cloud" {
@@ -672,6 +679,7 @@ mod tests {
         assert_eq!(s.local_api, LocalApi { enabled: false, port: 7811 });
         assert!(!s.onboarded);
         assert!(s.detect_meetings && s.meeting_end == "ask", "calls are offered, never recorded unasked");
+        assert_eq!(s.meeting_audio_days, 30);
     }
 
     #[test]

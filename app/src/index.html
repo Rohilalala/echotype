@@ -368,6 +368,8 @@
             <label><input type="radio" name="meeting_end" value="ask" data-bind="meeting_end" /><span>Ask</span></label>
             <label><input type="radio" name="meeting_end" value="auto" data-bind="meeting_end" /><span>Stop notes</span></label>
           </span></div>
+        <label class="row"><span class="row-text"><span class="row-title">Keep meeting audio</span><span class="row-desc">Older recordings are deleted to save space. Transcripts and notes stay.</span></span>
+          <select data-bind="meeting_audio_days" data-num><option value="7">7 days</option><option value="30">30 days</option><option value="0">Forever</option></select></label>
       </div>
 
       <h2 class="group-title">Appearance</h2>
