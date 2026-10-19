@@ -6,6 +6,7 @@ use serde::Serialize;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use sha2::Digest;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState};
@@ -551,6 +552,18 @@ pub fn clean_text(s: &str) -> String {
 /// room) comes back empty instead of whisper's "Thank you." or "I'm going to go to the next one."
 /// Segments wholly outside Silero's speech are dropped (heard).
 pub fn transcribe_local(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, vad: Option<&Path>) -> Result<String, String> {
+    transcribe(model, pcm, languages, translate, prompt, vad, None)
+}
+
+/// The words so far while still recording (lib.rs partials): like transcribe_local, but it never
+/// moves LAST_LANG, and whisper gives up as soon as `stop` is set, so the final run on release
+/// gets the model at once instead of waiting for this one.
+pub fn transcribe_partial(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, vad: Option<&Path>, stop: &AtomicBool) -> Result<String, String> {
+    transcribe(model, pcm, languages, translate, prompt, vad, Some(stop))
+}
+
+/// `stop`: None for a dictation (sticky language, never aborted), Some for a partial.
+fn transcribe(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, vad: Option<&Path>, stop: Option<&AtomicBool>) -> Result<String, String> {
     if pcm.is_empty() {
         return Ok(String::new());
     }
@@ -558,7 +571,7 @@ pub fn transcribe_local(model: &Path, pcm: &[f32], languages: &[String], transla
     if spans.as_ref().is_some_and(Vec::is_empty) {
         return Ok(String::new());
     }
-    run_local(model, pcm, languages, translate, prompt, false, true, vad, |state| {
+    run_local(model, pcm, languages, translate, prompt, false, stop.is_none(), vad, stop, |state| {
         let mut text = String::new();
         for i in 0..state.full_n_segments() {
             let Some(seg) = state.get_segment(i) else { continue };
@@ -601,7 +614,7 @@ pub fn transcribe_words(model: &Path, pcm: &[f32], languages: &[String], prompt:
 }
 
 fn words_of(model: &Path, pcm: &[f32], languages: &[String], prompt: &str, vad: Option<&Path>, spans: Option<&[(f32, f32)]>) -> Result<Vec<Word>, String> {
-    run_local(model, pcm, languages, false, prompt, true, false, vad, |state| {
+    run_local(model, pcm, languages, false, prompt, true, false, vad, None, |state| {
         let mut tokens: Vec<(Vec<u8>, f32, f32)> = vec![];
         for i in 0..state.full_n_segments() {
             let Some(seg) = state.get_segment(i) else { continue };
@@ -748,9 +761,16 @@ fn likeliest(probs: &[f32], codes: &[String], last: Option<&str>) -> Option<Stri
     }
 }
 
+/// whisper.cpp's abort callback: `data` is the &AtomicBool run_local was given.
+unsafe extern "C" fn stop_set(data: *mut std::ffi::c_void) -> bool {
+    // SAFETY: run_local passes a pointer to an AtomicBool that outlives the whisper_full call.
+    unsafe { (*(data as *const AtomicBool)).load(Ordering::SeqCst) }
+}
+
 /// `sticky`: lean to, and remember, the language of the last such run (LAST_LANG); dictation only.
+/// `stop`: whisper aborts (an Err) once it is set.
 #[allow(clippy::too_many_arguments)]
-fn run_local<T>(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, timestamps: bool, sticky: bool, vad: Option<&Path>, read: impl FnOnce(&WhisperState) -> Result<T, String>) -> Result<T, String> {
+fn run_local<T>(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, timestamps: bool, sticky: bool, vad: Option<&Path>, stop: Option<&AtomicBool>, read: impl FnOnce(&WhisperState) -> Result<T, String>) -> Result<T, String> {
     let mut g = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
     if g.as_ref().is_none_or(|e| e.path != model) {
         *g = None; // free the old model before loading the next one
@@ -831,6 +851,18 @@ fn run_local<T>(model: &Path, pcm: &[f32], languages: &[String], translate: bool
         let mut v = whisper_rs::WhisperVadParams::new();
         v.set_speech_pad(200); // keep word edges; the default 30 ms clips first and last sounds
         p.set_vad_params(v);
+    }
+    if let Some(stop) = stop {
+        // A partial: the encoder sized to the clip (50 frames a second, plus slack) instead of
+        // whisper's full 30 s window. 78 ms instead of 260 on 5 s (M5 Pro, turbo Q5), and the
+        // encoder is the part an abort cannot interrupt.
+        p.set_audio_ctx(((pcm.len() as f32 / 16_000.0 * 50.0).ceil() as i32 + 64).min(1500));
+        // The raw setters: set_abort_callback_safe's trampoline reads its boxed closure as the wrong type.
+        // SAFETY: `stop` is borrowed for this whole function, so it outlives the state.full call below.
+        unsafe {
+            p.set_abort_callback(Some(stop_set));
+            p.set_abort_callback_user_data(stop as *const AtomicBool as *mut std::ffi::c_void);
+        }
     }
     state.full(p, pcm).map_err(|e| format!("Transcription failed: {e}"))?;
     read(state)
@@ -927,6 +959,49 @@ mod tests {
             eprintln!("speech with Silero: {text}");
             assert!(text.split_whitespace().count() >= 3, "speech still comes through: {text:?}");
         }
+    }
+
+    /// What a partial costs on 5, 10 and 20 s of speech, and how soon a stopped one hands the
+    /// model back to the final run.
+    /// `ECHOTYPE_TEST_MODEL=<ggml file> ECHOTYPE_TEST_WAV=<16 kHz speech wav> cargo test --release partial_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn partial_timing() {
+        let (Ok(model), Ok(wav)) = (std::env::var("ECHOTYPE_TEST_MODEL"), std::env::var("ECHOTYPE_TEST_WAV")) else { return eprintln!("skipped: no ECHOTYPE_TEST_MODEL / ECHOTYPE_TEST_WAV") };
+        let (model, vad) = (Path::new(&model), crate::speakers::vad());
+        let speech = crate::audio::decode(std::fs::read(&wav).unwrap(), Some("wav")).unwrap();
+        let clip = |secs: usize| speech.iter().copied().cycle().take(16_000 * secs).collect::<Vec<f32>>();
+        let (go, en) = (AtomicBool::new(false), ["en".to_string()]);
+        transcribe_partial(model, &clip(1), &en, false, "", vad.as_deref(), &go).unwrap(); // load + Metal warm-up
+        for secs in [5, 10, 20] {
+            let pcm = clip(secs);
+            let runs: Vec<u128> = (0..3)
+                .map(|_| {
+                    let t = Instant::now();
+                    transcribe_partial(model, &pcm, &en, false, "", vad.as_deref(), &go).unwrap();
+                    t.elapsed().as_millis()
+                })
+                .collect();
+            eprintln!("partial on {secs} s: {runs:?} ms; {:?}", transcribe_partial(model, &pcm, &en, false, "", vad.as_deref(), &go).unwrap());
+        }
+        // Released mid-partial: the final run waits only for the abort.
+        let pcm = clip(crate::PARTIAL_TAIL.as_secs() as usize);
+        for after in [10, 40, 70] {
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let (m, p, s, v, en) = (model.to_path_buf(), pcm.clone(), stop.clone(), vad.clone(), en.clone());
+            let partial = std::thread::spawn(move || {
+                let r = transcribe_partial(&m, &p, &en, false, "", v.as_deref(), &s);
+                (r.is_err(), Instant::now())
+            });
+            std::thread::sleep(Duration::from_millis(after));
+            let t = Instant::now();
+            stop.store(true, Ordering::SeqCst);
+            let (aborted, done) = partial.join().unwrap();
+            eprintln!("stopped {after} ms into a partial on {} s: model free {} ms later (aborted: {aborted})", pcm.len() / 16_000, done.saturating_duration_since(t).as_millis());
+        }
+        let final_text = transcribe_local(model, &clip(20), &["en".into()], false, "", vad.as_deref()).unwrap();
+        unload(); // ggml-metal asserts at exit while a model is resident
+        assert!(final_text.contains("country"), "the final run is unharmed by the aborted one: {final_text}");
     }
 
     /// `secs` of a quiet room with a knock every 600 ms.

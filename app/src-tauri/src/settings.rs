@@ -81,6 +81,9 @@ pub struct Settings {
     pub pill_hidden_until: u64,
     /// Let screenshots and screen sharing see the pill. Off = content protection (best effort).
     pub pill_in_recordings: bool,
+    /// "Show words as you speak": the pill shows the last words recognised so far while recording
+    /// (local speech model only). On for upgraders too.
+    pub live_text: bool,
     /// The settings window's appearance: "system" (follows macOS, the default), "light" or "dark".
     pub look: String,
     /// Where the pill was dropped on each display (macOS): its window's top-left as a fraction
@@ -263,6 +266,7 @@ impl Default for Settings {
             pill_idle: true,
             pill_hidden_until: 0,
             pill_in_recordings: false,
+            live_text: true,
             look: "system".into(),
             pill_positions: BTreeMap::new(),
             pill_screen: None,
@@ -702,6 +706,7 @@ mod tests {
         assert!(!s.pause_music, "music is never paused unasked");
         assert!(s.sounds && s.dismissed.is_empty());
         assert!(s.pill_idle && s.pill_hidden_until == 0 && !s.pill_in_recordings, "the idle pill is on for upgraders, hidden from capture");
+        assert!(s.live_text, "upgraders see their words as they speak");
         assert_eq!(s.look, "system", "upgraders follow the system appearance");
         let mut f: Settings = serde_json::from_str(r#"{"look":"foundry","look_chosen":true}"#).unwrap();
         f.migrate();
