@@ -298,56 +298,82 @@ pub fn start(version: String, current: impl Fn() -> Settings + Send + 'static) {
 
 static VERSION: OnceLock<String> = OnceLock::new();
 
-/// Panic text can quote the string being sliced (std puts it in backticks) and paths under the
-/// user's home folder: both are taken out, and the text is capped.
-fn scrub(text: &str, home: Option<&str>, max: usize) -> String {
-    let text = match home.filter(|h| h.len() > 1) {
-        Some(h) => text.replace(h, "~"),
-        None => text.to_string(),
-    };
-    let mut out = String::new();
-    let mut quoted = false;
-    for c in text.chars() {
-        if c == '`' {
-            quoted = !quoted;
-            out.push(if quoted { '`' } else { '…' });
-            if !quoted {
-                out.push('`');
-            }
-        } else if !quoted {
-            out.push(c);
-        }
-    }
-    out.chars().take(max).collect()
+/// The fixed start of a panic message, before anything format! could have put in it (an Err's
+/// text, a transcript, a number): up to the first ':', quote, backtick or digit.
+fn prefix(msg: &str) -> &str {
+    let end = msg.find(|c: char| matches!(c, ':' | '"' | '\'' | '`') || c.is_ascii_digit()).unwrap_or(msg.len());
+    msg[..end].trim()
 }
 
-fn crash(message: &str, backtrace: &str, home: Option<&str>) -> Crash {
+/// Echotype's own files are crate-relative ("src/lib.rs"); dependencies and std are absolute paths.
+fn location(file: &str, line: u32) -> String {
+    if file.starts_with("src/") && !file.contains("..") { format!("{file}:{line}") } else { "external".into() }
+}
+
+/// Only the symbolized function names of a std backtrace ("   3: echotype_lib::process"):
+/// its "at <file>" lines and unsymbolized addresses go.
+fn frames(backtrace: &str) -> String {
+    let name = |l: &str| {
+        let (n, f) = l.trim().split_once(": ")?;
+        (!n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) && !f.starts_with("0x") && f != "<unknown>").then(|| f.to_string())
+    };
+    backtrace.lines().filter_map(name).collect::<Vec<_>>().join("\n")
+}
+
+/// Last pass over what is left: any word that looks like an email, a URL or an absolute path goes.
+fn redact(text: &str) -> String {
+    let word = |w: &str| {
+        let t = w.trim_start_matches(['(', '[', '<', '{', '"', '\'', '`']);
+        let drive = t.as_bytes().get(1..3) == Some(b":\\".as_slice());
+        if t.contains("://") {
+            "[url]".to_string()
+        } else if t.contains('@') && t.contains('.') {
+            "[email]".into()
+        } else if t.starts_with(['/', '~', '\\']) || drive || t.contains("/Users/") || t.contains("/private/") || t.contains("/home/") || t.contains(":\\") {
+            "[path]".into()
+        } else {
+            w.to_string()
+        }
+    };
+    text.lines().map(|l| l.split(' ').map(word).collect::<Vec<_>>().join(" ")).collect::<Vec<_>>().join("\n")
+}
+
+fn crash(message: &str, file: &str, line: u32, backtrace: &str) -> Crash {
     Crash {
         version: VERSION.get().cloned().unwrap_or_default(),
         os: std::env::consts::OS.into(),
         arch: std::env::consts::ARCH.into(),
-        message: scrub(message, home, 500),
-        backtrace: scrub(backtrace, home, 8_000),
+        message: redact(&format!("{} at {}", prefix(message), location(file, line))).chars().take(300).collect(),
+        backtrace: redact(&frames(backtrace)).chars().take(8_000).collect(),
     }
 }
 
-/// Every panic leaves a small report in the data dir, whatever the setting; the sender at the
-/// next launch sends it (opted in) or deletes it (not).
+/// Straight from the settings file: a panic has no app state to ask, and unreadable means no.
+fn opted_in() -> bool {
+    std::fs::read_to_string(Settings::path()).ok().and_then(|s| serde_json::from_str::<Settings>(&s).ok()).is_some_and(|s| s.share_telemetry)
+}
+
+fn write_crash(dir: &Path, on: bool, report: impl FnOnce() -> Crash) {
+    let dir = crash_dir(dir);
+    if !on || std::fs::read_dir(&dir).map_or(0, |r| r.count()) >= MAX_CRASHES {
+        return;
+    }
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join(format!("{ms}.json")), serde_json::to_string(&report()).unwrap_or_default());
+}
+
+/// Opted in, a panic leaves a small report in the data dir for the sender at the next launch.
 pub fn install_panic_hook(version: String) {
     let _ = VERSION.set(version);
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let dir = crash_dir(&settings::data_dir());
-        if std::fs::read_dir(&dir).map_or(0, |r| r.count()) < MAX_CRASHES {
+        write_crash(&settings::data_dir(), opted_in(), || {
             let payload = info.payload();
-            let msg = payload.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| payload.downcast_ref::<String>().cloned()).unwrap_or_default();
-            let at = info.location().map(|l| format!(" at {}:{}", l.file(), l.line())).unwrap_or_default();
-            let home = dirs::home_dir().map(|h| h.to_string_lossy().into_owned());
-            let c = crash(&format!("{msg}{at}"), &std::backtrace::Backtrace::force_capture().to_string(), home.as_deref());
-            let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
-            let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(dir.join(format!("{ms}.json")), serde_json::to_string(&c).unwrap_or_default());
-        }
+            let msg = payload.downcast_ref::<&str>().copied().or_else(|| payload.downcast_ref::<String>().map(String::as_str)).unwrap_or("");
+            let (file, line) = info.location().map_or(("", 0), |l| (l.file(), l.line()));
+            crash(msg, file, line, &std::backtrace::Backtrace::force_capture().to_string())
+        });
         default(info);
     }));
 }
@@ -370,7 +396,7 @@ mod tests {
 
     fn put_crash(dir: &Path, name: &str) {
         std::fs::create_dir_all(crash_dir(dir)).unwrap();
-        std::fs::write(crash_dir(dir).join(name), serde_json::to_string(&crash("boom", "frames", None)).unwrap()).unwrap();
+        std::fs::write(crash_dir(dir).join(name), serde_json::to_string(&crash("boom", "src/lib.rs", 1, "frames")).unwrap()).unwrap();
     }
 
     /// Settings full of things that must never leave: words, names, emails, app names, paths.
@@ -484,12 +510,41 @@ mod tests {
     }
 
     #[test]
-    fn crash_text_loses_quoted_strings_and_the_home_path() {
-        let msg = "byte index 3 is not a char boundary; it is inside 'é' (bytes 2..4) of `my private dictation` at /Users/someone/src/lib.rs:12";
-        let c = crash(msg, "0: echotype::run\n   at /Users/someone/.cargo/x.rs:1", Some("/Users/someone"));
-        assert_eq!(c.message, "byte index 3 is not a char boundary; it is inside 'é' (bytes 2..4) of `…` at ~/src/lib.rs:12");
-        assert!(!c.backtrace.contains("someone") && c.backtrace.contains("~/.cargo"));
-        assert_eq!(scrub(&"x".repeat(900), None, 500).len(), 500);
+    fn a_crash_report_keeps_only_fixed_wording_location_and_function_names() {
+        let secrets = ["secret transcript", "someone@example.com", "https://acme.example/x", "/Users/someone", "someone", "acme", "0x1"];
+        let msg = r#"Could not paste "my secret transcript" for someone@example.com via https://acme.example/x from /Users/someone/Desktop/notes.txt"#;
+        let bt = "   0: std::backtrace::Backtrace::force_capture\n             at /rustc/abc/library/std/src/backtrace.rs:312:13\n   1: echotype_lib::process::{{closure}}\n             at /Users/someone/echotype/app/src-tauri/src/lib.rs:580:9\n   2: 0x1\n   3: <unknown>";
+        let c = crash(msg, "src/lib.rs", 12, bt);
+        assert_eq!(c.message, "Could not paste at src/lib.rs:12");
+        assert_eq!(c.backtrace, "std::backtrace::Backtrace::force_capture\nechotype_lib::process::{{closure}}");
+        let real = frames(&std::backtrace::Backtrace::force_capture().to_string());
+        assert!(real.contains("telemetry::tests") && !real.contains(".rs:") && !real.contains('/'), "{real}");
+        // An Err's text, a backticked string, a number: the interpolated part never makes it.
+        for (m, want) in [
+            (r#"called `Result::unwrap()` on an `Err` value: "said my secret transcript""#, "called"),
+            ("byte index 3 is not a char boundary; it is inside `my secret transcript`", "byte index"),
+            ("explicit panic", "explicit panic"),
+        ] {
+            assert_eq!(crash(m, "src/x.rs", 1, "").message, format!("{want} at src/x.rs:1"));
+        }
+        assert_eq!(crash("boom", "/Users/someone/.cargo/registry/src/x/lib.rs", 3, "").message, "boom at external");
+        // Whatever might remain is redacted again.
+        let r = redact("see someone@example.com https://acme.example/x (/Users/someone/a) /private/var/x C:\\Users\\a ~/notes fine::name");
+        assert_eq!(r, "see [email] [url] [path] [path] [path] [path] fine::name");
+        let all = serde_json::to_string(&c).unwrap();
+        for s in secrets {
+            assert!(!all.contains(s), "{s} in {all}");
+        }
+        assert_eq!(crash(&"x".repeat(900), "src/a.rs", 1, "").message.len(), 300);
+    }
+
+    #[test]
+    fn no_crash_file_while_off() {
+        let dir = scratch("hook");
+        write_crash(&dir, false, || panic!("not even built while off"));
+        assert!(!crash_dir(&dir).exists());
+        write_crash(&dir, true, || crash("boom", "src/lib.rs", 1, ""));
+        assert_eq!(std::fs::read_dir(crash_dir(&dir)).unwrap().count(), 1);
     }
 
     /// Against a local server/: ECHOTYPE_CLOUD_URL=http://127.0.0.1:8790/v1 cargo test live_telemetry -- --ignored
