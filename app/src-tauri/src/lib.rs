@@ -15,6 +15,7 @@ mod settings;
 mod stats;
 mod speakers;
 mod stt;
+mod telemetry;
 mod tray;
 mod wispr;
 
@@ -550,6 +551,7 @@ fn pastes(s: &Settings, main_focused: bool) -> bool {
 /// so the text goes to the clipboard instead. A Re-run (`rerun`) is copied and shown on the card.
 fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, paste: bool, rerun: Option<Rerun>) {
     if pcm.len() < MIN_SAMPLES {
+        telemetry::failure(&current_settings(app), telemetry::Failure::NoSpeech);
         emit_state(app, hint("Didn't catch that", None));
         return;
     }
@@ -577,9 +579,13 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
         // Keep the audio for retry_last (failed) and Re-run last; it replaces the one before.
         *lock(&state(&app).last_clip) = keep(pcm, failed);
         let ev = match result {
-            Err(e) => DictationState { state: "error", action: memory_action(&s, &e).or(error_action(&e)), error: Some(e), retry: true, ..Default::default() },
+            Err(e) => {
+                telemetry::failure(&s, if error_action(&e) == Some("model") { telemetry::Failure::ModelLoad } else { telemetry::Failure::Other });
+                DictationState { state: "error", action: memory_action(&s, &e).or(error_action(&e)), error: Some(e), retry: true, ..Default::default() }
+            }
             // Whisper invents "Thank you." and the like from noise; with no voice above the room, it's noise.
             Ok(out) if out.text.is_empty() || (cleanup::whisper_filler(&out.raw) && clip.snr_db.is_some_and(|d| d < NOISE_SNR_DB)) => {
+                telemetry::failure(&s, telemetry::Failure::NoSpeech);
                 hint(if clip.muted_seen { "No audio. Check your mic" } else { "Didn't catch that" }, clip.muted_seen.then_some("microphone"))
             }
             Ok(out) => {
@@ -603,6 +609,13 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
                 // After the paste, not before: the disk writes took 15-20 ms off the time to text.
                 if rerun.is_none() {
                     record_stats(&app, &s, stats::Source::Dictation, &out.text, speaking_ms); // a re-run's words were counted once
+                    telemetry::dictation(&s, stats::words(&out.text), out.stt_ms, out.cleanup_ms);
+                }
+                if out.cleaned.is_some() {
+                    telemetry::failure(&s, telemetry::Failure::CleanupRejected);
+                }
+                if let Err((_, fell_back)) = &res {
+                    telemetry::failure(&s, if *fell_back { telemetry::Failure::PasteFellBack } else { telemetry::Failure::Other });
                 }
                 record_history(&s, &out);
                 let action = warning.as_deref().and_then(|w| memory_action(&s, w));
@@ -1796,6 +1809,9 @@ pub fn run() {
         )
         .setup(|app| {
             let s = Settings::load();
+            telemetry::install_panic_hook(app.package_info().version.to_string());
+            let h = app.handle().clone();
+            telemetry::start(app.package_info().version.to_string(), move || current_settings(&h));
             notices::start(app.handle());
             let (pill_wake, woken) = mpsc::channel();
             app.manage(AppState {

@@ -54,6 +54,9 @@ pub struct Settings {
     pub history_enabled: bool,
     /// Count words and speaking speed on this computer (stats.rs). Counts only; on for upgraders too.
     pub usage_stats: bool,
+    /// Opt-in anonymous usage counts and crash reports for the beta (telemetry.rs). Off unless
+    /// switched on; the only thing that ever sends them.
+    pub share_telemetry: bool,
     /// Shown on the Stats page ("Aditya's stats"). Stays on this computer.
     pub display_name: String,
     pub onboarded: bool,
@@ -251,6 +254,7 @@ impl Default for Settings {
             restore_clipboard: true,
             history_enabled: true,
             usage_stats: true,
+            share_telemetry: false,
             display_name: String::new(),
             onboarded: false,
             onboard_step: 0,

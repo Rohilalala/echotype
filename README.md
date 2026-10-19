@@ -33,7 +33,7 @@
 - **See how much you talk.** The Stats page shows your words, words per minute and a year grid of the days you dictated. They are counts only, never your text, and stay on your computer; switch them off or clear them on the same page.
 - **Two looks.** Classic, or Ink, deep blue ink on warm paper, one click away in Settings. Both follow your light or dark setting.
 
-With local models, nothing leaves your computer. API keys live in the system keychain.
+With local models, nothing leaves your computer. API keys live in the system keychain. The one exception is yours to make: **Share anonymous usage stats and crash reports** in Settings → Privacy, off unless you turn it on. It sends a random install ID, the app version, the system and chip type, and daily counts (dictations, words, failures by kind, median speech and cleanup times, which models are in use, meetings started and finished), plus crash reports with your home folder and any text taken out. Never audio, text, your dictionary, app names, file paths, names or emails.
 
 ## Speed
 
