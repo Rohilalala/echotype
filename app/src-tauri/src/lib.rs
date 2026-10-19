@@ -414,6 +414,7 @@ fn show_later(app: &AppHandle, id: u64, locked: bool, after: Duration) {
 /// Opens the mic for recording `id`, after checking a model or key is ready (no point recording
 /// what can't be transcribed). The error is the state to show.
 fn start_recording(app: &AppHandle, s: &Settings, id: u64) -> Result<Live, DictationState> {
+    platform::wake_accessibility(); // ready by the time the words are pasted
     if notices::blocked() {
         return Err(hint("This version of Echotype is retired. Update it in Account to keep dictating.", Some("update")));
     }
