@@ -139,7 +139,7 @@ Releases include a Windows installer (.msi or .exe, x64) and a Linux .AppImage a
 
 ## Local models
 
-Echotype picks the models for your Mac by itself (**Automatic**): on a Mac with 8 GB of memory, Small and the smallest Echotype cleanup model, which macOS may page out when it needs the room; with more, Large v3 Turbo Q5 and the 1.5B cleanup model, kept ready. Turn on **Settings → Advanced → Show advanced settings** to choose the models yourself and set how the cleanup model uses memory.
+Echotype picks the models for your Mac by itself (**Automatic**): Echotype Tiny for cleanup on every Mac; on a Mac with 8 GB of memory, Small, with the cleanup model paged out when macOS needs the room; with more, Large v3 Turbo Q5, with the cleanup model kept ready. Turn on **Settings → Advanced → Show advanced settings** to choose the models yourself (Echotype Medium among them) and set how the cleanup model uses memory.
 
 | Model | Download | Memory | Use it for |
 |---|---|---|---|

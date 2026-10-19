@@ -490,7 +490,7 @@ function fillRemote(kind) {
   url.placeholder = custom ? 'http://localhost:8000/v1' : '';
   $(`#${kind}UrlDesc`).textContent = custom
     ? `Any OpenAI-compatible ${kind === 'stt' ? '/audio/transcriptions' : '/chat/completions'} endpoint.`
-    : cfg.provider === 'echotype' ? `Built in: runs on this Mac, nothing to start. ${sys?.echotype_model_installed ? `Installed, ${fmtMB(sys.echotype_model_mb)}.` : `Not installed (${fmtMB(sys?.echotype_model_mb ?? 940)}).`}`
+    : cfg.provider === 'echotype' ? `Built in: runs on this Mac, nothing to start. ${sys?.echotype_model_installed ? `Installed, ${fmtMB(sys.echotype_model_mb)}.` : `Not installed (${fmtMB(sys?.echotype_model_mb ?? 401)}).`}`
     : `Set by the ${p?.label ?? ''} preset.`;
   if (kind === 'cleanup') renderCleaner();
   const model = $(`#${kind}Model`);
@@ -652,7 +652,7 @@ function cleanerRow(c) {
   return h('div', { className: 'row model' },
     h('span', { className: 'tile', 'aria-hidden': 'true' }, svg(WAVE)),
     h('span', { className: 'row-text' },
-      h('span', { className: 'model-name' }, c.label, c.automatic && h('span', { className: 'tag rec' }, 'Recommended')),
+      h('span', { className: 'model-name' }, c.label, c.recommended && h('span', { className: 'tag rec' }, 'Recommended')),
       h('span', { className: 'row-desc' }, c.note),
       h('span', { className: 'model-meta' }, h('span', {}, fmtMB(c.size_mb)), h('span', {}, `about ${fmtMB(c.ram_mb)} RAM`)),
       c.warning && h('span', { className: 'row-desc warn' }, c.warning),
@@ -751,7 +751,7 @@ function renderCleaner() {
   pick.replaceChildren(...(S.advanced ? list.map(c => h('option', { value: c.id }, label(c))) : [h('option', { value: '' }, 'Automatic (recommended)')]));
   const cur = S.advanced ? list.find(c => c.id === S.cleanup.model) ?? auto : auto;
   pick.value = S.advanced ? cur?.id ?? '' : '';
-  $('#cleanerDesc').textContent = S.advanced ? cur?.warning ?? '' : auto ? `Uses ${auto.label}, picked for this Mac.` : '';
+  $('#cleanerDesc').textContent = S.advanced ? cur?.warning ?? '' : auto ? `Uses ${auto.label}.` : '';
   $('#cleanerDesc').classList.toggle('warn', S.advanced && !!cur?.warning);
 }
 $('#cleanerPick').addEventListener('change', e => { S.cleanup.model = e.target.value; save(); renderCleaner(); });
