@@ -853,10 +853,9 @@ fn run_local<T>(model: &Path, pcm: &[f32], languages: &[String], translate: bool
         p.set_vad_params(v);
     }
     if let Some(stop) = stop {
-        // A partial: the encoder sized to the clip (50 frames a second, plus slack) instead of
-        // whisper's full 30 s window. 78 ms instead of 260 on 5 s (M5 Pro, turbo Q5), and the
-        // encoder is the part an abort cannot interrupt.
-        p.set_audio_ctx(((pcm.len() as f32 / 16_000.0 * 50.0).ceil() as i32 + 64).min(1500));
+        // A partial runs whisper's full 30 s window like the final text. Sizing the encoder to the
+        // clip (set_audio_ctx) was 3x cheaper but turbo answers it with garbage ("itcks", "TH" for
+        // the start of "However, due to the slow communication channels"), as it did for dictation.
         // The raw setters: set_abort_callback_safe's trampoline reads its boxed closure as the wrong type.
         // SAFETY: `stop` is borrowed for this whole function, so it outlives the state.full call below.
         unsafe {
@@ -1275,5 +1274,25 @@ mod tests {
         assert_eq!(clean_text(" Hello [Music] world. "), "Hello world.");
         assert_eq!(prompt(&["Arnav".into(), " ".into(), "Xoxoday".into()]), "Arnav, Xoxoday.");
         assert_eq!(prompt(&[" ".into()]), "");
+    }
+
+    /// Live words against the final text on the same audio: the start of real speech, 2, 4 and 6 s.
+    /// `ECHOTYPE_TEST_MODEL=<ggml> ECHOTYPE_TEST_WAV=<speech> cargo test --release partials_match_the_final_text -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn partials_match_the_final_text() {
+        let (Ok(model), Ok(wav)) = (std::env::var("ECHOTYPE_TEST_MODEL"), std::env::var("ECHOTYPE_TEST_WAV")) else { return eprintln!("skipped") };
+        let model = Path::new(&model);
+        let pcm = crate::audio::decode(std::fs::read(&wav).unwrap(), Some("wav")).unwrap();
+        let en = ["en".to_string()];
+        let stop = AtomicBool::new(false);
+        for secs in [2usize, 4, 6] {
+            let clip = &pcm[..(secs * 16_000).min(pcm.len())];
+            let t = std::time::Instant::now();
+            let partial = transcribe_partial(model, clip, &en, false, "", None, &stop).unwrap();
+            let ms = t.elapsed().as_millis();
+            let full = transcribe_local(model, clip, &en, false, "", None).unwrap();
+            eprintln!("{secs} s ({ms} ms)\n  live:  {partial}\n  final: {full}");
+        }
     }
 }
