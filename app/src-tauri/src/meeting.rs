@@ -766,7 +766,7 @@ pub fn prune_audio(days: u32) {
             eprintln!("echotype: could not delete the old audio of meeting {}", m.id);
             continue;
         }
-        m.notices.push(format!("The audio was deleted {days} days after the meeting to save space (Settings → Meetings). The transcript stays, but speakers can't be re-checked without the audio."));
+        m.notices.push(format!("The audio was deleted {days} days after the meeting to save space (Settings → Meetings). The transcript and notes stay."));
         save(&dir, &m);
     }
 }
