@@ -603,7 +603,7 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .hero-sub .tag { margin-left: 2px; }
 .history summary .tag { flex: none; }
 .history .detail .hint { color: var(--fg-2); font-size: 12px; margin: 0; }
-.history .detail > .btn { align-self: flex-start; }
+.history .detail > .btn, .history .detail > .rerun { align-self: flex-start; }
 .history .fix { display: flex; flex-direction: column; gap: 8px; }
 .history .fix-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .history .learn { display: flex; flex-direction: column; gap: 6px; }

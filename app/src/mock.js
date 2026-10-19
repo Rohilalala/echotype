@@ -14,7 +14,7 @@ const settings = {
     match_app: q.has('apps'), app_styles: q.has('apps') ? [{ id: 'com.apple.Terminal', name: 'Terminal', style: '' }, { id: 'com.google.Chrome', name: 'Google Chrome', style: 'casual' }] : [] },
   dictionary: ['Echotype', 'Tauri', 'Hinglish', 'Supabase'],
   replacements: [{ from: 'my email', to: 'aditya@example.com' }],
-  restore_clipboard: true, history_enabled: true,
+  restore_clipboard: true, history_enabled: true, voice_commands: true,
   usage_stats: !q.has('statsoff'), display_name: q.get('name') || '',
   onboarded: !q.has('onboarding'), onboard_step: 0,
   talk_key: q.get('talk') || 'accelerator',
@@ -65,10 +65,11 @@ let history = [
   { ts: ago(1), raw: "don't forget to not include the tax in the final invoice", text: "don't forget to not include the tax in the final invoice", cleaned: "Don't forget to include the tax in the final invoice.", stt_ms: 520, cleanup_ms: 480, stt_provider: 'local', cleanup_provider: 'ollama' },
   { ts: ago(2), raw: 'ping arnav and midan about the zozo day thing', text: 'Ping Arnav and Midan about the Zozo Day thing', stt_ms: 420, cleanup_ms: 380, stt_provider: 'local', cleanup_provider: 'ollama' },
   { ts: ago(3), raw: 'lets meet tomorrow', text: 'lets meet tomorrow', stt_ms: 300, cleanup_ms: 0, stt_provider: 'local', cleanup_provider: null, no_cleanup: true },
-  { ts: ago(4), raw: 'haan toh um kal ki meeting mein we decided ki launch ko push karenge thursday tak', text: "In yesterday's meeting we decided to push the launch to Thursday.", stt_ms: 690, cleanup_ms: 540, stt_provider: 'local', cleanup_provider: 'ollama' },
+  { ts: ago(4), raw: 'haan toh um kal ki meeting mein we decided ki launch ko push karenge thursday tak', text: "In yesterday's meeting we decided to push the launch to Thursday.", stt_ms: 690, cleanup_ms: 540, stt_provider: 'local:large-v3-turbo-q5_0', cleanup_provider: 'ollama', original: 'Kal ki meeting mein we decided ki launch ko push karenge Thursday tak.' },
   { ts: ago(38), raw: 'can you send me the uh the figma link no wait the loom link from the demo', text: 'Can you send me the Loom link from the demo?', stt_ms: 410, cleanup_ms: 610, stt_provider: 'local', cleanup_provider: 'ollama' },
   { ts: ago(95), raw: 'groceries eggs milk sourdough and two avocados', text: 'Groceries:\n- Eggs\n- Milk\n- Sourdough\n- Two avocados', stt_ms: 380, cleanup_ms: 720, stt_provider: 'local', cleanup_provider: 'ollama' },
-  { ts: ago(60 * 26), raw: 'ship it after the tauri build passes on ci', text: 'ship it after the tauri build passes on ci', stt_ms: 350, cleanup_ms: 0, stt_provider: 'local', cleanup_provider: null, no_cleanup: true },
+  // noclip: recorded before Echotype kept audio, so it has no Re-run (only the newest 20 do).
+  { ts: ago(60 * 26), raw: 'ship it after the tauri build passes on ci', text: 'ship it after the tauri build passes on ci', stt_ms: 350, cleanup_ms: 0, stt_provider: 'local', cleanup_provider: null, no_cleanup: true, noclip: true },
 ];
 const secrets = new Set(['llm:groq']);
 
@@ -183,14 +184,18 @@ const commands = {
   pill_reset: () => null,
   pill_copy: () => null,
   pill_copy_cleaned: () => null,
-  // Re-run last (lib.rs rerun_options / rerun): ?norerun = no clip kept.
-  rerun_options: () => (q.has('norerun') ? [] : [
-    { id: 'lang:auto', label: 'Auto-detect language' }, { id: 'model:small', label: 'With Small' }, { id: 'raw', label: 'Without cleanup' },
-  ]),
-  rerun: async ({ id }) => {
+  // Re-run last or History entry `ts` (lib.rs rerun_options / rerun): ?norerun = no clip kept.
+  rerun_options: ({ ts }) => {
+    const e = ts == null ? history[0] : history.find(x => x.ts === ts);
+    if (q.has('norerun') || !e || e.noclip || history.indexOf(e) >= 20) return [];
+    return [{ id: 'lang:auto', label: 'Auto-detect language' }, { id: 'model:small', label: 'With Small' }, e.cleanup_provider && { id: 'raw', label: 'Without cleanup' }].filter(Boolean);
+  },
+  rerun: async ({ id, ts }) => {
+    const e = ts == null ? history[0] : history.find(x => x.ts === ts);
+    if (!e) throw 'There is no recording to re-run';
     emit('dictation-state', { state: 'transcribing' }); await wait(500);
-    const text = id === 'raw' ? 'so um the design review moves to friday at three' : 'The design review moves to Friday at 3.';
-    history.unshift({ ts: Math.floor(Date.now() / 1000), raw: 'so um the design review moves to friday at three', text, stt_ms: 610, cleanup_ms: id === 'raw' ? 0 : 450, stt_provider: id.startsWith('model:') ? `local:${id.slice(6)}` : 'local', cleanup_provider: id === 'raw' ? null : 'ollama', no_cleanup: id === 'raw' });
+    const text = id === 'raw' ? e.raw : e.raw[0].toUpperCase() + e.raw.slice(1) + '.';
+    Object.assign(e, { original: e.original ?? e.text, text, stt_ms: 610, cleanup_ms: id === 'raw' ? 0 : 450, stt_provider: id.startsWith('model:') ? `local:${id.slice(6)}` : e.stt_provider, cleanup_provider: id === 'raw' ? null : e.cleanup_provider, no_cleanup: id === 'raw', cleaned: undefined });
     emit('dictation-state', { state: 'done', text, copied: true, card: true, warning: 'Re-run copied, ⌘V to paste' });
     return null;
   },

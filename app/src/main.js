@@ -1067,9 +1067,14 @@ async function renderHistory() {
     copy.onclick = e => { e.preventDefault(); copyText(it.text, copy); };
     const text = h('span', { className: 'text' }, it.text);
     const fix = h('button', { className: 'btn', type: 'button', onclick: () => startFix(it, text, fix) }, 'Fix');
-    return h('details', {},
+    const restore = h('button', { className: 'btn quiet', type: 'button', onclick: async () => {
+      try { await invoke('update_history', { ts: it.ts, text: it.original }); renderHistory(); }
+      catch { restore.textContent = "Couldn't restore"; }
+    } }, 'Restore');
+    return h('details', { ontoggle: e => e.target.open && addRerun(it, fix) },
       h('summary', {}, text, it.no_cleanup && h('span', { className: 'tag' }, 'No cleanup'), h('time', { className: 'when', title: fmtTime(it.ts).replace('\n', ' ') }, fmtAgo(it.ts)), copy),
       h('div', { className: 'detail' }, fix,
+        it.original && it.original !== it.text && h('p', { className: 'raw text' }, h('b', {}, 'Before re-run: '), it.original, ' ', restore),
         it.raw !== it.text && h('p', { className: 'raw text' }, h('b', {}, 'Heard: '), it.raw),
         it.cleaned && h('p', { className: 'raw text' }, h('b', {}, 'Cleanup had (not pasted): '), it.cleaned, ' ', cleanedCopy(it.cleaned)),
         h('span', { className: 'timing' },
@@ -1162,8 +1167,24 @@ function cleanedCopy(text) {
 }
 
 // Re-run last dictation: the clip Echotype still holds in memory, with one thing changed. The result
-// is copied and shown on the pill, and lands here as a new entry.
+// is copied and shown on the pill, and replaces the entry's text here (Restore goes back).
 let rerunPending = false;
+// An entry's own Re-run, offered when it opens and its audio is still kept (the newest 20).
+async function addRerun(it, fix) {
+  if (fix.dataset.rerun) return;
+  fix.dataset.rerun = '1';
+  const opts = await invoke('rerun_options', { ts: it.ts }).catch(() => []);
+  if (!opts.length) return;
+  const sel = h('select', { className: 'rerun', 'aria-label': 'Re-run this dictation' }, h('option', { value: '' }, 'Re-run…'), ...opts.map(o => h('option', { value: o.id }, o.label)));
+  sel.onchange = () => {
+    const id = sel.value;
+    sel.value = '';
+    if (!id) return;
+    rerunPending = true;
+    invoke('rerun', { id, ts: it.ts }).catch(err => { rerunPending = false; dictation = { state: 'error', error: String(err) }; renderHero(); });
+  };
+  fix.after(sel);
+}
 async function renderRerun() {
   const sel = $('#rerunLast');
   const opts = await invoke('rerun_options').catch(() => []);
