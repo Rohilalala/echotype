@@ -999,6 +999,7 @@ fn open(app: &AppHandle, title: Option<String>) -> Result<Meeting, String> {
     crate::emit_state(app, crate::hint("Meeting notes on. Let everyone know this meeting is being transcribed.", None));
     emit(app, &id, "recording");
     show_window(app, &id);
+    crate::telemetry::meeting(&s, false);
     Ok(m)
 }
 
@@ -1130,6 +1131,7 @@ fn run(app: AppHandle, mut session: Session, rx: mpsc::Receiver<Piece>, stopped:
         }
     }
     drop(_done);
+    crate::telemetry::meeting(&crate::current_settings(&app), true);
     emit(&app, &id, "done");
 }
 
