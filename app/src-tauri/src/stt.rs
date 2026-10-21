@@ -816,6 +816,26 @@ fn lid_probs(pcm: &[f32]) -> Option<Vec<f32>> {
 /// (de/es/fr, 90 clips) every full-length clip clears 0.8, and 50 of 90 of their first 3 s do.
 const OTHER_LANGUAGE_P: f32 = 0.8;
 
+/// A language to offer the user (Settings.language_offer) after a dictation of 3 s or more: one
+/// the tiny model is OTHER_LANGUAGE_P sure of, not in their languages and not offered before.
+/// Never with auto-detect, which already types every language, or with 3 picked (the most).
+// ponytail: runs the tiny model (32 MB, kept loaded) for one-language users too, after the paste;
+// sample every few dictations if its memory or 13 ms matter.
+pub fn language_to_offer(s: &Settings, pcm: &[f32]) -> Option<String> {
+    let rate = crate::audio::RATE as usize;
+    if s.languages.is_empty() || s.languages.len() >= 3 || pcm.len() < 3 * rate || !lid_path().is_file() {
+        return None;
+    }
+    offer(&lid_probs(&pcm[..pcm.len().min(30 * rate)])?, &s.languages, &s.dismissed)
+}
+
+fn offer(probs: &[f32], languages: &[String], dismissed: &[String]) -> Option<String> {
+    let top = (0..probs.len()).max_by(|&a, &b| probs[a].total_cmp(&probs[b]))?;
+    let code = whisper_rs::get_lang_str(top as i32)?;
+    let new = probs[top] >= OTHER_LANGUAGE_P && !languages.iter().any(|l| l == code) && !dismissed.contains(&format!("lang_offer:{code}"));
+    new.then(|| code.to_string())
+}
+
 /// "Detect any language": the likeliest of `likely` (and the last language, `last`), unless another
 /// language scores OTHER_LANGUAGE_P or more.
 fn auto_pick(probs: &[f32], likely: &[String], last: Option<&str>) -> Option<String> {
@@ -1366,6 +1386,23 @@ mod tests {
         probs[id("th")] = 0.0;
         probs[id("en")] = 0.6;
         assert_eq!(auto_pick(&probs, &likely, None).as_deref(), Some("en"));
+    }
+
+    #[test]
+    fn a_clear_language_the_user_has_not_picked_is_offered_once() {
+        let mut probs = vec![0.0f32; whisper_rs::get_lang_max_id() as usize + 1];
+        let id = |c: &str| whisper_rs::get_lang_id(c).unwrap() as usize;
+        let (en, none) = (vec!["en".to_string()], Vec::<String>::new());
+        probs[id("hi")] = 0.9;
+        assert_eq!(offer(&probs, &en, &none).as_deref(), Some("hi"));
+        assert_eq!(offer(&probs, &en, &["lang_offer:hi".to_string()]), None, "never twice");
+        assert_eq!(offer(&probs, &["en".into(), "hi".into()], &none), None, "already theirs");
+        probs[id("hi")] = 0.6; // a short Hinglish clip: not sure enough
+        assert_eq!(offer(&probs, &en, &none), None);
+        let mut s = Settings::default();
+        assert_eq!(language_to_offer(&s, &vec![0.0; 16_000 * 5]), None, "auto-detect types every language");
+        s.languages = en;
+        assert_eq!(language_to_offer(&s, &vec![0.0; 16_000]), None, "under 3 s");
     }
 
     #[test]

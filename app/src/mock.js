@@ -10,19 +10,19 @@ const settings = {
   hotkey: 'Alt+Space', mode: 'hold', input_device: null, languages: q.get('langs')?.split(',') ?? [], script: q.get('script') || 'native', translate_to_english: false,
   local_api: { enabled: false, port: 7811 },
   stt: { provider: 'local', local_model: q.has('onboarding') ? '' : 'large-v3-turbo-q5_0', model: '', base_url: '' },
-  cleanup: { enabled: !q.has('nocleanup'), provider: 'ollama', model: 'gemma3:4b', base_url: '', style: 'default', custom_instructions: '',
+  cleanup: { enabled: !q.has('nocleanup'), provider: 'ollama', model: 'gemma3:4b', base_url: '', style: 'default', level: q.get('level') || 'medium', custom_instructions: '',
     match_app: q.has('apps'), app_styles: q.has('apps') ? [{ id: 'com.apple.Terminal', name: 'Terminal', style: '' }, { id: 'com.google.Chrome', name: 'Google Chrome', style: 'casual' }] : [] },
   dictionary: ['Echotype', 'Tauri', 'Hinglish', 'Supabase'],
   replacements: [{ from: 'my email', to: 'aditya@example.com' }, { from: 'our nav', to: 'Arnav' }],
   // ?learned previews the notice for words picked up from corrections (learn.rs).
   learn_words: true, learned: q.has('learned') ? ['Midhun', 'Xoxoday'] : [], ignored_words: [],
-  restore_clipboard: true, history_enabled: true, voice_commands: true,
+  restore_clipboard: true, history_enabled: true, voice_commands: true, send_it: true,
   usage_stats: !q.has('statsoff'), share_telemetry: q.has('telemetry'), display_name: q.get('name') || '',
   onboarded: !q.has('onboarding'), onboard_step: 0,
   talk_key: q.get('talk') || 'accelerator',
   paste_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+V',
   copy_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+C',
-  command_hotkey: 'Alt+Shift+Space',
+  command_hotkey: 'Alt+Shift+Space', undo_edit_hotkey: '',
   autostart: !q.has('upgrade'), sounds: true, sound_pack: 'classic', pill_fade: true, orb_listen: 'listening', orb_think: 'working', orb_detail: 1, orb_color: '#eef1ff', pill_size: 1.5, ball_size: 1,
   advanced: q.has('advanced'), cleaner_memory: 'ready', cleaner_idle_unload: false, cleaner_idle_minutes: 10, cleaner_context: 1024, greetings: true, detect_meetings: true, prefer_builtin_mic: true, pause_music: false, meeting_auto_stop: true, meeting_audio_days: 30,
   call_start: { meet: 'ask', teams: 'ask', zoom: 'ask', slack: 'ask', facetime: 'ask', webex: 'ask', discord: 'ask', other: 'ask' }, cloud_moved: q.has('moved'),
@@ -30,6 +30,7 @@ const settings = {
   pill_idle: !q.has('pilloff'), pill_hidden_until: q.has('pillhidden') ? now + 42 * 60000 : 0, pill_in_recordings: false, live_text: true,
   pill_positions: {}, pill_screen: null, pill_follow_cursor: true, show_in: q.has('menubar') ? 'menubar' : 'pill',
   dismissed: q.has('upgrade') || q.has('onboarding') ? [] : ['upgrade_offer'],
+  language_offer: q.get('offer') || '', // ?offer=hi: the detector heard Hindi (stt.rs language_to_offer)
 };
 if (q.has('bt')) settings.input_device = 'AirPods Pro';
 const presets = [

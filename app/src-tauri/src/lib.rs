@@ -97,6 +97,8 @@ struct AppState {
     /// The last dictated text, for paste-last and copy-last. Memory only, so it works with history
     /// off; cleared with history and when history is switched off.
     last_output: Mutex<Option<String>>,
+    /// The last dictation's words as heard, for the undo-edit shortcut. Memory only, cleared with last_output.
+    last_raw: Mutex<Option<String>>,
     /// The app the last dictation went to, with "Match the app you're typing in" on (Cleanup page: add it).
     last_app: Mutex<Option<platform::FrontApp>>,
     /// Model downloads in flight: id → fraction done, so a press can say "Model downloading 42%".
@@ -669,6 +671,7 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
         }))
         .unwrap_or_else(|_| Err("Transcription crashed unexpectedly".into()));
         let failed = result.is_err();
+        let heard = result.as_ref().is_ok_and(|o| !o.text.is_empty());
         // Keep the audio for retry_last (failed) and Re-run last; it replaces the one before.
         *lock(&state(&app).last_clip) = keep(pcm, failed, clip.entry);
         let ev = match result {
@@ -684,13 +687,19 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
             Ok(out) => {
                 *lock(&state(&app).last_output) = Some(out.text.clone());
                 *lock(&state(&app).last_cleaned) = out.cleaned.clone();
+                *lock(&state(&app).last_raw) = Some(out.raw.clone());
                 let paste = paste && pastes(&s, main_window_focused(&app));
                 let warning = out.warning.clone().or(clip.warning);
                 let chip = chip(clip.quality, out.no_cleanup && out.warning.is_none());
                 // Nothing focused takes text (the desktop, a list, Accessibility off): no ⌘V into nowhere.
                 let nowhere = paste && platform::paste_target() == platform::Target::Card;
                 let res = deliver(&app, &s, &out.text, paste, nowhere);
-                if res.is_ok() && paste && !nowhere && rerun.is_none() && s.learn_words {
+                // "Send it": Return only once the text is in the app.
+                if res.is_ok() && paste && out.send && rerun.is_none() && let Err(e) = platform::press_return(&app) {
+                    eprintln!("echotype: send it: {e}");
+                }
+                // A sent message has nothing left to correct.
+                if res.is_ok() && paste && !nowhere && !out.send && rerun.is_none() && s.learn_words {
                     learn::watch(&app, out.text.clone());
                 }
                 // After the paste, not before: the disk writes took 15-20 ms off the time to text.
@@ -742,6 +751,21 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
         };
         drop(guard);
         emit_state(&app, ev);
+        if heard && rerun.is_none() {
+            offer_language(&app, &s); // after the paste: it runs the tiny language model again
+        }
+    });
+}
+
+/// A language the detector heard clearly that is not one of the user's: offered once in the
+/// sidebar (Settings.language_offer), never again for that language.
+fn offer_language(app: &AppHandle, s: &Settings) {
+    let Some(code) = lock(&state(app).last_clip).as_ref().and_then(|k| stt::language_to_offer(s, &k.pcm)) else { return };
+    let _ = commit_settings(app, |old| {
+        let mut new = old.clone();
+        new.dismissed.push(format!("lang_offer:{code}"));
+        new.language_offer = code.clone();
+        new
     });
 }
 
@@ -898,6 +922,28 @@ fn paste_last(app: &AppHandle, paste: bool) {
     });
 }
 
+/// Undo the AI edit: the last dictation's words as heard, before cleanup, onto the clipboard, so
+/// ⌘Z then ⌘V in the app swaps them in.
+// ponytail: copies, never replaces in place: ⌘Z undoes a different amount in each app (typing
+// since the paste, nothing in a terminal), so doing it for the user could lose their text. To do it
+// in place, select back over the paste (AXSelectedTextRange) and check AXSelectedText first.
+fn undo_edit(app: &AppHandle) {
+    let st = state(app);
+    let (raw, text) = (lock(&st.last_raw).clone(), lock(&st.last_output).clone());
+    let undo = if cfg!(target_os = "macos") { "⌘Z" } else { "Ctrl+Z" };
+    let ev = match (raw, text) {
+        (Some(raw), Some(text)) if raw.trim() != text.trim() => match platform::copy(&raw) {
+            Ok(()) => hint(format!("Your words as heard are copied: {undo}, then {}", platform::PASTE_KEYS), None),
+            Err(e) => DictationState { state: "error", error: Some(e), ..Default::default() },
+        },
+        (Some(_), Some(_)) => hint("Cleanup didn't change your last dictation", None),
+        _ => hint("Nothing to undo yet", None),
+    };
+    if !st.recording.load(Ordering::SeqCst) {
+        emit_state(app, ev);
+    }
+}
+
 /// Counts one result in the local usage stats (words and speed, never text) when they are on.
 /// Before record_history, so the one-time history import can't count it twice.
 pub(crate) fn record_stats(app: &AppHandle, s: &Settings, source: stats::Source, text: &str, speaking_ms: u64) {
@@ -998,16 +1044,16 @@ fn swap_hotkey(app: &AppHandle, old: &str, new: &str) -> Result<(), String> {
     })
 }
 
-const SHORTCUT_NAMES: [&str; 4] = ["dictation", "paste last", "copy last", "Command Mode"];
+const SHORTCUT_NAMES: [&str; 5] = ["dictation", "paste last", "copy last", "Command Mode", "undo edit"];
 
-fn shortcuts(s: &Settings) -> [String; 4] {
-    [s.hotkey.clone(), s.paste_last_hotkey.clone(), s.copy_last_hotkey.clone(), s.command_hotkey.clone()]
+fn shortcuts(s: &Settings) -> [String; 5] {
+    [s.hotkey.clone(), s.paste_last_hotkey.clone(), s.copy_last_hotkey.clone(), s.command_hotkey.clone(), s.undo_edit_hotkey.clone()]
 }
 
 /// The settings fields whose shortcut is set but not registered right now: taken by another app
 /// at launch, and fixed by picking another key. Asked live, so a fixed one stops being reported.
 fn unregistered_shortcuts(s: &Settings, registered: impl Fn(&str) -> bool) -> Vec<&'static str> {
-    let fields = ["hotkey", "paste_last_hotkey", "copy_last_hotkey", "command_hotkey"];
+    let fields = ["hotkey", "paste_last_hotkey", "copy_last_hotkey", "command_hotkey", "undo_edit_hotkey"];
     shortcuts(s).iter().zip(fields).filter(|(k, _)| !k.is_empty() && !registered(k)).map(|(_, f)| f).collect()
 }
 
@@ -1117,13 +1163,13 @@ fn commit(old: &Settings, mut new: Settings, swap: impl Fn(&str, &str) -> R<()>,
     }
     let (mut warnings, mut swapped) = (vec![], vec![]);
     // Slots moving onto a key another slot is leaving go last, after that key is unregistered.
-    let mut order = [0, 1, 2, 3];
+    let mut order = [0, 1, 2, 3, 4];
     order.sort_by_key(|&i| olds.iter().any(|o| same_shortcut(&keys[i], o)));
     for i in order {
         if keys[i] == olds[i] {
             continue;
         }
-        let clash = (0..4).find(|&j| j != i && same_shortcut(&keys[i], &keys[j]));
+        let clash = (0..keys.len()).find(|&j| j != i && same_shortcut(&keys[i], &keys[j]));
         let res = match clash {
             Some(j) => Err(format!("{} is already the {} shortcut", keys[i], SHORTCUT_NAMES[j])),
             None => swap(&olds[i], &keys[i]),
@@ -1136,7 +1182,7 @@ fn commit(old: &Settings, mut new: Settings, swap: impl Fn(&str, &str) -> R<()>,
             }
         }
     }
-    [new.hotkey, new.paste_last_hotkey, new.copy_last_hotkey, new.command_hotkey] = keys.clone();
+    [new.hotkey, new.paste_last_hotkey, new.copy_last_hotkey, new.command_hotkey, new.undo_edit_hotkey] = keys.clone();
     let autostart_changed = new.autostart != old.autostart
         && match autostart(new.autostart) {
             Ok(()) => true,
@@ -1186,6 +1232,7 @@ fn commit_settings(app: &AppHandle, change: impl FnOnce(&Settings) -> Settings) 
     if old.history_enabled && !new.history_enabled {
         *lock(&state(app).last_output) = None; // switching history off also forgets the in-memory copy
         *lock(&state(app).last_cleaned) = None;
+        *lock(&state(app).last_raw) = None;
         settings::clear_clips();
     }
     if new.talk_key != old.talk_key {
@@ -1316,6 +1363,7 @@ async fn update_history(app: AppHandle, ts: u64, text: String) -> R<()> {
 async fn clear_history(app: AppHandle) -> R<()> {
     *lock(&state(&app).last_output) = None;
     *lock(&state(&app).last_cleaned) = None;
+    *lock(&state(&app).last_raw) = None;
     settings::clear_history()
 }
 
@@ -2042,6 +2090,8 @@ pub fn run() {
                         paste_last(app, false);
                     } else if is(&s.command_hotkey) {
                         send(app, Cmd::Command(if pressed { Ev::Press } else { Ev::Release }));
+                    } else if is(&s.undo_edit_hotkey) && !pressed {
+                        undo_edit(app);
                     }
                 })
                 .build(),
@@ -2070,6 +2120,7 @@ pub fn run() {
                 last_clip: Mutex::new(None),
                 last_cleaned: Mutex::new(None),
                 last_output: Mutex::new(None),
+                last_raw: Mutex::new(None),
                 last_app: Mutex::new(None),
                 downloads: Mutex::new(HashMap::new()),
                 recording: AtomicBool::new(false),
@@ -2453,6 +2504,20 @@ mod tests {
         s.hotkey = "Alt+KeyD".into();
         assert!(unregistered_shortcuts(&s, |k| k != "Alt+Space").is_empty());
         assert_eq!(unregistered_shortcuts(&s, |_| false), ["hotkey", "paste_last_hotkey", "command_hotkey"]);
+        s.undo_edit_hotkey = "Control+Alt+KeyZ".into();
+        assert_eq!(unregistered_shortcuts(&s, |k| k == "Alt+KeyD"), ["paste_last_hotkey", "command_hotkey", "undo_edit_hotkey"]);
+    }
+
+    #[test]
+    fn the_undo_edit_shortcut_is_set_like_the_others() {
+        let old = Settings::default();
+        let mut new = old.clone();
+        new.undo_edit_hotkey = "Alt+Shift+Space".into(); // Command Mode's key
+        let (kept, warning) = commit(&old, new.clone(), |_, _| panic!("swapped onto a taken key"), |_| Ok(()), |_| Ok(())).unwrap();
+        assert!(kept.undo_edit_hotkey.is_empty() && warning.unwrap().contains("already the Command Mode shortcut"));
+        new.undo_edit_hotkey = "Control+Alt+KeyZ".into();
+        let (kept, _) = commit(&old, new, |_, _| Ok(()), |_| Ok(()), |_| Ok(())).unwrap();
+        assert_eq!(kept.undo_edit_hotkey, "Control+Alt+KeyZ");
     }
 
     #[test]
@@ -2464,7 +2529,7 @@ mod tests {
 
     #[test]
     fn cli_prints_nothing_and_exits_zero_when_no_speech_was_found() {
-        let out = |text: &str| crate::cleanup::Output { raw: text.into(), text: text.into(), stt_ms: 5, cleanup_ms: 0, warning: None, no_cleanup: true, cleaned: None };
+        let out = |text: &str| crate::cleanup::Output { raw: text.into(), text: text.into(), stt_ms: 5, cleanup_ms: 0, warning: None, no_cleanup: true, cleaned: None, send: false };
         let (stdout, stderr, code) = cli_report(Ok(out("")), 9);
         assert_eq!((stdout.as_str(), code), ("", 0));
         assert!(stderr.starts_with("echotype: no speech found\n"), "{stderr}");

@@ -123,6 +123,7 @@ function changed(p) {
   if (p === 'languages' || p === 'script') { renderLanguages(); if (obStep === 2 && !$('#onboard').hidden) obLangsRender(); }
   if (p === 'cleanup.enabled') { setCleanupInert(); renderCloud(); refreshCloud(); }
   if (p === 'cleanup.match_app') refreshLastApp();
+  if (p === 'cleanup.level') renderLevel();
   if (p.startsWith('local_api')) refreshApi();
   if (p === 'history_enabled') renderHistory();
   if (p === 'pill_idle' || p === 'show_in') renderPill();
@@ -735,7 +736,11 @@ function renderCleanup() {
   setCleanupInert();
   fillRemote('cleanup');
   renderAppStyles();
+  renderLevel();
 }
+// cleanup.rs: None skips the model; Light keeps the model's text only when it barely changed the words.
+const LEVEL_DESC = { none: 'No model: your words as heard, with voice commands, snippets and capitals.', light: 'Removes fillers and repeats and fixes punctuation. Never rewords.', medium: 'Also applies “no wait” corrections, lists and grammar.' };
+const renderLevel = () => { $('#levelDesc').textContent = LEVEL_DESC[S.cleanup.level] ?? ''; };
 
 // "Match the app you're typing in": the user's style per app, and the app the last dictation went to.
 const APP_STYLE_OPTS = [['', 'Your style'], ['default', 'Default'], ['casual', 'Casual'], ['formal', 'Formal'], ['verbatim', 'Verbatim']];
@@ -1146,7 +1151,7 @@ async function renderHistory() {
       h('summary', {}, text, it.no_cleanup && h('span', { className: 'tag' }, 'No cleanup'), h('time', { className: 'when', title: fmtTime(it.ts).replace('\n', ' ') }, fmtAgo(it.ts)), copy),
       h('div', { className: 'detail' }, fix,
         it.original && it.original !== it.text && h('p', { className: 'raw text' }, h('b', {}, 'Before re-run: '), it.original, ' ', restore),
-        it.raw !== it.text && h('p', { className: 'raw text' }, h('b', {}, 'Heard: '), it.raw),
+        it.raw !== it.text && h('p', { className: 'raw text' }, h('b', {}, 'Heard: '), it.raw, ' ', cleanedCopy(it.raw, 'Copy original')),
         it.cleaned && h('p', { className: 'raw text' }, h('b', {}, 'Cleanup had (not pasted): '), it.cleaned, ' ', cleanedCopy(it.cleaned)),
         h('span', { className: 'timing' },
           h('span', {}, `Speech ${it.stt_ms} ms${it.stt_provider ? ` (${it.stt_provider})` : ''}`),
@@ -1231,8 +1236,8 @@ function fixSuggestions(before, after) {
   return out;
 }
 
-function cleanedCopy(text) {
-  const b = h('button', { className: 'btn quiet', type: 'button' }, 'Copy');
+function cleanedCopy(text, label = 'Copy') {
+  const b = h('button', { className: 'btn quiet', type: 'button' }, label);
   b.onclick = () => copyText(text, b);
   return b;
 }
@@ -1475,13 +1480,13 @@ async function refreshNotices() {
 // One notice at a time above Account and Settings: its button and a ✕ that dismisses it for good.
 function renderNotice() {
   const box = $('#sideNotice');
-  const n = (notices.notices || []).find(x => !S.dismissed.includes(`notice:${x.id}`));
+  const n = languageOffer() || (notices.notices || []).find(x => !S.dismissed.includes(`notice:${x.id}`));
   $('#retired').hidden = !notices.blocked;
   if (S.learned.length) return learnedNotice(box);
   box.hidden = !n;
   if (!n) return box.replaceChildren();
   box.replaceChildren(
-    h('button', { className: 'icon-btn notice-x', type: 'button', 'aria-label': `Dismiss: ${n.title}`, onclick: () => { dismiss(`notice:${n.id}`); renderNotice(); } }, svg(CROSS)),
+    h('button', { className: 'icon-btn notice-x', type: 'button', 'aria-label': `Dismiss: ${n.title}`, onclick: () => { n.dismiss ? n.dismiss() : dismiss(`notice:${n.id}`); renderNotice(); } }, svg(CROSS)),
     h('b', {}, n.title),
     n.body && h('p', {}, n.body),
     n.action_label && n.action && h('button', { className: 'btn', type: 'button', onclick: () => noticeAction(n.action) }, n.action_label));
@@ -1504,8 +1509,19 @@ function learnedNotice(box) {
       h('button', { className: 'btn', type: 'button', onclick: () => done(true) }, 'Keep'),
       h('button', { className: 'btn quiet', type: 'button', onclick: () => done(false) }, 'Undo')));
 }
+
+// stt.rs language_to_offer: a language the detector heard clearly, offered once as a notice of our own.
+function languageOffer() {
+  const c = S.language_offer;
+  if (!c || S.languages.includes(c)) return null;
+  let name = langName(c);
+  if (name === c) try { name = new Intl.DisplayNames(['en'], { type: 'language' }).of(c); } catch {}
+  const done = add => { if (add && S.languages.length < LANG_MAX) S.languages.push(c); S.language_offer = ''; save(); renderNotice(); renderLanguages(); renderChips(); };
+  return { title: `Sounds like you speak ${name}`, body: 'Add it to your languages?', action_label: 'Add', action: () => done(true), dismiss: () => done(false) };
+}
 // "update", "page:<page>" or an https link; anything else does nothing.
 function noticeAction(a) {
+  if (typeof a === 'function') return a();
   if (a === 'update') return ACTIONS.update[1]();
   if (a.startsWith('page:')) return go(a.slice(5));
   if (/^https:\/\//.test(a)) invoke('plugin:opener|open_url', { url: a }).catch(() => {});
