@@ -1144,7 +1144,7 @@ fn undo_edit(app: &AppHandle) {
     let undo = if cfg!(target_os = "macos") { "⌘Z" } else { "Ctrl+Z" };
     let ev = match (raw, text) {
         (Some(raw), Some(text)) if raw.trim() != text.trim() => match platform::copy(&raw) {
-            Ok(()) => hint(format!("Your words as heard are copied: {undo}, then {}", platform::PASTE_KEYS), None),
+            Ok(()) => hint(format!("Your text before the change is copied: {undo}, then {}", platform::PASTE_KEYS), None),
             Err(e) => DictationState { state: "error", error: Some(e), ..Default::default() },
         },
         (Some(_), Some(_)) => hint("Cleanup didn't change your last dictation", None),
