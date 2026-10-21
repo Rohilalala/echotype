@@ -4,7 +4,8 @@
 # The R2 API token's key pair is read from the Keychain item "echotype-r2" (account "r2"), saved once with:
 #   read -s "?R2 Access Key ID: " K; echo; read -s "?R2 Secret Access Key: " S; echo
 #   security add-generic-password -a r2 -s echotype-r2 -w "$K:$S" -U; unset K S
-# Files are public at https://pub-da62fbe34de644598313554b0a5ccc51.r2.dev/<name>.
+# Files are public at https://models.tryechotype.tech/<name> (and the older r2.dev address, which
+# builds before 2026-10-22 still read app.json from: keep it on).
 #
 # Notices and retiring versions (src-tauri/src/notices.rs) live in app.json there:
 #   { "min_version": "0.1.0",
