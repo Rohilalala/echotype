@@ -117,6 +117,8 @@ enum Cmd {
     Lost(u64),
     /// Recording `n` survived SHOW_AFTER: show it and play the start (or, once locked, the lock) sound.
     Show(u64, bool),
+    /// A transform's shortcut came up: apply it, by name, to the selection.
+    Transform(String),
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -202,7 +204,7 @@ fn chip(quality: Option<Quality>, no_cleanup: bool) -> Option<&'static str> {
 
 /// Which window page fixes an error, from the error text the pipeline produced.
 fn error_action(e: &str) -> Option<&'static str> {
-    if e.starts_with("Not enough free memory") || e.contains("could not load") || e.contains("Choose a speech model") || e.contains("multilingual model") {
+    if e.starts_with("Not enough free memory") || e.contains("could not load") || e.contains("Choose a speech model") {
         Some("model")
     } else {
         None
@@ -314,6 +316,13 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                         if let Some(k) = lock(&state(&app).last_clip).take_if(|k| k.failed) {
                             process(&app, k.pcm, busy.clone(), Clip { entry: k.entry, ..Default::default() }, false, None);
                         }
+                    }
+                    continue;
+                }
+                // Like a retry: never over a recording or another result still on its way.
+                Cmd::Transform(name) => {
+                    if live.is_none() && !busy.load(Ordering::SeqCst) {
+                        process_edit(&app, busy.clone(), move |app, s| run_transform(app, s, &name));
                     }
                     continue;
                 }
@@ -516,7 +525,7 @@ fn last_words(text: &str, max: usize) -> String {
 fn spawn_partials(app: &AppHandle, s: &Settings, tap: audio::Tap, stop: Arc<AtomicBool>) {
     let (app, s) = (app.clone(), s.clone());
     std::thread::spawn(move || {
-        let Ok((model, _)) = stt::pick_local_model(&s) else { return };
+        let Ok(model) = stt::pick_local_model(&s) else { return };
         let (prompt, vad) = (stt::prompt(&s), speakers::vad());
         let mut last: Option<Instant> = None;
         while !stop.load(Ordering::SeqCst) {
@@ -526,7 +535,7 @@ fn spawn_partials(app: &AppHandle, s: &Settings, tap: audio::Tap, stop: Arc<Atom
             }
             last = Some(Instant::now());
             let pcm = tap.tail(PARTIAL_TAIL.as_secs_f32());
-            let Ok(text) = stt::transcribe_partial(&model, &pcm, &stt::languages(&s), s.translate_to_english, &prompt, vad.as_deref(), &stop) else { continue };
+            let Ok(text) = stt::transcribe_partial(&model, &pcm, &stt::languages(&s), &prompt, vad.as_deref(), &stop) else { continue };
             // Silence keeps the words already up.
             if stop.load(Ordering::SeqCst) || !cleanup::has_speech(&text) {
                 continue;
@@ -779,49 +788,91 @@ fn process_command(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>) {
         emit_state(app, hint("Didn't catch that", None));
         return;
     }
+    process_edit(app, busy, move |app, s| run_command(app, s, &pcm));
+}
+
+/// Command Mode or a transform on a worker thread, busy meanwhile; a panic is an error state.
+fn process_edit(app: &AppHandle, busy: Arc<AtomicBool>, run: impl FnOnce(&AppHandle, &Settings) -> DictationState + Send + 'static) {
     busy.store(true, Ordering::SeqCst);
     let app = app.clone();
     std::thread::spawn(move || {
         let guard = Busy(busy);
         let s = current_settings(&app);
-        let ev = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_command(&app, &s, &pcm)))
+        let ev = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&app, &s)))
             .unwrap_or_else(|_| DictationState { state: "error", error: Some("Command Mode crashed unexpectedly. Your text is unchanged.".into()), ..Default::default() });
         drop(guard);
         emit_state(&app, ev);
     });
 }
 
-fn run_command(app: &AppHandle, s: &Settings, pcm: &[f32]) -> DictationState {
-    let error = |e: String| DictationState { state: "error", error: Some(e), ..Default::default() };
-    // The selection first, while it is still the one the user meant. Echotype's own window, or
-    // focus that takes no text: nothing to read, so the instruction is something to write.
+fn edit_error(e: String) -> DictationState {
+    DictationState { state: "error", error: Some(e), ..Default::default() }
+}
+
+/// Where an edit's result goes (`paste`, `nowhere` as in deliver) and the selected text. Read
+/// first, while it is still the one the user meant. Echotype's own window: nothing to read.
+/// Focus that takes no text (a web page) can still have a selection: it is read, and the result
+/// shows on the card.
+// ponytail: on the desktop ⌘C copies a selected file's name, which then reads as the selection;
+// the result only goes to the card. Skip the read when nothing has focus if that confuses anyone.
+fn edit_target(app: &AppHandle, s: &Settings) -> Result<(bool, bool, Option<String>), DictationState> {
     let paste = pastes(s, main_window_focused(app));
     let nowhere = paste && platform::paste_target() == platform::Target::Card;
-    let selection = if !paste || nowhere {
-        None
-    } else if !platform::wait_for_modifiers_up(Duration::from_millis(500)) {
-        return error("Let go of the shortcut to edit. Your text is unchanged.".into()); // a ⌘C now would carry its modifiers
-    } else {
-        match platform::copy_selection(app) {
-            Ok(t) => t,
-            Err(e) => return error(format!("Couldn't read the selection: {e}. Your text is unchanged.")),
-        }
+    if !paste {
+        return Ok((paste, nowhere, None));
+    }
+    if !platform::wait_for_modifiers_up(Duration::from_millis(500)) {
+        return Err(edit_error("Let go of the shortcut to edit. Your text is unchanged.".into())); // a ⌘C now would carry its modifiers
+    }
+    match platform::copy_selection(app) {
+        Ok(t) => Ok((paste, nowhere, t.filter(|t| !t.trim().is_empty()))),
+        Err(e) => Err(edit_error(format!("Couldn't read the selection: {e}. Your text is unchanged."))),
+    }
+}
+
+fn run_command(app: &AppHandle, s: &Settings, pcm: &[f32]) -> DictationState {
+    let (paste, nowhere, selection) = match edit_target(app, s) {
+        Ok(t) => t,
+        Err(e) => return e,
     };
     emit_state(app, simple("transcribing"));
-    // The instruction as spoken: no cleanup pass, which would "clean" it into something else.
+    // The instruction as spoken: no cleanup pass or transform, which would turn it into something else.
     let mut raw = s.clone();
     raw.cleanup.enabled = false;
+    raw.auto_transform.clear();
     let instruction = match cleanup::run(&raw, pcm, false, || {}) {
         Ok(out) if !out.text.is_empty() => out.text,
         Ok(_) => return hint("Didn't catch that", None),
-        Err(e) => return DictationState { action: error_action(&e), ..error(e) },
+        Err(e) => return DictationState { action: error_action(&e), ..edit_error(e) },
     };
+    apply_edit(app, s, "Command", selection.as_deref(), &instruction, paste, nowhere)
+}
+
+/// A transform's shortcut: its instruction on the selected text, as Command Mode would apply it.
+fn run_transform(app: &AppHandle, s: &Settings, name: &str) -> DictationState {
+    if let Err(e) = command_ready(s, true) {
+        return e;
+    }
+    let Some(instruction) = settings::transform_instruction(s, name).filter(|i| !i.trim().is_empty()) else {
+        return hint(format!("Add an instruction to {name} in Settings"), Some("settings"));
+    };
+    match edit_target(app, s) {
+        Ok((paste, nowhere, Some(sel))) => apply_edit(app, s, name, Some(&sel), &instruction, paste, nowhere),
+        Ok(_) => hint(format!("Select some text, then use {name}"), None),
+        Err(e) => e,
+    }
+}
+
+/// The cleanup provider applies `instruction` (to `selection`, if any) and the result replaces
+/// the selection. With nothing to paste into (a web page, the desktop), the card shows it.
+/// `what` names the edit in errors ("Command", a transform's name).
+fn apply_edit(app: &AppHandle, s: &Settings, what: &str, selection: Option<&str>, instruction: &str, paste: bool, nowhere: bool) -> DictationState {
     emit_state(app, simple("cleaning"));
     let provider = settings::preset(&s.cleanup.provider).map_or(s.cleanup.provider.clone(), |p| p.label.to_string());
-    let text = match cleanup::chat(s, cleanup::COMMAND_PROMPT, &cleanup::command_input(selection.as_deref(), &instruction), Duration::from_secs(60)) {
+    let text = match cleanup::chat(s, cleanup::COMMAND_PROMPT, &cleanup::command_input(selection, instruction), Duration::from_secs(60)) {
         Ok(t) if !t.is_empty() => t,
-        Ok(_) => return error(format!("{provider} returned nothing. Your text is unchanged.")),
-        Err(e) => return DictationState { action: Some("cleanup"), ..error(format!("Command failed: {provider}: {}. Your text is unchanged.", e.lines().next().unwrap_or_default().trim_end_matches('.'))) },
+        Ok(_) => return edit_error(format!("{provider} returned nothing. Your text is unchanged.")),
+        Err(e) => return DictationState { action: Some("cleanup"), ..edit_error(format!("{what} failed: {provider}: {}. Your text is unchanged.", e.lines().next().unwrap_or_default().trim_end_matches('.'))) },
     };
     *lock(&state(app).last_output) = Some(text.clone());
     match deliver(app, s, &text, paste, nowhere) {
@@ -830,11 +881,16 @@ fn run_command(app: &AppHandle, s: &Settings, pcm: &[f32]) -> DictationState {
             if s.sounds {
                 platform::play_sound(app, "nopaste");
             }
-            card(s, text, Some(e), None)
+            // Read-only text (a web page): the answer or rewrite is to read and copy, not a failure.
+            let why = if selection.is_some() && platform::accessibility_granted() { READ_ONLY.to_string() } else { e };
+            card(s, text, Some(why), None)
         }
         Err((e, false)) => DictationState { state: "error", text: Some(text), error: Some(e), ..Default::default() },
     }
 }
+
+/// The card's reason when the selection could be read but not replaced.
+const READ_ONLY: &str = "Read-only text, here's the result";
 
 /// The "nowhere to paste" card. Home offers the Accessibility fix when that is why.
 fn card(s: &Settings, text: String, warning: Option<String>, chip: Option<&'static str>) -> DictationState {
@@ -989,16 +1045,26 @@ fn swap_hotkey(app: &AppHandle, old: &str, new: &str) -> Result<(), String> {
 }
 
 const SHORTCUT_NAMES: [&str; 4] = ["dictation", "paste last", "copy last", "Command Mode"];
+const SHORTCUT_FIELDS: [&str; 4] = ["hotkey", "paste_last_hotkey", "copy_last_hotkey", "command_hotkey"];
 
-fn shortcuts(s: &Settings) -> [String; 4] {
-    [s.hotkey.clone(), s.paste_last_hotkey.clone(), s.copy_last_hotkey.clone(), s.command_hotkey.clone()]
+/// Every shortcut slot as (field, key): the four settings fields, then each transform's as
+/// "transform:<name>" (names are unique, settings.rs migrate).
+fn shortcuts(s: &Settings) -> Vec<(String, String)> {
+    let fixed = [&s.hotkey, &s.paste_last_hotkey, &s.copy_last_hotkey, &s.command_hotkey];
+    let mut all: Vec<(String, String)> = SHORTCUT_FIELDS.iter().zip(fixed).map(|(f, k)| (f.to_string(), k.clone())).collect();
+    all.extend(s.transforms.iter().map(|t| (format!("transform:{}", t.name), t.shortcut.clone())));
+    all
 }
 
-/// The settings fields whose shortcut is set but not registered right now: taken by another app
-/// at launch, and fixed by picking another key. Asked live, so a fixed one stops being reported.
-fn unregistered_shortcuts(s: &Settings, registered: impl Fn(&str) -> bool) -> Vec<&'static str> {
-    let fields = ["hotkey", "paste_last_hotkey", "copy_last_hotkey", "command_hotkey"];
-    shortcuts(s).iter().zip(fields).filter(|(k, _)| !k.is_empty() && !registered(k)).map(|(_, f)| f).collect()
+/// How a clash names a slot: "the Polish shortcut", "the dictation shortcut".
+fn shortcut_name(field: &str) -> &str {
+    SHORTCUT_FIELDS.iter().position(|f| *f == field).map_or_else(|| field.trim_start_matches("transform:"), |i| SHORTCUT_NAMES[i])
+}
+
+/// The slots whose shortcut is set but not registered right now: taken by another app at
+/// launch, and fixed by picking another key. Asked live, so a fixed one stops being reported.
+fn unregistered_shortcuts(s: &Settings, registered: impl Fn(&str) -> bool) -> Vec<String> {
+    shortcuts(s).into_iter().filter(|(_, k)| !k.is_empty() && !registered(k)).map(|(f, _)| f).collect()
 }
 
 fn same_shortcut(a: &str, b: &str) -> bool {
@@ -1100,22 +1166,27 @@ async fn get_settings(app: AppHandle) -> R<Settings> {
 /// warning; the same for launch at login. A failed save undoes every swap, so the registrations,
 /// the file and memory never disagree. The dictation shortcut can't be unbound; the others can ("").
 fn commit(old: &Settings, mut new: Settings, swap: impl Fn(&str, &str) -> R<()>, autostart: impl Fn(bool) -> R<()>, save: impl Fn(&Settings) -> R<()>) -> R<(Settings, Option<String>)> {
-    let olds = shortcuts(old);
-    let mut keys = shortcuts(&new);
+    // Slots by field: a transform added, removed or renamed has "" on the side without it.
+    let (was, now) = (shortcuts(old), shortcuts(&new));
+    let mut fields: Vec<String> = now.iter().map(|(f, _)| f.clone()).collect();
+    fields.extend(was.iter().map(|(f, _)| f.clone()).filter(|f| !now.iter().any(|(g, _)| g == f)));
+    let key = |v: &[(String, String)], f: &str| v.iter().find(|(g, _)| g == f).map_or(String::new(), |(_, k)| k.clone());
+    let olds: Vec<String> = fields.iter().map(|f| key(&was, f)).collect();
+    let mut keys: Vec<String> = fields.iter().map(|f| key(&now, f)).collect();
     if keys[0].trim().is_empty() {
         keys[0] = olds[0].clone();
     }
     let (mut warnings, mut swapped) = (vec![], vec![]);
     // Slots moving onto a key another slot is leaving go last, after that key is unregistered.
-    let mut order = [0, 1, 2, 3];
+    let mut order: Vec<usize> = (0..fields.len()).collect();
     order.sort_by_key(|&i| olds.iter().any(|o| same_shortcut(&keys[i], o)));
     for i in order {
         if keys[i] == olds[i] {
             continue;
         }
-        let clash = (0..4).find(|&j| j != i && same_shortcut(&keys[i], &keys[j]));
+        let clash = (0..fields.len()).find(|&j| j != i && same_shortcut(&keys[i], &keys[j]));
         let res = match clash {
-            Some(j) => Err(format!("{} is already the {} shortcut", keys[i], SHORTCUT_NAMES[j])),
+            Some(j) => Err(format!("{} is already the {} shortcut", keys[i], shortcut_name(&fields[j]))),
             None => swap(&olds[i], &keys[i]),
         };
         match res {
@@ -1126,7 +1197,11 @@ fn commit(old: &Settings, mut new: Settings, swap: impl Fn(&str, &str) -> R<()>,
             }
         }
     }
-    [new.hotkey, new.paste_last_hotkey, new.copy_last_hotkey, new.command_hotkey] = keys.clone();
+    [new.hotkey, new.paste_last_hotkey, new.copy_last_hotkey, new.command_hotkey] = std::array::from_fn(|i| keys[i].clone());
+    let kept: Vec<(String, String)> = fields.into_iter().zip(keys.iter().cloned()).collect();
+    for t in &mut new.transforms {
+        t.shortcut = key(&kept, &format!("transform:{}", t.name));
+    }
     let autostart_changed = new.autostart != old.autostart
         && match autostart(new.autostart) {
             Ok(()) => true,
@@ -2029,6 +2104,11 @@ pub fn run() {
                         paste_last(app, false);
                     } else if is(&s.command_hotkey) {
                         send(app, Cmd::Command(if pressed { Ev::Press } else { Ev::Release }));
+                    } else if let Some(t) = s.transforms.iter().find(|t| is(&t.shortcut)) {
+                        // On release, like paste last: its ⌘C waits for the modifiers anyway.
+                        if !pressed {
+                            send(app, Cmd::Transform(t.name.clone()));
+                        }
                     }
                 })
                 .build(),
@@ -2070,7 +2150,7 @@ pub fn run() {
                 let _ = st.pill_wake.send(());
             });
             pill::run(app.handle().clone(), pill::create(app, &s)?, woken);
-            for key in shortcuts(&s).iter().filter(|k| !k.is_empty()) {
+            for (_, key) in shortcuts(&s).iter().filter(|(_, k)| !k.is_empty()) {
                 if let Err(e) = swap_hotkey(app.handle(), "", key) {
                     eprintln!("echotype: {e}");
                 }
@@ -2282,7 +2362,7 @@ pub fn cli(args: &[String]) -> i32 {
                 }
                 None => file = None,
             },
-            "--translate" => s.translate_to_english = true,
+            "--translate" => s.auto_transform = settings::TRANSLATE.into(),
             other => {
                 eprintln!("echotype: unknown argument '{other}'");
                 file = None;
@@ -2564,6 +2644,37 @@ mod tests {
     }
 
     #[test]
+    fn transform_shortcuts_are_set_moved_and_freed_like_the_others() {
+        let old = Settings::default();
+        let mut new = old.clone();
+        new.transforms[0].shortcut = "Control+Alt+KeyP".into();
+        new.transforms[1].shortcut = "Alt+Shift+Space".into(); // Command Mode's
+        let swaps = RefCell::new(vec![]);
+        let log = |o: &str, n: &str| {
+            swaps.borrow_mut().push(format!("{o}>{n}"));
+            Ok(())
+        };
+        let (kept, warning) = commit(&old, new, log, |_| Ok(()), |_| Ok(())).unwrap();
+        assert_eq!((kept.transforms[0].shortcut.as_str(), kept.transforms[1].shortcut.as_str()), ("Control+Alt+KeyP", ""));
+        assert!(warning.unwrap().contains("already the Command Mode shortcut"));
+        assert_eq!(swaps.take(), [">Control+Alt+KeyP"]);
+        // Renamed: the key stays with it. Removed: its key is let go. Another taking it: named.
+        let mut renamed = kept.clone();
+        renamed.transforms[0].name = "Tidy".into();
+        let (kept2, _) = commit(&kept, renamed, log, |_| Ok(()), |_| Ok(())).unwrap();
+        assert_eq!((kept2.transforms[0].shortcut.as_str(), swaps.take()), ("Control+Alt+KeyP", vec!["Control+Alt+KeyP>".to_string(), ">Control+Alt+KeyP".to_string()]));
+        let mut taken = kept2.clone();
+        taken.copy_last_hotkey = "Control+Alt+KeyP".into();
+        assert!(commit(&kept2, taken, log, |_| Ok(()), |_| Ok(())).unwrap().1.unwrap().contains("already the Tidy shortcut"));
+        let mut removed = kept2.clone();
+        removed.transforms.remove(0);
+        swaps.take();
+        commit(&kept2, removed, log, |_| Ok(()), |_| Ok(())).unwrap();
+        assert_eq!(swaps.take(), ["Control+Alt+KeyP>"]);
+        assert_eq!(unregistered_shortcuts(&kept2, |_| false), ["hotkey", "command_hotkey", "transform:Tidy"]);
+    }
+
+    #[test]
     fn a_shortcut_can_take_a_key_another_one_is_leaving() {
         let mut old = Settings::default();
         old.paste_last_hotkey = "CommandOrControl+Control+V".into();
@@ -2599,7 +2710,7 @@ mod tests {
         use super::error_action;
         // The exact messages stt.rs produces; if one is reworded this keeps the window's action.
         for e in ["Choose a speech model", "Not enough free memory for medium: it needs about 1800 MB and 900 MB is free.",
-            "medium could not load: bad magic", "Translate to English needs a multilingual model (medium or small); large-v3-turbo cannot translate. Download one under Models."] {
+            "medium could not load: bad magic"] {
             assert_eq!(error_action(e), Some("model"), "{e}");
         }
         assert_eq!(error_action("Speech-to-text failed (500): boom"), None);

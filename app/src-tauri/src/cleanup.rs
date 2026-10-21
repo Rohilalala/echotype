@@ -19,9 +19,6 @@ pub fn system_prompt(s: &Settings) -> String {
         if !words.is_empty() {
             p += &format!("\nDictionary: {}", words.join(", "));
         }
-        if s.translate_to_english {
-            p += "\nTranslate to English: yes";
-        }
         return p;
     }
     let dict = if words.is_empty() { String::new() } else { format!("\nSpell these names and terms exactly as written: {}.", words.join(", ")) };
@@ -231,8 +228,7 @@ fn replace_word_by(text: &str, from: &str, to: impl Fn(&[char], &[char]) -> Opti
 }
 
 /// Whether the model has anything to do: a filler, a spoken correction, a list or spoken
-/// punctuation, a near miss of a Dictionary word, another script, a translation or a long
-/// dictation. On 169 of the owner's dictations this skips the model on 56%; there it only touched
+/// punctuation, a near miss of a Dictionary word, another script or a long dictation. On 169 of the owner's dictations this skips the model on 56%; there it only touched
 /// grammar on 13, and several of those were its mistakes ("layout. Is pretty horrible").
 // ponytail: English cue words; a language with its own fillers goes to the model (not ASCII).
 pub fn needs_cleanup(s: &Settings, text: &str) -> bool {
@@ -242,7 +238,7 @@ pub fn needs_cleanup(s: &Settings, text: &str) -> bool {
         "fucking", "fuck", "shit", "following", "meant", "scratch", "exclamation",
     ];
     const PHRASES: [&str; 12] = ["you know", "i mean", "kind of", "sort of", "no no", "make that", "number one", "point one", "step one", "things to", "list of", "question mark"];
-    if s.translate_to_english || !text.is_ascii() || text.contains(':') || text.split_whitespace().count() > 60 {
+    if !text.is_ascii() || text.contains(':') || text.split_whitespace().count() > 60 {
         return true;
     }
     let low = text.to_lowercase();
@@ -331,7 +327,8 @@ pub fn restyle(text: &str, style: &str) -> String {
 
 /// System prompt for Command Mode. chat() wraps the message in <transcript>, so the prompt names
 /// the two parts inside it.
-pub const COMMAND_PROMPT: &str = "You edit text on the user's instruction. Inside <transcript> you get the user's selected text in <text> and their spoken instruction in <instruction>. Apply the instruction to the text. If there is no <text>, write what the instruction asks for. Output only the resulting text, ready to paste: no preamble, no explanation, no quotes around it, no code fences.";
+/// Transforms send their stored instruction the same way.
+pub const COMMAND_PROMPT: &str = "You edit text on the user's instruction. Inside <transcript> you get the user's selected text in <text> and their instruction in <instruction>. Apply the instruction to the text. If the instruction asks about the text (explain, summarize, answer), give the answer instead. If there is no <text>, write what the instruction asks for. Output only the resulting text, ready to paste: no preamble, no explanation, no quotes around it, no code fences.";
 
 /// The message for Command Mode: the selection (if any, and not blank) and the instruction.
 pub fn command_input(selection: Option<&str>, instruction: &str) -> String {
@@ -433,8 +430,7 @@ fn rejected(s: &Settings, raw: &str, cleaned: &str) -> Option<&'static str> {
     if negations(cleaned) < negations(raw) {
         return Some("Cleanup dropped a \"not\" you said, so Echotype pasted your words as spoken.");
     }
-    // A translation is all new words; only its negations can be checked.
-    if !s.translate_to_english && added_words(raw, cleaned, &s.dictionary) {
+    if added_words(raw, cleaned, &s.dictionary) {
         return Some("Cleanup added words you did not say, so Echotype pasted your words as spoken.");
     }
     None
@@ -731,22 +727,52 @@ pub fn keyless(s: &Settings) -> bool {
     settings::preset(&c.provider).is_some_and(|p| p.needs_key) && settings::provider_key("llm", &c.provider).is_none()
 }
 
-/// STT → replacements → cleanup. Cleanup failure never loses text: the raw (replaced)
-/// transcript is returned with a warning. `on_cleaning` fires before the LLM call. `dictated`:
+/// STT → replacements → cleanup → the auto transform. Cleanup failure never loses text: the raw
+/// (replaced) transcript is returned with a warning. `on_cleaning` fires before each LLM call. `dictated`:
 /// live dictation, where spoken "new line" is a command (Settings: Voice commands); a voice note
 /// or API upload keeps its words.
-pub fn run(s: &Settings, pcm: &[f32], dictated: bool, on_cleaning: impl FnOnce()) -> Result<Output, String> {
+pub fn run(s: &Settings, pcm: &[f32], dictated: bool, on_cleaning: impl Fn()) -> Result<Output, String> {
     let t = Instant::now();
     let prompt = stt::prompt(s);
-    let (raw, warning) = if s.stt.provider == "local" {
-        let (model, warning) = stt::pick_local_model(s)?;
-        (stt::transcribe_local(&model, pcm, &stt::languages(s), s.translate_to_english, &prompt, crate::speakers::vad().as_deref())?, warning)
+    let raw = if s.stt.provider == "local" {
+        stt::transcribe_local(&stt::pick_local_model(s)?, pcm, &stt::languages(s), &prompt, crate::speakers::vad().as_deref())?
     } else {
-        (stt::transcribe_remote(s, pcm, &prompt)?, None)
+        stt::transcribe_remote(s, pcm, &prompt)?
     };
     let stt_ms = t.elapsed().as_millis() as u64;
-    let keyless = s.cleanup.enabled && keyless(s);
-    Ok(after_stt(s, raw, stt_ms, warning, keyless, dictated, on_cleaning, cleanup))
+    let out = after_stt(s, raw, stt_ms, None, s.cleanup.enabled && keyless(s), dictated, &on_cleaning, cleanup);
+    let blocked = (!s.auto_transform.is_empty()).then(|| command_blocked(s, keyless(s))).flatten(); // a keychain read only when needed
+    Ok(auto_transform(s, out, blocked, |input| {
+        on_cleaning();
+        chat(s, COMMAND_PROMPT, input, Duration::from_secs(60))
+    }))
+}
+
+/// The "Apply to every dictation" transform, after cleanup, so it reads what the speaker meant
+/// rather than their fillers (Translate to English: Whisper turbo can't translate, the cleanup
+/// provider can). It needs what Command Mode needs; when it can't run or fails, the text stays
+/// as it was and the warning says so.
+fn auto_transform(s: &Settings, mut out: Output, blocked: Option<String>, chat: impl FnOnce(&str) -> Result<String, String>) -> Output {
+    let name = s.auto_transform.as_str();
+    let Some(instruction) = settings::transform_instruction(s, name).filter(|_| !out.text.is_empty()) else { return out };
+    if let Some(why) = blocked {
+        out.warning = Some(format!("{name} did not run: {why}."));
+        return out;
+    }
+    let t = Instant::now();
+    match chat(&command_input(Some(&out.text), &instruction)) {
+        Ok(text) if !text.is_empty() => {
+            out.text = text;
+            out.cleaned = None; // the guard's alternative is from before the transform
+        }
+        Ok(_) => out.warning = Some(format!("{name} returned nothing, so Echotype pasted the text without it.")),
+        Err(e) => {
+            let provider = settings::preset(&s.cleanup.provider).map_or(s.cleanup.provider.as_str(), |p| p.label);
+            out.warning = Some(format!("{name} failed: {provider}: {}. Pasted the text without it.", e.lines().next().unwrap_or_default().trim_end_matches('.')));
+        }
+    }
+    out.cleanup_ms += t.elapsed().as_millis() as u64;
+    out
 }
 
 /// Everything after STT, with the LLM call passed in so tests never touch the network.
@@ -825,10 +851,6 @@ mod tests {
         assert_eq!(system_prompt(&s), head);
         s.dictionary = vec!["Arnav".into(), " ".into(), " Xoxoday ".into()];
         assert_eq!(system_prompt(&s), format!("{head}\nDictionary: Arnav, Xoxoday"));
-        s.translate_to_english = true;
-        assert_eq!(system_prompt(&s), format!("{head}\nDictionary: Arnav, Xoxoday\nTranslate to English: yes"));
-        s.dictionary.clear();
-        assert_eq!(system_prompt(&s), format!("{head}\nTranslate to English: yes"));
     }
 
     #[test]
@@ -970,9 +992,6 @@ mod tests {
         ] {
             assert!(needs_cleanup(&s, messy), "{messy}");
         }
-        s.translate_to_english = true;
-        assert!(needs_cleanup(&s, "Open a PR for staging."), "a translation always goes to the model");
-        s.translate_to_english = false;
         s.cleanup.style = "casual".into();
         assert_eq!(cleanup(&s, "We do not ship on Fridays.").unwrap(), "We don't ship on Fridays", "no model call, the style still applies");
         s.cleanup.provider = "echotype".into();
@@ -1043,11 +1062,6 @@ mod tests {
         for (raw, cleaned) in good {
             assert_eq!(rejected(&s, raw, cleaned), None, "{raw:?} -> {cleaned:?}");
         }
-        s.translate_to_english = true;
-        assert_eq!(rejected(&s, "Kal meeting nahi hogi.", "There is no meeting tomorrow."), None, "a translation may use new words");
-        assert!(rejected(&s, "Kal meeting nahi hogi.", "There is a meeting tomorrow.").is_some(), "but keeps its negation");
-
-        s.translate_to_english = false;
         s.cleanup.enabled = true;
         let raw = "Don't forget to not include the tax.";
         let o = after_stt(&s, raw.into(), 1, None, false, true, || {}, |_, _| Ok("Don't forget to include the tax.".into()));
@@ -1317,6 +1331,30 @@ mod tests {
     }
 
     #[test]
+    fn the_auto_transform_runs_after_cleanup_and_never_loses_the_text() {
+        let mut s = Settings { auto_transform: settings::TRANSLATE.into(), ..Default::default() };
+        s.cleanup.enabled = true;
+        s.cleanup.provider = "groq".into();
+        let cleaned = |s: &Settings| after_stt(s, "um kal meeting nahi hogi".into(), 1, None, false, true, || {}, |_, t| Ok(format!("«{t}»")));
+        let seen = std::cell::RefCell::new(String::new());
+        let o = auto_transform(&s, cleaned(&s), None, |input| {
+            *seen.borrow_mut() = input.to_string();
+            Ok("There is no meeting tomorrow.".into())
+        });
+        assert_eq!(o.text, "There is no meeting tomorrow.");
+        assert!(seen.borrow().starts_with("<text>«um kal meeting nahi hogi»</text>\n<instruction>Translate"), "the cleaned text, with the instruction: {}", seen.borrow());
+        let failed = auto_transform(&s, cleaned(&s), None, |_| Err("connection refused\nmore".into()));
+        assert_eq!(failed.text, "«um kal meeting nahi hogi»", "a failed transform keeps the cleaned text");
+        assert_eq!(failed.warning.unwrap(), "Translate to English failed: Groq: connection refused. Pasted the text without it.");
+        let blocked = auto_transform(&s, cleaned(&s), Some("Command Mode needs a general model".into()), |_| unreachable!());
+        assert_eq!((blocked.text.as_str(), blocked.warning.unwrap().as_str()), ("«um kal meeting nahi hogi»", "Translate to English did not run: Command Mode needs a general model."));
+        let silence = auto_transform(&s, after_stt(&s, ".".into(), 1, None, false, true, || {}, |_, _| unreachable!()), None, |_| unreachable!());
+        assert!(silence.text.is_empty(), "nothing said, nothing to transform");
+        s.auto_transform.clear();
+        assert_eq!(auto_transform(&s, cleaned(&s), None, |_| unreachable!()).text, "«um kal meeting nahi hogi»", "off by default");
+    }
+
+    #[test]
     fn command_mode_needs_a_general_model_with_its_key() {
         let mut s = Settings::default();
         s.cleanup.provider = "echotype".into();
@@ -1350,6 +1388,34 @@ mod tests {
             eprintln!("--- {instr:?} ({} ms)\n{sel:?}\n=> {out}\n", t.elapsed().as_millis());
             assert!(!out.trim().is_empty() && !out.contains("<text>") && !out.contains("<instruction>"), "{out}");
         }
+    }
+
+    /// The built-in transforms, a question about read-only text, and the auto transform, through
+    /// chat() against a local Ollama:
+    /// `ECHOTYPE_TEST_OLLAMA=gemma4:e4b cargo test -- --ignored --nocapture transforms_with_ollama`.
+    #[test]
+    #[ignore]
+    fn transforms_with_ollama() {
+        let Ok(model) = std::env::var("ECHOTYPE_TEST_OLLAMA") else { return eprintln!("skipped: no ECHOTYPE_TEST_OLLAMA") };
+        let mut s = Settings::default();
+        s.cleanup.provider = "ollama".into();
+        s.cleanup.model = model;
+        let text = "so basically i think we should of moved the launch, the build isnt ready and qa hasnt signed off yet so lets do next week";
+        for (name, _) in settings::TRANSFORMS {
+            let sel = if name == settings::TRANSLATE { "Kal ki meeting cancel ho gayi hai, parso milte hain." } else { text };
+            let out = chat(&s, COMMAND_PROMPT, &command_input(Some(sel), &settings::transform_instruction(&s, name).unwrap()), Duration::from_secs(60)).unwrap();
+            eprintln!("--- {name}\n=> {out}\n");
+            assert!(!out.trim().is_empty() && !out.contains("<text>"), "{name}: {out}");
+        }
+        let answer = chat(&s, COMMAND_PROMPT, &command_input(Some("The mitochondria is the powerhouse of the cell."), "what does this mean?"), Duration::from_secs(60)).unwrap();
+        eprintln!("--- question on read-only text\n=> {answer}\n");
+        let no = chat(&s, COMMAND_PROMPT, &command_input(None, "what's a polite way to say no"), Duration::from_secs(60)).unwrap();
+        eprintln!("--- nothing selected\n=> {no}\n");
+        s.auto_transform = settings::TRANSLATE.into();
+        let said = Output { raw: String::new(), text: "Kal meeting nahi hogi, Thursday ko karenge.".into(), stt_ms: 0, cleanup_ms: 0, warning: None, no_cleanup: false, cleaned: None };
+        let o = auto_transform(&s, said, None, |input| chat(&s, COMMAND_PROMPT, input, Duration::from_secs(60)));
+        eprintln!("--- auto transform\n=> {} {:?}", o.text, o.warning);
+        assert!(o.warning.is_none() && o.text.to_lowercase().contains("thursday"), "{o:?}");
     }
 
     /// Real local servers through the app's own cleanup path: `ECHOTYPE_TEST_LOCAL` is

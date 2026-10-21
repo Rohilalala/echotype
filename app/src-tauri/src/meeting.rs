@@ -867,13 +867,12 @@ fn now_ms() -> u64 {
 // ---------- transcription for these settings ----------
 
 fn transcriber(s: &Settings) -> Result<Transcribe, String> {
-    // Meetings are transcribed in the language spoken; Translate to English does not apply.
-    let mut s = s.clone();
-    s.translate_to_english = false;
+    // Meetings are transcribed in the language spoken; the auto transform (cleanup.rs) does not apply.
+    let s = s.clone();
     stt::ready(&s)?;
     let prompt = stt::prompt(&s);
     if s.stt.provider == "local" {
-        let (model, _) = stt::pick_local_model(&s)?;
+        let model = stt::pick_local_model(&s)?;
         let langs = stt::languages(&s);
         Ok(Box::new(move |pcm| stt::transcribe_words(&model, pcm, &langs, &prompt, speakers::vad().as_deref())))
     } else {
