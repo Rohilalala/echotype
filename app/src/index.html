@@ -14,14 +14,19 @@
   <aside class="sidebar" data-tauri-drag-region="deep">
     <nav aria-label="Sections" id="nav">
       <button data-page="home"><svg viewBox="0 0 16 16"><path d="M2.5 7.2 8 2.5l5.5 4.7V13a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1Z"/><path d="M6.3 14v-3.6h3.4V14"/></svg>Home</button>
-      <button data-page="speech"><svg viewBox="0 0 16 16"><path d="M2.5 6.5v3M5.25 4v8M8 2v12M10.75 5v6M13.5 7v2"/></svg>Speech model</button>
+      <button data-page="speech"><svg viewBox="0 0 16 16"><path d="M2.5 6.5v3M5.25 4v8M8 2v12M10.75 5v6M13.5 7v2"/></svg>Models</button>
       <button data-page="cleanup"><svg viewBox="0 0 16 16"><path d="M10.4 2.6l3 3L6 13H3v-3z"/><path d="M8.6 4.4l3 3"/></svg>Cleanup</button>
       <button data-page="language"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.75"/><ellipse cx="8" cy="8" rx="2.4" ry="5.75"/><path d="M2.4 8h11.2"/></svg>Language</button>
       <button data-page="dictionary"><svg viewBox="0 0 16 16"><path d="M3 12V4a1.5 1.5 0 0 1 1.5-1.5H13v9H4.5A1.5 1.5 0 0 0 3 13a1.5 1.5 0 0 0 1.5 1.5H13"/></svg>Dictionary</button>
       <button data-page="meetings"><svg viewBox="0 0 16 16"><circle cx="5.5" cy="5.5" r="2.25"/><path d="M1.75 13.5a3.75 3.75 0 0 1 7.5 0"/><circle cx="11.25" cy="6" r="1.75"/><path d="M10.5 10.1a3 3 0 0 1 3.75 2.9"/></svg>Meetings</button>
       <button data-page="history"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.75"/><path d="M8 4.8v3.4l2.2 1.4"/></svg>History</button>
       <button data-page="stats"><svg viewBox="0 0 16 16"><path d="M2.5 13.5h11"/><path d="M3 10.5l3-3.25 2.5 2L13 4.5"/></svg>Stats</button>
-      <button data-page="settings" class="nav-foot"><svg viewBox="0 0 16 16"><path d="M2.5 5h6M11.5 5h2M2.5 11h2M7.5 11h6"/><circle cx="10" cy="5" r="1.5"/><circle cx="6" cy="11" r="1.5"/></svg>Settings</button>
+    </nav>
+    <!-- Notices from app.json (notices.rs): one at a time, with its action and a dismiss. -->
+    <div class="side-notice" id="sideNotice" role="status" hidden></div>
+    <nav aria-label="Account and settings" id="navFoot">
+      <button data-page="account"><svg viewBox="0 0 16 16"><circle cx="8" cy="5.5" r="2.75"/><path d="M2.75 14a5.25 5.25 0 0 1 10.5 0"/></svg>Account</button>
+      <button data-page="settings"><svg viewBox="0 0 16 16"><path d="M2.5 5h6M11.5 5h2M2.5 11h2M7.5 11h6"/><circle cx="10" cy="5" r="1.5"/><circle cx="6" cy="11" r="1.5"/></svg>Settings</button>
     </nav>
   </aside>
 
@@ -81,8 +86,9 @@
 
     <!-- Speech model -->
     <section data-page="speech" hidden>
-      <h1>Speech model</h1>
-      <p class="lede">Turns your voice into text. A local model runs on this Mac and nothing leaves it; a service gets your audio to transcribe it.</p>
+      <h1>Models</h1>
+      <p class="lede">A speech model turns your voice into text; a cleanup model tidies it. Local models run on this Mac and nothing leaves it.</p>
+      <h2 class="group-title">Speech models</h2>
       <div class="seg" id="sttProvider" role="radiogroup" aria-label="Speech provider"></div>
 
       <div id="sttLocal">
@@ -99,19 +105,23 @@
         <div class="row key-row" data-key="stt"></div>
       </div>
 
-      <div id="cloudBox" hidden>
-        <h2 class="group-title">Echotype Cloud account</h2>
-        <p class="lede small">Free includes 2,000 words a week. Pro has unlimited words for $6 a month or $60 a year. Echotype Cloud keeps word and audio-time counts, not your audio or text.</p>
-        <div class="group elev" id="cloudAccount"></div>
-      </div>
+      <h2 class="group-title">Cleanup models</h2>
+      <p class="lede small">Echotype's own cleanup models, run on this Mac. To use one, pick Echotype model under Cleanup.</p>
+      <div class="list" id="cleanerList"></div>
+      <p class="note">More models coming soon.</p>
     </section>
 
     <!-- Cleanup -->
     <section data-page="cleanup" hidden>
       <h1>Cleanup</h1>
       <p class="lede">A language model removes fillers, applies “no wait, I meant…” corrections and formats spoken lists. If it fails, you still get the raw text.</p>
+      <div class="group">
+        <label class="row"><span class="row-text"><span class="row-title">Clean up dictation</span></span>
+          <input type="checkbox" class="switch" data-bind="cleanup.enabled" /></label>
+      </div>
+
       <div id="cleanupSetup" hidden>
-        <h2 class="group-title" id="cleanupSetupTitle">Turn on cleanup</h2>
+        <h2 class="group-title">Finish setting up cleanup</h2>
         <p class="lede small">Pick any one. None is required, and nothing leaves this computer with a local server.</p>
         <div class="group">
           <div class="row" id="setupCloud"><span class="row-text"><span class="row-title">Echotype Cloud</span><span class="row-desc">Sign in with your email. Free includes 2,000 words a week.</span></span>
@@ -121,11 +131,6 @@
           <div class="row"><span class="row-text"><span class="row-title">A local server</span><span class="row-desc">Ollama or LM Studio running on this computer.</span></span>
             <button class="btn" type="button" data-setup="local">Use a local server</button></div>
         </div>
-      </div>
-
-      <div class="group">
-        <label class="row"><span class="row-text"><span class="row-title">Clean up dictation</span></span>
-          <input type="checkbox" class="switch" data-bind="cleanup.enabled" /></label>
       </div>
 
       <div id="cleanupBody">
@@ -190,12 +195,12 @@
         </form>
       </div>
 
-      <h2 class="group-title">Replacements</h2>
-      <p class="lede small">Say the phrase on the left, get the text on the right. Matches whole words in any case.</p>
+      <h2 class="group-title">Snippets</h2>
+      <p class="lede small">Your own shortcuts: say the phrase on the left and Echotype types the text on the right. Your email, phone number, address, a sign-off, anything. Matches whole words in any case.</p>
       <div class="group">
         <div class="rep-head" aria-hidden="true"><span>When you say</span><span>Type</span><span></span></div>
         <div id="reps"></div>
-        <div class="row"><button class="btn" id="addRep" type="button">Add replacement</button></div>
+        <div class="row"><button class="btn" id="addRep" type="button">Add snippet</button></div>
       </div>
     </section>
 
@@ -243,6 +248,28 @@
     </section>
 
     <!-- Settings -->
+    <!-- Account -->
+    <section data-page="account" hidden>
+      <h1>Account</h1>
+      <p class="lede">Echotype is free during the beta. Pro will add Echotype Cloud: transcription and cleanup for any Mac, meeting summaries and asking about a meeting.</p>
+      <div class="group">
+        <label class="row"><span class="row-text"><span class="row-title">Your name</span><span class="row-desc">Used for greetings and in meeting notes. Stays on this Mac.</span></span>
+          <input type="text" data-bind="display_name" maxlength="40" placeholder="Your name" spellcheck="false" autocomplete="off" /></label>
+        <div class="row"><span class="row-text"><span class="row-title">Plan</span><span class="row-desc" id="planDesc">Free. Pro is coming soon.</span></span></div>
+      </div>
+      <div id="cloudBox" hidden>
+        <h2 class="group-title">Echotype Cloud account</h2>
+        <p class="lede small">Free includes 2,000 words a week. Pro has unlimited words for $6 a month or $60 a year. Echotype Cloud keeps word and audio-time counts, not your audio or text.</p>
+        <div class="group elev" id="cloudAccount"></div>
+      </div>
+
+      <h2 class="group-title">Version</h2>
+      <div class="group">
+        <div class="row"><span class="row-text"><span class="row-title">Updates</span><span class="row-desc" id="updateDesc">Check for a newer version of Echotype.</span></span>
+          <span class="actions"><button class="btn" id="checkUpdate" type="button">Check for updates</button><button class="btn primary" id="installUpdate" type="button" hidden>Install and restart</button></span></div>
+      </div>
+    </section>
+
     <section data-page="settings" hidden>
       <h1>Settings</h1>
       <div class="notice" id="upgradeOffer" hidden>
@@ -279,6 +306,10 @@
           <span class="actions"><button class="hotkey" data-shortcut="paste_last_hotkey" type="button" aria-labelledby="pasteLabel"></button><button class="icon-btn" data-clear="paste_last_hotkey" type="button" aria-label="Turn off the paste last shortcut"></button></span></div>
         <div class="row"><span class="row-text"><span class="row-title" id="copyLabel">Copy last</span><span class="row-desc">Puts your last dictation on the clipboard.</span><span class="row-desc error" id="copy_last_hotkeyError" role="alert" hidden></span></span>
           <span class="actions"><button class="hotkey" data-shortcut="copy_last_hotkey" type="button" aria-labelledby="copyLabel"></button><button class="icon-btn" data-clear="copy_last_hotkey" type="button" aria-label="Turn off the copy last shortcut"></button></span></div>
+        <div class="row"><span class="row-text"><span class="row-title" id="commandLabel">Command Mode</span><span class="row-desc">Select text and say what to change: “more formal”, “shorter”, “translate to Spanish”. With nothing selected, say what to write.</span><span class="row-desc warn" id="commandNote" hidden>Needs a general model. The Echotype model only cleans up dictation: pick Ollama, LM Studio or an API key under Cleanup.</span><span class="row-desc error" id="command_hotkeyError" role="alert" hidden></span></span>
+          <span class="actions"><button class="hotkey" data-shortcut="command_hotkey" type="button" aria-labelledby="commandLabel"></button><button class="icon-btn" data-clear="command_hotkey" type="button" aria-label="Turn off the Command Mode shortcut"></button></span></div>
+        <label class="row"><span class="row-text"><span class="row-title">Voice commands</span><span class="row-desc">Say “new line”, “new paragraph”, “bullet point” or “next bullet”, and “scratch that” to drop the sentence before it. Said as a phrase of its own, so a sentence that only contains the words is typed as you said it.</span></span>
+          <input type="checkbox" class="switch" data-bind="voice_commands" /></label>
       </div>
 
       <h2 class="group-title" id="pillTitle">Pill</h2>
@@ -296,6 +327,8 @@
           <button class="btn" id="pillHide" type="button"></button></div>
         <label class="row" id="pillRecRow"><span class="row-text"><span class="row-title">Show pill in screen recordings</span><span class="row-desc">Off keeps it out of screenshots and screen sharing. Some screen-sharing apps may still show it.</span></span>
           <input type="checkbox" class="switch" data-bind="pill_in_recordings" /></label>
+        <label class="row" id="pillLiveRow"><span class="row-text"><span class="row-title">Show words as you speak</span><span class="row-desc">The last few words heard so far, while you dictate. With a speech model on this Mac only.</span></span>
+          <input type="checkbox" class="switch" data-bind="live_text" /></label>
         <label class="row" id="pillFadeRow"><span class="row-text"><span class="row-title">Fade when the pointer is away</span><span class="row-desc">The ball dims until your pointer comes near it. Off keeps it at full strength.</span></span>
           <input type="checkbox" class="switch" data-bind="pill_fade" /></label>
         <div class="row" id="pillSizeRow"><span class="row-text"><span class="row-title" id="pillSizeLabel">Pill size</span><span class="row-desc">The orb, notices and the card, with their text.</span></span>
@@ -334,13 +367,32 @@
 
       <h2 class="group-title" id="meetingsTitle">Meetings</h2>
       <div class="group" id="meetingsGroup">
-        <label class="row"><span class="row-text"><span class="row-title">Detect calls</span><span class="row-desc">When Zoom, Teams, Google Meet or another call app starts using the microphone, Echotype offers to take notes. It only checks which app is using the microphone and the browser's window title. It never listens, and nothing is recorded until you click Start.</span></span>
+        <label class="row"><span class="row-text"><span class="row-title">Detect calls</span><span class="row-desc">When Zoom, Teams, Google Meet or another call app starts using the microphone, Echotype offers to take notes. It only checks which app is using the microphone and the browser's window title. It never listens, and records nothing unless you start notes or set an app to Always start.</span></span>
           <input type="checkbox" class="switch" data-bind="detect_meetings" /></label>
-        <div class="row"><span class="row-text"><span class="row-title" id="meetingEndLabel">When the call ends</span><span class="row-desc">For notes started during a detected call. A call has ended 20 seconds after its app stops using the microphone and speakers.</span></span>
-          <span class="seg" role="radiogroup" aria-labelledby="meetingEndLabel">
-            <label><input type="radio" name="meeting_end" value="ask" data-bind="meeting_end" /><span>Ask</span></label>
-            <label><input type="radio" name="meeting_end" value="auto" data-bind="meeting_end" /><span>Stop notes</span></label>
-          </span></div>
+        <label class="row" id="autoStopRow"><span class="row-text"><span class="row-title">Stop notes when the call ends</span><span class="row-desc">For notes started by a call or its offer, 45 seconds after the call app stops using the microphone and speakers. Off, Echotype asks. Notes you start yourself are never stopped.</span></span>
+          <input type="checkbox" class="switch" data-bind="meeting_auto_stop" /></label>
+        <label class="row"><span class="row-text"><span class="row-title">Keep meeting audio</span><span class="row-desc">Older recordings are deleted to save space. Transcripts and notes stay.</span></span>
+          <select data-bind="meeting_audio_days" data-num><option value="7">7 days</option><option value="30">30 days</option><option value="0">Forever</option></select></label>
+      </div>
+
+      <h2 class="group-title" id="callAppsTitle">When a call starts</h2>
+      <div class="group" id="callAppsGroup">
+        <label class="row"><span class="row-text"><span class="row-title">Google Meet</span><span class="row-desc">In a browser, while the Meet tab is in front.</span></span>
+          <select data-bind="call_start.meet"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">Microsoft Teams</span><span class="row-desc">The app, or Teams in a browser.</span></span>
+          <select data-bind="call_start.teams"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">Zoom</span><span class="row-desc">The app, or Zoom in a browser.</span></span>
+          <select data-bind="call_start.zoom"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">Slack huddles</span></span>
+          <select data-bind="call_start.slack"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">FaceTime</span></span>
+          <select data-bind="call_start.facetime"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">Webex</span></span>
+          <select data-bind="call_start.webex"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">Discord</span></span>
+          <select data-bind="call_start.discord"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">Other calls</span><span class="row-desc">WhatsApp, Skype, Signal, Telegram and the like, and any other browser tab using the microphone.</span></span>
+          <select data-bind="call_start.other"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
       </div>
 
       <h2 class="group-title">Appearance</h2>
@@ -359,6 +411,8 @@
           <input type="checkbox" class="switch" id="autostart" data-bind="autostart" /></label>
         <div class="row"><span class="row-text"><span class="row-title">Setup</span><span class="row-desc">Walk through it again: permissions, a practice dictation and your preferences.</span></span>
           <button class="btn" id="rerunSetup" type="button">Run setup again</button></div>
+        <div class="row" id="wisprRow" hidden><span class="row-text"><span class="row-title">Import from Wispr Flow</span><span class="row-desc" id="wisprDesc"></span></span>
+          <button class="btn" id="wisprImport" type="button">Import</button></div>
       </div>
 
       <h2 class="group-title">Privacy</h2>
@@ -367,6 +421,8 @@
           <input type="checkbox" class="switch" data-bind="history_enabled" /></label>
         <label class="row"><span class="row-text"><span class="row-title">Restore clipboard</span><span class="row-desc">Put back what you had copied after Echotype pastes.</span></span>
           <input type="checkbox" class="switch" data-bind="restore_clipboard" /></label>
+        <label class="row"><span class="row-text"><span class="row-title">Share anonymous usage stats and crash reports</span><span class="row-desc">Off unless you turn it on. Once a day Echotype sends a random install ID that is not linked to you or your account, the app version, the system and chip type, and that day's counts: dictations, words, failures by kind, median speech and cleanup times, which speech and cleanup models are in use, and meetings started and finished. A crash adds the fixed wording of the error and where in Echotype's code it happened. Never audio, text, your dictionary, app names, file paths, names or emails.</span></span>
+          <input type="checkbox" class="switch" data-bind="share_telemetry" /></label>
         <label class="row"><span class="row-text"><span class="row-title">Local API on 127.0.0.1</span><span class="row-desc">Scripts and agents on this computer can send audio to Echotype and get text back through the same pipeline. OpenAI-compatible.</span></span>
           <input type="checkbox" class="switch" data-bind="local_api.enabled" /></label>
         <div id="apiBody">
@@ -429,7 +485,7 @@
             <h2 id="obT2" tabindex="-1">Try it</h2>
             <p class="lede ob-say" id="obSay"></p>
             <div class="ob-keys" id="obKeys" aria-hidden="true"></div>
-            <p class="ob-result" id="obResult" data-empty="Your words show up here, not in another app."></p>
+            <p class="ob-result" id="obResult" data-empty="Your words show up here."></p>
             <p class="ob-status" id="obTryState" aria-live="polite"></p>
             <p class="ob-tip" id="obTip" hidden></p>
             <p class="ob-watch" id="obWatch" hidden><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v9.5M4.5 9 8 12.5 11.5 9"/></svg>Watch the bottom of your screen</p>
@@ -465,6 +521,16 @@
           <div class="ob-body">
             <p class="ob-count" id="obCount"></p>
 
+            <div class="ob-q" data-q="wispr" hidden>
+              <h2 id="obQWispr" tabindex="-1">Bring your Wispr Flow setup?</h2>
+              <p class="lede" id="obWisprLede" aria-live="polite">Found on this Mac. Wispr Flow itself is not changed.</p>
+              <ul class="ob-wispr" id="obWisprList"></ul>
+              <div class="ob-tiles" role="radiogroup" aria-labelledby="obQWispr">
+                <button type="button" class="ob-tile" role="radio" data-v="yes"><b>Import</b><span>Adds to Echotype, replaces nothing</span></button>
+                <button type="button" class="ob-tile" role="radio" data-v="no"><b>Start fresh</b><span>Or later, in Settings → Startup</span></button>
+              </div>
+            </div>
+
             <div class="ob-q" data-q="name">
               <h2 id="obT4" tabindex="-1">What should I call you?</h2>
               <input type="text" class="ob-name" id="obName" autocomplete="given-name" spellcheck="false" placeholder="Your first name" maxlength="40" aria-labelledby="obT4" aria-describedby="obHello" />
@@ -484,7 +550,7 @@
 
             <div class="ob-q" data-q="speed" hidden>
               <h2 id="obQSpeed" tabindex="-1">Quicker, or more accurate?</h2>
-              <input type="range" class="ob-speed" id="obSpeed" min="0" max="5" step="1" aria-labelledby="obQSpeed" aria-describedby="obSpeedInfo" />
+              <input type="range" class="ob-speed" id="obSpeed" min="0" max="1" step="1" aria-labelledby="obQSpeed" aria-describedby="obSpeedInfo" />
               <div class="ob-speed-ends" aria-hidden="true"><span>Quicker</span><span>More accurate</span></div>
               <div class="ob-speed-info" id="obSpeedInfo" aria-live="polite">
                 <p class="ob-speed-name"><b id="obSpeedName"></b><span class="tag rec" id="obSpeedRec" hidden>Recommended</span></p>
@@ -492,7 +558,7 @@
                 <p id="obSpeedMem"></p>
                 <p class="ob-speed-fit" id="obSpeedFit"></p>
               </div>
-              <p class="lede">Only this one downloads now. Get the others anytime in Settings → Speech model.</p>
+              <p class="lede">Only this one downloads now. More models coming soon.</p>
             </div>
 
             <div class="ob-q" data-q="mode" hidden>
@@ -635,6 +701,14 @@
     </div>
     <p class="ob-model" id="obModel" aria-live="polite"></p>
     <canvas class="ob-canvas" id="obCanvas" aria-hidden="true"></canvas>
+  </div>
+  <!-- A retired version (app.json min_version): nothing works until it updates. -->
+  <div class="retired" id="retired" hidden>
+    <div class="retired-card" role="alertdialog" aria-labelledby="retiredTitle">
+      <h2 id="retiredTitle">Update required</h2>
+      <p id="retiredText">This version of Echotype is no longer supported. Update to keep dictating and taking meeting notes.</p>
+      <button class="btn primary" id="retiredUpdate" type="button">Update now</button>
+    </div>
   </div>
 </body>
 </html>

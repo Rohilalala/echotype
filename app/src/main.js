@@ -2,6 +2,7 @@
 const preview = !window.__TAURI__;
 if (preview) await import('./mock.js'); // browser preview for design QA
 const meetingsPage = await import('./meetings.js');
+const { h, copyText } = await import('./dom.js');
 const { createOrb } = await import('./orb.js'); // onboarding's orb
 
 const { invoke } = window.__TAURI__.core;
@@ -12,17 +13,6 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 // replaceChildren without the stray "false"/"undefined" text of an absent optional child.
 const fill = (el, ...kids) => el.replaceChildren(...kids.flat().filter(k => k != null && k !== false && k !== ''));
 // Tiny element builder. Strings become text nodes, so user text is never parsed as HTML.
-function h(tag, attrs = {}, ...kids) {
-  const el = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (v == null || v === false) continue;
-    if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
-    else if (k in el && k !== 'list') el[k] = v;
-    else el.setAttribute(k, v === true ? '' : v);
-  }
-  el.append(...kids.flat().filter(k => k != null && k !== false));
-  return el;
-}
 const svg = (d, w = 16) => {
   const el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   el.setAttribute('viewBox', `0 0 ${w} ${w}`);
@@ -108,7 +98,7 @@ function bindAll() {
     const text = el.tagName === 'TEXTAREA' || ['text', 'url', 'password', 'number'].includes(el.type);
     el.addEventListener(text ? 'input' : 'change', () => {
       if (el.type === 'number' && !el.checkValidity()) return;
-      let v = el.type === 'checkbox' ? el.checked : ['number', 'range'].includes(el.type) ? Number(el.value) : el.value;
+      let v = el.type === 'checkbox' ? el.checked : ['number', 'range'].includes(el.type) || 'num' in el.dataset ? Number(el.value) : el.value;
       if ('null' in el.dataset && v === '') v = null;
       set(p, v);
       text ? saveSoon() : save();
@@ -138,6 +128,7 @@ function changed(p) {
   if (p === 'pill_idle' || p === 'show_in') renderPill();
   if (p === 'pill_size' || p === 'ball_size') sizePreview();
   if (p === 'sounds') $('#soundPackRow').hidden = !S.sounds;
+  if (p === 'detect_meetings') renderStartup();
   if (p === 'greetings' || p === 'display_name') renderGreeting();
   if (p === 'sound_pack') invoke('preview_sounds', { pack: S.sound_pack }).catch(() => {}); // hear it as you pick it
   if (p === 'advanced' || p === 'cleaner_memory') { renderAdvanced(); renderStt(); fillRemote('cleanup'); renderLangNote(); renderHero(); }
@@ -154,13 +145,13 @@ function go(page) {
   if (page === 'history') renderHistory();
   if (page === 'meetings') meetingsPage.show();
   if (page === 'settings') { refreshPerms(); refreshApi(); refreshStatus(); }
-  if (page === 'speech' || page === 'cleanup') refreshCloud();
-  if (page === 'cleanup') refreshLastApp();
+  if (page === 'account' || page === 'cleanup') refreshCloud(); // the account box moved to Account
+  if (page === 'cleanup') { refreshLastApp(); refreshInstalled(); }
   history.replaceState(null, '', '#' + page);
   document.dispatchEvent(new CustomEvent('echotype:page', { detail: page })); // stats.js refreshes on its page
   window.__TAURI__.event.emit?.('main-page', page); // Home shows the live state, so the pill steps aside there (D14)
 }
-$('#nav').addEventListener('click', e => { const b = e.target.closest('button'); if (b) go(b.dataset.page); });
+for (const n of ['#nav', '#navFoot']) $(n).addEventListener('click', e => { const b = e.target.closest('button'); if (b) go(b.dataset.page); });
 $('#nav').addEventListener('keydown', e => {
   if (!['ArrowDown', 'ArrowUp'].includes(e.key)) return;
   const bs = $$('nav button'), i = bs.indexOf(document.activeElement);
@@ -204,6 +195,7 @@ function renderHotkey() {
     btn.replaceChildren(...(v ? keycaps(v) : [h('span', { className: 'none' }, 'None')]));
   }
   for (const b of $$('[data-clear]')) { b.hidden = !S[b.dataset.clear]; b.replaceChildren(svg(CROSS)); }
+  $('#commandNote').hidden = !S.command_hotkey || S.cleanup.provider !== 'echotype'; // cleanup.rs command_blocked
   $('#modeDesc').textContent = S.mode === 'toggle'
     ? 'Press once to start, again to stop. Esc cancels.'
     : 'Hold while you speak, let go to paste. Tap twice to go hands-free.';
@@ -311,6 +303,7 @@ const ACTIONS = {
   cleanup: ['Open Cleanup', () => go('cleanup')],
   automatic: ['Switch to automatic', () => { S.advanced = false; syncBound(); save(); changed('advanced'); }],
   settings: ['Open Settings', () => go('settings')],
+  update: ['Update', () => { go('account'); checkUpdate(); }],
 };
 const actionBtn = kind => ACTIONS[kind] && h('button', { className: 'btn', type: 'button', onclick: ACTIONS[kind][1] }, ACTIONS[kind][0]);
 let muted = false;
@@ -387,8 +380,7 @@ function renderRaw() {
   if (!S) return;
   $('#cloudMoved').hidden = !S.cloud_moved;
   $('#rawBanner').hidden = !noCleanup() || S.dismissed.includes('no_cleanup_banner');
-  $('#cleanupSetup').hidden = !noCleanup();
-  $('#cleanupSetupTitle').textContent = S.cleanup.enabled ? 'Finish setting up cleanup' : 'Turn on cleanup';
+  $('#cleanupSetup').hidden = !S.cleanup.enabled || !noCleanup(); // on, but the provider still needs a key
 }
 $('#rawDismiss').append(svg(CROSS));
 $('#cloudMovedOk').append(svg(CROSS));
@@ -484,8 +476,7 @@ function setProvider(kind, id) {
   const p = preset(id), cfg = S[kind];
   cfg.provider = id;
   if (id !== 'custom') cfg.base_url = ''; // presets carry their own URL
-  const def = p?.[kind === 'stt' ? 'default_stt_model' : 'default_cleanup_model'];
-  if (def) cfg.model = def;
+  cfg.model = ''; // the user names the model; the preset's shows as a faded example
   save();
   if (kind === 'stt') renderStt(); else fillRemote('cleanup');
   renderLangNote();
@@ -501,12 +492,13 @@ function fillRemote(kind) {
   url.placeholder = custom ? 'http://localhost:8000/v1' : '';
   $(`#${kind}UrlDesc`).textContent = custom
     ? `Any OpenAI-compatible ${kind === 'stt' ? '/audio/transcriptions' : '/chat/completions'} endpoint.`
-    : cfg.provider === 'echotype' ? `Built in: runs on this Mac, nothing to start. ${sys?.echotype_model_installed ? `Installed, ${fmtMB(sys.echotype_model_mb)}.` : `Not installed (${fmtMB(sys?.echotype_model_mb ?? 940)}).`}`
+    : cfg.provider === 'echotype' ? `Built in: runs on this Mac, nothing to start. ${sys?.echotype_model_installed ? `Installed, ${fmtMB(sys.echotype_model_mb)}.` : `Not installed (${fmtMB(sys?.echotype_model_mb ?? 401)}).`}`
     : `Set by the ${p?.label ?? ''} preset.`;
   if (kind === 'cleanup') renderCleaner();
   const model = $(`#${kind}Model`);
   model.value = cfg.model;
-  model.placeholder = p?.[kind === 'stt' ? 'default_stt_model' : 'default_cleanup_model'] || 'model name';
+  const example = p?.[kind === 'stt' ? 'default_stt_model' : 'default_cleanup_model'];
+  model.placeholder = example ? `e.g. ${example}` : 'Model name';
   renderKey(kind);
 }
 for (const kind of ['stt', 'cleanup']) {
@@ -639,11 +631,43 @@ function renderAuto() {
     h('span', { className: 'actions' }, action)));
 }
 
+// Models → Cleanup models: Echotype's cleaners, downloadable once they are hosted (llm::DOWNLOAD_URL).
+// The one in use mirrors llm::cleaner: the manual pick with advanced settings on, else Automatic's.
+function cleanerRow(c) {
+  const list = sys?.cleaners ?? [];
+  const current = (S.advanced && list.find(x => x.id === S.cleanup.model)) || list.find(x => x.automatic);
+  const inUse = S.cleanup.enabled && S.cleanup.provider === 'echotype' && current?.id === c.id;
+  const p = progress[c.id], err = modelErr[c.id];
+  const use = () => { S.cleanup.enabled = true; setProvider('cleanup', 'echotype'); S.cleanup.model = c.id; syncBound(); save(); renderModels(); renderRaw(); };
+  const del = h('button', { className: 'btn quiet danger', type: 'button' }, 'Delete');
+  del.onclick = async () => {
+    if (!del.dataset.armed) { del.dataset.armed = 1; del.textContent = 'Click again to delete'; return setTimeout(() => { del.textContent = 'Delete'; delete del.dataset.armed; }, 3000); }
+    try { await invoke('delete_model', { id: c.id }); } catch (e) { modelErr[c.id] = String(e); }
+    await refreshModels();
+  };
+  const actions = p != null ? [h('span', { className: 'pct', 'data-pct': c.id }, `${Math.round(p * 100)}%`),
+      h('span', { className: 'ring', role: 'progressbar', 'aria-label': `Downloading ${c.label}`, 'aria-valuenow': Math.round(p * 100), 'data-progress': c.id, style: `--p:${p}` })]
+    : !c.installed ? [c.downloadable ? h('button', { className: err ? 'btn' : 'round', type: 'button', title: 'Download', 'aria-label': `Download ${c.label}, ${fmtMB(c.size_mb)}`, onclick: () => download(c.id) }, err ? 'Retry' : svg(DOWN))
+      : h('span', { className: 'tag' }, 'Download coming soon')]
+    : inUse ? [h('span', { className: 'in-use' }, svg(CHECK), 'In use')]
+    : [S.advanced && h('button', { className: 'btn', type: 'button', onclick: use }, 'Use'), del];
+  return h('div', { className: 'row model' },
+    h('span', { className: 'tile', 'aria-hidden': 'true' }, svg(WAVE)),
+    h('span', { className: 'row-text' },
+      h('span', { className: 'model-name' }, c.label, c.recommended && h('span', { className: 'tag rec' }, 'Recommended')),
+      h('span', { className: 'row-desc' }, c.note),
+      h('span', { className: 'model-meta' }, h('span', {}, fmtMB(c.size_mb)), h('span', {}, `about ${fmtMB(c.ram_mb)} RAM`)),
+      c.warning && h('span', { className: 'row-desc warn' }, c.warning),
+      err && h('span', { className: 'row-desc error', role: 'alert' }, err)),
+    h('span', { className: 'actions' }, actions));
+}
+
 function renderModels() {
+  $('#cleanerList').replaceChildren(...(sys?.cleaners ?? []).map(cleanerRow));
   renderAuto();
   $('#memline').hidden = $('#modelList').hidden = !S.advanced;
   $('#memline').replaceChildren('Free memory now ', h('b', {}, `${sys.available_ram_gb.toFixed(1)} GB`), ` of ${Math.round(sys.total_ram_gb)} GB. A model fits when it leaves 2 GB for everything else.`);
-  $('#modelList').replaceChildren(...models.map(m => modelRow(m)));
+  $('#modelList').replaceChildren(...models.filter(m => m.id !== 'tiny.en' || m.id === S.stt.local_model).map(m => modelRow(m))); // tiny.en: onboarding's practice model
   renderObModel();
 }
 
@@ -697,8 +721,18 @@ function renderAppStyles() {
     h('select', { 'aria-label': `Style in ${a.name}`, onchange: e => { list()[i].style = e.target.value; save(); } }, APP_STYLE_OPTS.map(([v, l]) => h('option', { value: v, selected: v === a.style }, l))),
     h('button', { className: 'icon-btn', type: 'button', 'aria-label': `Remove ${a.name}`, onclick: () => { list().splice(i, 1); save(); renderAppStyles(); } }, svg(CROSS)))),
   h('div', { className: 'row' },
-    h('span', { className: 'row-text' }, h('span', { className: 'row-desc' }, add ? `Your last dictation went to ${add.name}, which uses ${label(add.style)}.` : 'To pick the style for an app, dictate into it, then add it here.')),
-    add && h('button', { className: 'btn', type: 'button', onclick: () => { list().push({ id: add.id, name: add.name, style: add.style }); save(); renderAppStyles(); } }, `Add ${add.name}`)));
+    h('span', { className: 'row-text' }, h('span', { className: 'row-desc' }, add ? `Your last dictation went to ${add.name}, which uses ${label(add.style)}.` : 'Pick an app to set its style.')),
+    add && h('button', { className: 'btn', type: 'button', onclick: () => { list().push({ id: add.id, name: add.name, style: add.style }); save(); renderAppStyles(); } }, `Add ${add.name}`),
+    installed.length > 0 && h('select', { 'aria-label': 'Add an app', onchange: e => {
+      const a = installed.find(x => x.id === e.target.value);
+      if (a) { list().push({ id: a.id, name: a.name, style: a.style }); save(); }
+      renderAppStyles();
+    } }, h('option', { value: '' }, 'Add an app…'), installed.filter(a => !list().some(x => x.id === a.id)).map(a => h('option', { value: a.id }, a.name)))));
+}
+let installed = [];
+async function refreshInstalled() {
+  installed = await invoke('installed_apps').catch(() => []);
+  renderAppStyles();
 }
 async function refreshLastApp() {
   lastApp = await invoke('last_app').catch(() => null);
@@ -719,7 +753,7 @@ function renderCleaner() {
   pick.replaceChildren(...(S.advanced ? list.map(c => h('option', { value: c.id }, label(c))) : [h('option', { value: '' }, 'Automatic (recommended)')]));
   const cur = S.advanced ? list.find(c => c.id === S.cleanup.model) ?? auto : auto;
   pick.value = S.advanced ? cur?.id ?? '' : '';
-  $('#cleanerDesc').textContent = S.advanced ? cur?.warning ?? '' : auto ? `Uses ${auto.label}, picked for this Mac.` : '';
+  $('#cleanerDesc').textContent = S.advanced ? cur?.warning ?? '' : auto ? `Uses ${auto.label}.` : '';
   $('#cleanerDesc').classList.toggle('warn', S.advanced && !!cur?.warning);
 }
 $('#cleanerPick').addEventListener('change', e => { S.cleanup.model = e.target.value; save(); renderCleaner(); });
@@ -869,6 +903,49 @@ window.addEventListener('focus', () => S && renderRecent()); // relative times m
 // ---------- language ----------
 const LANGS = [['auto', 'Auto-detect'], ['en', 'English'], ['hi', 'Hindi'], ['ar', 'Arabic'], ['bn', 'Bengali'], ['zh', 'Chinese'], ['nl', 'Dutch'], ['fr', 'French'], ['de', 'German'], ['gu', 'Gujarati'], ['id', 'Indonesian'], ['it', 'Italian'], ['ja', 'Japanese'], ['kn', 'Kannada'], ['ko', 'Korean'], ['ml', 'Malayalam'], ['mr', 'Marathi'], ['pa', 'Punjabi'], ['pl', 'Polish'], ['pt', 'Portuguese'], ['ru', 'Russian'], ['es', 'Spanish'], ['ta', 'Tamil'], ['te', 'Telugu'], ['tr', 'Turkish'], ['uk', 'Ukrainian'], ['ur', 'Urdu'], ['vi', 'Vietnamese']];
 
+// Wispr Flow import (onboarding's first question and Settings → Startup): what its data on this
+// Mac would bring over, read by the core (wispr.rs). null when Wispr Flow is not installed.
+let wispr = null;
+const talkLabel = k => $(`#talkKey option[value="${k}"]`)?.textContent ?? k;
+function wisprLines(f) {
+  const few = (a, n = 4) => a.slice(0, n).join(', ') + (a.length > n ? ` and ${a.length - n} more` : '');
+  return [
+    f.words.length && ['Dictionary', `${f.words.length} ${f.words.length === 1 ? 'word' : 'words'}: ${few(f.words)}`],
+    f.replacements.length && ['Snippets', few(f.replacements.map(r => `“${r.from}”`))],
+    f.languages.length && ['Languages', f.languages.map(langName).join(', ')],
+    f.app_styles.length && ['Styles', few(f.app_styles.map(a => `${a.style} in ${a.name}`), 3)],
+    f.talk_key && ['Talk key', `hold ${talkLabel(f.talk_key)} (quit Wispr Flow so only one listens)`],
+    [f.sounds != null && `sounds ${f.sounds ? 'on' : 'off'}`, f.autostart && 'open at login', f.look && `${f.look} look`].some(Boolean)
+      && ['Also', [f.sounds != null && `sounds ${f.sounds ? 'on' : 'off'}`, f.autostart && 'open at login', f.look && `${f.look} look`].filter(Boolean).join(', ')],
+  ].filter(Boolean);
+}
+async function wisprImport() {
+  const done = await invoke('wispr_import');
+  return done.length ? `Imported ${done.join(', ')}.` : 'Nothing new to import: it is all here already.';
+}
+function renderWispr() {
+  $('#wisprRow').hidden = !wispr;
+  if (wispr && !$('#wisprImport').disabled) $('#wisprDesc').textContent = wisprLines(wispr).map(([k, v]) => `${k}: ${v}`).join(' · ');
+}
+invoke('wispr_import_preview').then(f => { wispr = f || null; renderWispr(); }).catch(() => {});
+$('#wisprImport').addEventListener('click', async e => {
+  const b = e.currentTarget;
+  b.disabled = true;
+  try { $('#wisprDesc').textContent = await wisprImport(); } catch (err) { $('#wisprDesc').textContent = `Couldn't import: ${err}`; b.disabled = false; }
+});
+async function obWisprPick(v) {
+  ob.wispr = v;
+  obTilesRender();
+  const lede = $('#obWisprLede');
+  if (v !== 'yes') return (lede.textContent = 'Found on this Mac. Wispr Flow itself is not changed.');
+  lede.textContent = 'Importing…';
+  try {
+    lede.textContent = await wisprImport();
+    // The name question comes next: start it from the imported name once the save is back.
+    setTimeout(() => { if (!$('#obName').value) { $('#obName').value = S.display_name || ''; obHello(); } }, 400);
+  } catch (err) { lede.textContent = `Couldn't import: ${err}`; ob.wispr = ''; obTilesRender(); }
+}
+
 // Languages: detect any, or listen for up to 3 (each clip goes to the likeliest of them).
 const LANG_MAX = 3;
 const langName = c => LANGS.find(([v]) => v === c)?.[1] ?? c;
@@ -908,7 +985,10 @@ $('#langAuto').addEventListener('change', e => {
   changed('languages');
 });
 
+// Translating needs a model that can; none of the offered local ones does yet (more coming).
+const canTranslate = () => S.stt.provider !== 'local' || models.some(m => m.translates);
 function renderLangNote() {
+  $('[data-bind="translate_to_english"]').closest('.row').hidden = !canTranslate();
   const note = $('#translateNote');
   const m = sttModel();
   note.hidden = !(S.translate_to_english && S.stt.provider === 'local' && m && !m.translates);
@@ -922,13 +1002,15 @@ function renderLangNote() {
 }
 
 // ---------- dictionary ----------
+// Placeholders only: what a snippet can be. Nothing is filled in for the user.
+const SNIPPET_EXAMPLES = [['my email address', 'you@example.com'], ['my phone number', '+91 98765 43210'], ['my home address', 'Street, city, postcode'], ['my sign-off', 'Thanks, talk soon']];
 function renderDict() {
   $('#chips').replaceChildren(...S.dictionary.map((w, i) =>
     h('span', { className: 'chip' }, w, h('button', { type: 'button', 'aria-label': `Remove ${w}`, onclick: () => { S.dictionary.splice(i, 1); save(); renderDict(); $('#newWord').focus(); } }, svg(CROSS)))));
   $('#reps').replaceChildren(...S.replacements.map((r, i) => {
-    const field = (k, label) => h('input', { type: 'text', value: r[k], 'aria-label': label, spellcheck: false, placeholder: k === 'from' ? 'my email' : 'me@example.com', oninput: e => { S.replacements[i][k] = e.target.value; saveSoon(); } }); // S, not r: a save's echo replaces S without re-rendering
+    const field = (k, label) => h('input', { type: 'text', value: r[k], 'aria-label': label, spellcheck: false, placeholder: SNIPPET_EXAMPLES[i % SNIPPET_EXAMPLES.length][k === 'from' ? 0 : 1], oninput: e => { S.replacements[i][k] = e.target.value; saveSoon(); } }); // S, not r: a save's echo replaces S without re-rendering
     return h('div', { className: 'row rep' }, field('from', 'When you say'), field('to', 'Type'),
-      h('button', { className: 'icon-btn', type: 'button', 'aria-label': 'Remove replacement', onclick: () => { S.replacements.splice(i, 1); save(); renderDict(); } }, svg(CROSS)));
+      h('button', { className: 'icon-btn', type: 'button', 'aria-label': 'Remove snippet', onclick: () => { S.replacements.splice(i, 1); save(); renderDict(); } }, svg(CROSS)));
   }));
 }
 $('#addWord').addEventListener('submit', e => {
@@ -987,9 +1069,14 @@ async function renderHistory() {
     copy.onclick = e => { e.preventDefault(); copyText(it.text, copy); };
     const text = h('span', { className: 'text' }, it.text);
     const fix = h('button', { className: 'btn', type: 'button', onclick: () => startFix(it, text, fix) }, 'Fix');
-    return h('details', {},
+    const restore = h('button', { className: 'btn quiet', type: 'button', onclick: async () => {
+      try { await invoke('update_history', { ts: it.ts, text: it.original }); renderHistory(); }
+      catch { restore.textContent = "Couldn't restore"; }
+    } }, 'Restore');
+    return h('details', { ontoggle: e => e.target.open && addRerun(it, fix) },
       h('summary', {}, text, it.no_cleanup && h('span', { className: 'tag' }, 'No cleanup'), h('time', { className: 'when', title: fmtTime(it.ts).replace('\n', ' ') }, fmtAgo(it.ts)), copy),
       h('div', { className: 'detail' }, fix,
+        it.original && it.original !== it.text && h('p', { className: 'raw text' }, h('b', {}, 'Before re-run: '), it.original, ' ', restore),
         it.raw !== it.text && h('p', { className: 'raw text' }, h('b', {}, 'Heard: '), it.raw),
         it.cleaned && h('p', { className: 'raw text' }, h('b', {}, 'Cleanup had (not pasted): '), it.cleaned, ' ', cleanedCopy(it.cleaned)),
         h('span', { className: 'timing' },
@@ -1082,8 +1169,24 @@ function cleanedCopy(text) {
 }
 
 // Re-run last dictation: the clip Echotype still holds in memory, with one thing changed. The result
-// is copied and shown on the pill, and lands here as a new entry.
+// is copied and shown on the pill, and replaces the entry's text here (Restore goes back).
 let rerunPending = false;
+// An entry's own Re-run, offered when it opens and its audio is still kept (the newest 20).
+async function addRerun(it, fix) {
+  if (fix.dataset.rerun) return;
+  fix.dataset.rerun = '1';
+  const opts = await invoke('rerun_options', { ts: it.ts }).catch(() => []);
+  if (!opts.length) return;
+  const sel = h('select', { className: 'rerun', 'aria-label': 'Re-run this dictation' }, h('option', { value: '' }, 'Re-run…'), ...opts.map(o => h('option', { value: o.id }, o.label)));
+  sel.onchange = () => {
+    const id = sel.value;
+    sel.value = '';
+    if (!id) return;
+    rerunPending = true;
+    invoke('rerun', { id, ts: it.ts }).catch(err => { rerunPending = false; dictation = { state: 'error', error: String(err) }; renderHero(); });
+  };
+  fix.after(sel);
+}
 async function renderRerun() {
   const sel = $('#rerunLast');
   const opts = await invoke('rerun_options').catch(() => []);
@@ -1158,6 +1261,7 @@ function renderStartup() {
   $('#talkRow').hidden = $('#obTalkRow').hidden = !isMac; // talk keys are macOS-only; sounds play everywhere
   $('#pillTitle').hidden = $('#pillGroup').hidden = !isMac; // so is the idle pill
   $('#meetingsTitle').hidden = $('#meetingsGroup').hidden = !isMac; // and call detection (calls.rs)
+  $('#callAppsTitle').hidden = $('#callAppsGroup').hidden = $('#autoStopRow').hidden = !isMac || !S.detect_meetings;
   $('#preferBuiltinRow').hidden = $('#pauseMusicRow').hidden = !isMac; // and both (audio.rs pick_input, music.rs)
 }
 
@@ -1168,7 +1272,7 @@ function renderPill() {
   const bar = S.show_in === 'menubar';
   $('#showInDesc').textContent = bar ? 'No pill on screen. The menu bar icon shows when Echotype listens; click it to dictate, right-click for options.'
     : 'Drag the pill anywhere on any display; double-click it to put it back.';
-  $('#pillFollowRow').hidden = $('#pillIdleRow').hidden = $('#pillHideRow').hidden = $('#pillRecRow').hidden = bar;
+  $('#pillFollowRow').hidden = $('#pillIdleRow').hidden = $('#pillHideRow').hidden = $('#pillRecRow').hidden = $('#pillLiveRow').hidden = bar;
   $('#pillSizeRow').hidden = $('#ballSizeRow').hidden = $('#pillPreviewRow').hidden = $('#pillFadeRow').hidden = bar;
   for (const id of ['orbListenRow', 'orbThinkRow', 'orbDetailRow', 'orbColorRow']) $('#' + id).hidden = bar;
   $('#soundPackRow').hidden = !S.sounds;
@@ -1277,7 +1381,7 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
 const local = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { return null; } };
 let obStep = 1, orb = null, obPoll = 0, obSeq = 0;
 const obT = {}; // timers by name
-const ob = { cleanHow: 'off', mic: null, heard: 0, checked: false, quiet: false, paused: false, ax: null, axSince: 0, asked: false, pressed: false, offerClick: false, watched: false, recAt: 0, secs: 0, hinglish: false, mine: false };
+const ob = { cleanHow: 'off', mic: null, heard: 0, checked: false, quiet: false, paused: false, ax: null, axSince: 0, asked: false, pressed: false, offerClick: false, watched: false, recAt: 0, secs: 0, hinglish: false, mine: false, wispr: '' };
 const later = (name, ms, fn) => { clearTimeout(obT[name]); obT[name] = setTimeout(fn, ms); };
 // Show something that appears within a step with a short rise.
 function pop(el, on = true) {
@@ -1293,6 +1397,55 @@ function showOnboarding(on) {
   document.documentElement.classList.toggle('ob-on', on);
 }
 
+// ---------- notices and retired versions (notices.rs, app.json in the models bucket) ----------
+let notices = { notices: [], blocked: false };
+async function refreshNotices() {
+  notices = await invoke('app_notices').catch(() => notices);
+  renderNotice();
+}
+// One notice at a time above Account and Settings: its button and a ✕ that dismisses it for good.
+function renderNotice() {
+  const box = $('#sideNotice');
+  const n = (notices.notices || []).find(x => !S.dismissed.includes(`notice:${x.id}`));
+  $('#retired').hidden = !notices.blocked;
+  box.hidden = !n;
+  if (!n) return box.replaceChildren();
+  box.replaceChildren(
+    h('button', { className: 'icon-btn notice-x', type: 'button', 'aria-label': `Dismiss: ${n.title}`, onclick: () => { dismiss(`notice:${n.id}`); renderNotice(); } }, svg(CROSS)),
+    h('b', {}, n.title),
+    n.body && h('p', {}, n.body),
+    n.action_label && n.action && h('button', { className: 'btn', type: 'button', onclick: () => noticeAction(n.action) }, n.action_label));
+}
+// "update", "page:<page>" or an https link; anything else does nothing.
+function noticeAction(a) {
+  if (a === 'update') return ACTIONS.update[1]();
+  if (a.startsWith('page:')) return go(a.slice(5));
+  if (/^https:\/\//.test(a)) invoke('plugin:opener|open_url', { url: a }).catch(() => {});
+}
+listen('notices', refreshNotices);
+$('#retiredUpdate').addEventListener('click', async e => {
+  e.target.disabled = true; $('#retiredText').textContent = 'Downloading the update…';
+  try { await invoke('install_update'); }
+  catch (err) { $('#retiredText').textContent = String(err); e.target.disabled = false; }
+});
+
+// Account → Version → Updates: check GitHub Releases, then install and restart on request.
+async function checkUpdate() {
+  const desc = $('#updateDesc'), btn = $('#checkUpdate');
+  btn.disabled = true; desc.textContent = 'Checking…'; desc.classList.remove('error');
+  try {
+    const u = await invoke('check_update');
+    desc.textContent = u.version ? `Echotype ${u.version} is available (you have ${u.current}).` : `Echotype ${u.current} is the latest version.`;
+    $('#installUpdate').hidden = !u.version;
+  } catch (e) { desc.textContent = String(e); desc.classList.add('error'); }
+  btn.disabled = false;
+}
+$('#checkUpdate').addEventListener('click', checkUpdate);
+$('#installUpdate').addEventListener('click', async e => {
+  const desc = $('#updateDesc');
+  e.target.disabled = true; desc.textContent = 'Downloading the update…';
+  try { await invoke('install_update'); } catch (err) { desc.textContent = String(err); desc.classList.add('error'); e.target.disabled = false; }
+});
 $('#rerunSetup').addEventListener('click', () => startOnboarding(1));
 
 function startOnboarding(step) {
@@ -1682,7 +1835,7 @@ $('#obReset').addEventListener('click', async () => {
 // One question at a time (.ob-q). A tile saves as it's picked and stays on screen, so every
 // choice can be tried; Continue moves on. The pill's questions are macOS-only (data-only).
 let obQ = 0;
-const obQs = () => $$('.ob-q').filter(q => !q.dataset.only || (isMac && (q.dataset.only === 'mac' || S.show_in !== 'menubar')));
+const obQs = () => $$('.ob-q').filter(q => (q.dataset.q !== 'wispr' || !!wispr) && (!q.dataset.only || (isMac && (q.dataset.only === 'mac' || S.show_in !== 'menubar'))) && (q.dataset.q !== 'speed' || obSpeedModels().length > 1)); // one model: nothing to choose
 function obPrefsRender() {
   $('#obName').value = S.display_name || '';
   obHello();
@@ -1694,6 +1847,7 @@ function obPrefsRender() {
     obLang('hinglish');
   }
   obLangRender();
+  if (wispr) $('#obWisprList').replaceChildren(...wisprLines(wispr).map(([k, v]) => h('li', {}, h('b', {}, `${k}: `), v)));
   renderObSpeed();
   obCleanRender();
   // Back from the recap lands on the last question.
@@ -1738,6 +1892,7 @@ function obTilesRender() {
     const on = t => key === 'ball_size' ? Math.abs(S.ball_size - obVal(t, key)) < 0.1
       : key ? S[key] === obVal(t, key)
       : q === 'lang' ? v(t) === (obMine() ? 'mine' : 'auto')
+      : q === 'wispr' ? v(t) === ob.wispr
       : q === 'clean' ? (v(t) === 'yes' ? obCleanOn() : !obCleanOn() && !S.cleanup.enabled)
       : v(t) === (S.sounds ? S.sound_pack : 'off'); // sound
     const ts = [...g.children];
@@ -1751,6 +1906,7 @@ function obPick(g, t) {
   const key = g.dataset.key, q = g.closest('.ob-q').dataset.q, v = obVal(t, key);
   if (key) { S[key] = v; save(); syncBound(); changed(key); }
   else if (q === 'lang') obLangPick(v);
+  else if (q === 'wispr') obWisprPick(v);
   else if (q === 'clean') obCleanPick(v === 'yes');
   else { // sound: tapping one plays it, again if it's already the one
     S.sounds = v !== 'off';
@@ -1832,7 +1988,7 @@ function obLangRender() {
   obTilesRender();
   $('#obLangChips').hidden = !obMine();
   if (obMine()) langChips($('#obLangChips'), OB_LANGS);
-  $('#obHinglishRow').hidden = !S.languages.includes('hi');
+  $('#obHinglishRow').hidden = !S.languages.includes('hi') || !obHinglishModel();
   $('#obHinglish').checked = obHinglishOn();
   const m = obHinglishModel();
   $('#obLangDesc').classList.toggle('warn', langFull);
@@ -1935,9 +2091,9 @@ async function finishOnboarding(page, away = false) {
 // The model onboarding waits for: Automatic's pick for this Mac, or the manual pick (advanced).
 const obWanted = () => (S.advanced ? models.find(m => m.id === S.stt.local_model) : models.find(m => m.recommended));
 
-// The speed slider: the speech models from quickest to most accurate (Medium is left to Settings:
-// it is for translating). Nothing is disabled; each stop says whether this Mac can run it.
-const OB_SPEED = ['tiny.en', 'base.en', 'small', 'large-v3-turbo-q5_0', 'large-v3-turbo', 'large-v3-q5_0'];
+// The speed slider: the speech models from quickest to most accurate. Nothing is disabled; each
+// stop says whether this Mac can run it.
+const OB_SPEED = ['large-v3-turbo-q5_0'];
 const obSpeedModels = () => OB_SPEED.map(id => models.find(m => m.id === id)).filter(Boolean);
 const gb = mb => `${(mb / 1024).toFixed(1).replace(/\.0$/, '')} GB`;
 function obSpeedFit(m) {
@@ -2059,17 +2215,6 @@ function renderObModel() {
 }
 
 // ---------- clipboard ----------
-async function copyText(text, btn) {
-  try { await navigator.clipboard.writeText(text); }
-  catch {
-    const t = h('textarea', { value: text });
-    document.body.append(t); t.select(); document.execCommand('copy'); t.remove();
-  }
-  if (!btn) return;
-  const label = btn.textContent;
-  btn.textContent = 'Copied';
-  setTimeout(() => (btn.textContent = label), 1200);
-}
 
 // ---------- events ----------
 meetingsPage.init({ $, h, invoke, listen, copyText });
@@ -2216,6 +2361,7 @@ syncBound();
 renderAll();
 renderRecent();
 refreshCloud();
+refreshNotices();
 renderMics();
 refreshPerms();
 refreshStatus();

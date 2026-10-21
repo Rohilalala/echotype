@@ -6,6 +6,7 @@ use serde::Serialize;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use sha2::Digest;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState};
@@ -25,14 +26,14 @@ pub struct Model {
 /// Pinned whisper.cpp model repo revision, so a moved branch can't swap files under us.
 const HF_COMMIT: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
 
-/// Best first: `recommended` is the first entry that fits in RAM.
+/// The speech models offered: Turbo, Automatic's pick on every Mac, and tiny.en for onboarding's
+/// first practice run.
+// ponytail: small, medium, large-v3 (full and Q5), full turbo and base.en were offered until
+// 2026-10-16; the app says more are coming. Their rows (and RAM_MB numbers) are in git history.
+// Small (488 MB) was the 8 GB pick but saved 44 MB of RAM over Turbo Q5; it only earned its place
+// by translating, which comes back with a translating model.
 pub const MODELS: &[Model] = &[
     Model { id: "large-v3-turbo-q5_0", label: "Large v3 Turbo (Q5)", size_mb: 547, note: "Best default: near-large accuracy, fast, 99 languages. Cannot translate.", sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2" },
-    Model { id: "large-v3-turbo", label: "Large v3 Turbo", size_mb: 1624, note: "Full-precision turbo. Slightly more accurate, twice the size. Cannot translate.", sha256: "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69" },
-    Model { id: "large-v3-q5_0", label: "Large v3 (Q5)", size_mb: 1031, note: "Most accurate, best for Hindi and other languages. Several times slower than Turbo; translates.", sha256: "d75795ecff3f83b5faa89d1900604ad8c780abd5739fae406de19f23ecd98ad1" },
-    Model { id: "medium", label: "Medium", size_mb: 1533, note: "Multilingual and translates to English (Hinglish → English).", sha256: "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208" },
-    Model { id: "small", label: "Small", size_mb: 488, note: "Multilingual, translates; lighter and less accurate than medium.", sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b" },
-    Model { id: "base.en", label: "Base (English)", size_mb: 148, note: "English only. For low-memory machines.", sha256: "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002" },
     Model { id: "tiny.en", label: "Tiny (English)", size_mb: 78, note: "English only. Fastest, least accurate.", sha256: "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f" },
 ];
 
@@ -45,15 +46,10 @@ pub const MODELS: &[Model] = &[
 // llama.cpp, a model or llm::CONTEXT changes.
 pub const RAM_MB: &[(&str, u64)] = &[
     ("large-v3-turbo-q5_0", 761),
-    ("large-v3-turbo", 1840),
-    // 2026-10-16, same CLI run as the rest (peak footprint 1,608 MB, max RSS 1,579 MB); turbo-q5 read
-    // 806 MB in that session, so this machine's numbers had not drifted.
-    ("large-v3-q5_0", 1608),
-    ("medium", 1869),
-    ("small", 717),
-    ("base.en", 316),
     ("tiny.en", 224),
-    ("echotype-clean", 1113),
+    // 2026-10-16, llama-server -c 1024 -ngl 99, one cleanup, max RSS.
+    ("echotype-tiny", 552),
+    ("echotype-medium", 1099),
 ];
 
 /// RAM_MB for a catalog id; anything unknown is assumed to be as large as the largest model.
@@ -61,8 +57,8 @@ pub fn ram_of(id: &str) -> u64 {
     RAM_MB.iter().find(|(m, _)| *m == id).map_or(1900, |(_, mb)| *mb)
 }
 
-/// Macs with this much memory or less get the light setup: whisper small, the smallest
-/// Echotype cleaner and "save" memory. Above it, turbo, the 1.5B cleaner and "ready".
+/// Macs with this much memory or less get the light setup: whisper small and "save" memory.
+/// Above it, turbo and "ready". Every Mac gets Echotype Tiny for cleanup.
 pub const LOW_RAM_MB: u64 = 8192;
 
 pub fn low_ram(total_mb: u64) -> bool {
@@ -71,7 +67,8 @@ pub fn low_ram(total_mb: u64) -> bool {
 
 /// The speech model Automatic recommends for a Mac with this much memory.
 pub fn recommended(total_mb: u64) -> &'static str {
-    if low_ram(total_mb) { "small" } else { "large-v3-turbo-q5_0" }
+    let _ = total_mb; // one speech model fits every Mac Echotype supports
+    "large-v3-turbo-q5_0"
 }
 
 /// Of `ids`, the one `available` that is closest in RAM to `want`, smaller first: `want` itself
@@ -246,10 +243,8 @@ pub fn pick_local_model(s: &Settings) -> Result<(PathBuf, Option<String>), Strin
             return Ok((p, Some(w)));
         }
     }
-    Err(format!(
-        "Translate to English needs a multilingual model (medium or small); {} cannot translate. Download one under Models.",
-        model_id(chosen)
-    ))
+    // No offered model translates yet: type it as spoken rather than fail the dictation.
+    Ok((resolve(chosen)?, Some("Translate to English is coming soon, so this was typed as spoken.".into())))
 }
 
 /// Whether a dictation can start right now, checked before the microphone opens: a local model
@@ -288,7 +283,8 @@ static CANCELLED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 pub const DOWNLOAD_CANCELLED: &str = "Download cancelled";
 
 pub fn cancel_download(id: &str) {
-    CANCELLED.lock().unwrap_or_else(|e| e.into_inner()).push(models_dir().join(format!("ggml-{id}.bin")));
+    let dest = crate::llm::find(id).map_or_else(|| models_dir().join(format!("ggml-{id}.bin")), crate::llm::model_path);
+    CANCELLED.lock().unwrap_or_else(|e| e.into_inner()).push(dest);
 }
 
 /// True once, for a download that was called off.
@@ -299,45 +295,45 @@ fn take_cancel(dest: &Path) -> bool {
     was
 }
 
+/// Tries per download; each one after the first resumes the .part file with an HTTP Range request.
+const ATTEMPTS: u32 = 5;
+const BACKOFF: Duration = if cfg!(test) { Duration::from_millis(10) } else { Duration::from_secs(2) };
+
 pub fn fetch(url: &str, dest: &Path, want: &str, mut progress: impl FnMut(u64, Option<u64>)) -> Result<(), String> {
     std::fs::create_dir_all(dest.parent().ok_or("bad model path")?).map_err(|e| e.to_string())?;
     take_cancel(dest); // a cancel from an earlier attempt does not stop this one
     let part = dest.with_extension("part");
-    let client = reqwest::blocking::Client::builder().timeout(None::<Duration>).connect_timeout(Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
-    let mut resp = client.get(url).send().and_then(|r| r.error_for_status()).map_err(|e| format!("Download failed: {e}"))?;
-    let total = resp.content_length();
-    let result = (|| {
-        let mut f = std::fs::File::create(&part).map_err(|e| e.to_string())?;
-        let mut buf = vec![0u8; 1 << 16];
-        let (mut done, mut last) = (0u64, Instant::now());
+    // reqwest's blocking timeout is per read: it catches a stalled connection without capping a slow download.
+    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).connect_timeout(Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
+    let mut validator = None;
+    let mut attempt = 1;
+    let result = 'retry: loop {
+        match fetch_part(&client, url, dest, &part, &mut validator, &mut progress) {
+            Err((true, _)) if attempt < ATTEMPTS => {
+                // 2, 4, 8, 16 s, still answering a cancel.
+                let until = Instant::now() + BACKOFF * 2u32.pow(attempt - 1);
+                while Instant::now() < until {
+                    if take_cancel(dest) {
+                        break 'retry Err(DOWNLOAD_CANCELLED.to_string());
+                    }
+                    std::thread::sleep(BACKOFF.min(Duration::from_millis(100)));
+                }
+                attempt += 1;
+            }
+            Err((true, e)) => return Err(e), // keeps the .part, so the next try resumes it
+            Err((false, e)) => break Err(e),
+            Ok(()) => break Ok(()),
+        }
+    };
+    let result = result.and_then(|()| {
         let mut hasher = sha2::Sha256::new();
-        loop {
-            let n = resp.read(&mut buf).map_err(|e| format!("Download interrupted: {e}"))?;
-            if n == 0 {
-                break;
-            }
-            if take_cancel(dest) {
-                return Err(DOWNLOAD_CANCELLED.to_string());
-            }
-            f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-            hasher.update(&buf[..n]);
-            done += n as u64;
-            if last.elapsed() >= Duration::from_millis(250) {
-                progress(done, total);
-                last = Instant::now();
-            }
-        }
-        f.sync_all().map_err(|e| e.to_string())?;
-        if total.is_some_and(|t| t != done) {
-            return Err("Download ended early; try again".to_string());
-        }
+        std::io::copy(&mut std::fs::File::open(&part).map_err(|e| e.to_string())?, &mut hasher).map_err(|e| e.to_string())?;
         let got: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
         if got != want {
             return Err("Downloaded model failed its checksum and was discarded; try again".to_string());
         }
-        progress(done, total);
         Ok(())
-    })();
+    });
     match result {
         Ok(()) => std::fs::rename(&part, dest).map_err(|e| e.to_string()),
         Err(e) => {
@@ -345,6 +341,78 @@ pub fn fetch(url: &str, dest: &Path, want: &str, mut progress: impl FnMut(u64, O
             Err(e)
         }
     }
+}
+
+/// One request for the rest of `part`; Err((true, _)) is a network failure worth retrying.
+/// `validator` (the ETag or Last-Modified seen last) makes the server send the whole file, a 200,
+/// if it changed since; a server without ranges answers 200 too, and either way we start over.
+// ponytail: the validator lives for one fetch, so a .part left by an earlier one resumes unchecked
+// and a changed file fails the checksum; store it beside the .part if that ever bites.
+fn fetch_part(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    dest: &Path,
+    part: &Path,
+    validator: &mut Option<String>,
+    progress: &mut impl FnMut(u64, Option<u64>),
+) -> Result<(), (bool, String)> {
+    use reqwest::{header, StatusCode};
+    let have = part.metadata().map_or(0, |m| m.len());
+    let mut req = client.get(url);
+    if have > 0 {
+        req = req.header(header::RANGE, format!("bytes={have}-"));
+        if let Some(v) = validator.as_deref() {
+            req = req.header(header::IF_RANGE, v);
+        }
+    }
+    let mut resp = req.send().map_err(|e| (true, format!("Download failed: {e}")))?;
+    let status = resp.status();
+    if status == StatusCode::RANGE_NOT_SATISFIABLE {
+        let _ = std::fs::remove_file(part); // longer than the file: start over
+        return Err((true, "Download failed: bad partial file".to_string()));
+    }
+    if !status.is_success() {
+        let retry = status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS || status == StatusCode::REQUEST_TIMEOUT;
+        return Err((retry, format!("Download failed: HTTP {status}")));
+    }
+    let get = |h| resp.headers().get(h).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let etag = get(header::ETAG).filter(|e| !e.starts_with("W/")); // If-Range takes only a strong ETag
+    let seen = etag.or_else(|| get(header::LAST_MODIFIED));
+    let resumed = status == StatusCode::PARTIAL_CONTENT && have > 0 && get(header::CONTENT_RANGE).is_some_and(|r| r.starts_with(&format!("bytes {have}-")));
+    // R2 answers 206 whatever If-Range says, so a changed file shows only in a new validator.
+    if resumed && validator.is_some() && seen.is_some() && seen != *validator {
+        let _ = std::fs::remove_file(part);
+        *validator = seen;
+        return Err((true, "Download failed: the file changed".to_string()));
+    }
+    *validator = seen;
+    let mut done = if resumed { have } else { 0 };
+    let total = resp.content_length().map(|n| n + done);
+    let mut f = std::fs::OpenOptions::new().create(true).write(true).append(resumed).truncate(!resumed).open(part).map_err(|e| (false, e.to_string()))?;
+    let mut buf = vec![0u8; 1 << 16];
+    let mut last = Instant::now();
+    progress(done, total);
+    loop {
+        let n = resp.read(&mut buf).map_err(|e| (true, format!("Download interrupted: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        if take_cancel(dest) {
+            return Err((false, DOWNLOAD_CANCELLED.to_string()));
+        }
+        f.write_all(&buf[..n]).map_err(|e| (false, e.to_string()))?;
+        done += n as u64;
+        if last.elapsed() >= Duration::from_millis(250) {
+            progress(done, total);
+            last = Instant::now();
+        }
+    }
+    f.sync_all().map_err(|e| (false, e.to_string()))?;
+    if total.is_some_and(|t| t != done) {
+        return Err((true, "Download ended early; try again".to_string()));
+    }
+    progress(done, total);
+    Ok(())
 }
 
 /// Deletes only files inside Echotype's own models dir.
@@ -556,6 +624,18 @@ pub fn clean_text(s: &str) -> String {
 /// room) comes back empty instead of whisper's "Thank you." or "I'm going to go to the next one."
 /// Segments wholly outside Silero's speech are dropped (heard).
 pub fn transcribe_local(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, vad: Option<&Path>) -> Result<String, String> {
+    transcribe(model, pcm, languages, translate, prompt, vad, None)
+}
+
+/// The words so far while still recording (lib.rs partials): like transcribe_local, but it never
+/// moves LAST_LANG, and whisper gives up as soon as `stop` is set, so the final run on release
+/// gets the model at once instead of waiting for this one.
+pub fn transcribe_partial(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, vad: Option<&Path>, stop: &AtomicBool) -> Result<String, String> {
+    transcribe(model, pcm, languages, translate, prompt, vad, Some(stop))
+}
+
+/// `stop`: None for a dictation (sticky language, never aborted), Some for a partial.
+fn transcribe(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, vad: Option<&Path>, stop: Option<&AtomicBool>) -> Result<String, String> {
     if pcm.is_empty() {
         return Ok(String::new());
     }
@@ -563,7 +643,7 @@ pub fn transcribe_local(model: &Path, pcm: &[f32], languages: &[String], transla
     if spans.as_ref().is_some_and(Vec::is_empty) {
         return Ok(String::new());
     }
-    run_local(model, pcm, languages, translate, prompt, false, true, vad, |state| {
+    run_local(model, pcm, languages, translate, prompt, false, stop.is_none(), vad, stop, |state| {
         let mut text = String::new();
         for i in 0..state.full_n_segments() {
             let Some(seg) = state.get_segment(i) else { continue };
@@ -606,8 +686,8 @@ pub fn transcribe_words(model: &Path, pcm: &[f32], languages: &[String], prompt:
 }
 
 fn words_of(model: &Path, pcm: &[f32], languages: &[String], prompt: &str, vad: Option<&Path>, spans: Option<&[(f32, f32)]>) -> Result<Vec<Word>, String> {
-    run_local(model, pcm, languages, false, prompt, true, false, vad, |state| {
-        let mut words: Vec<Word> = vec![];
+    run_local(model, pcm, languages, false, prompt, true, false, vad, None, |state| {
+        let mut tokens: Vec<(Vec<u8>, f32, f32)> = vec![];
         for i in 0..state.full_n_segments() {
             let Some(seg) = state.get_segment(i) else { continue };
             let (t0, t1) = (seg.start_timestamp() as f32 / 100.0, seg.end_timestamp() as f32 / 100.0);
@@ -616,28 +696,37 @@ fn words_of(model: &Path, pcm: &[f32], languages: &[String], prompt: &str, vad: 
             }
             for j in 0..seg.n_tokens() {
                 let Some(tok) = seg.get_token(j) else { continue };
-                let text = tok.to_str_lossy().map_err(|e| e.to_string())?;
-                if text.starts_with("[_") || text.starts_with("<|") {
-                    continue; // [_BEG_], [_TT_123], <|endoftext|>
-                }
                 let d = tok.token_data();
-                let (t0, t1) = (d.t0 as f32 / 100.0, d.t1 as f32 / 100.0);
-                match words.last_mut() {
-                    Some(w) if !text.starts_with(' ') => {
-                        w.text.push_str(&text);
-                        w.end = w.end.max(t1);
-                    }
-                    _ => words.push(Word { start: t0, end: t1.max(t0), text: text.trim_start().to_string() }),
-                }
+                tokens.push((tok.to_bytes().map_err(|e| e.to_string())?.to_vec(), d.t0 as f32 / 100.0, d.t1 as f32 / 100.0));
             }
         }
-        // "[BLANK_AUDIO]" and "[Music]" arrive as ordinary tokens; a lone "." or "-" is noise.
-        words.retain_mut(|w| {
-            w.text = clean_text(&w.text);
-            w.text.chars().any(char::is_alphanumeric)
-        });
-        Ok(words)
+        Ok(join_tokens(&tokens))
     })
+}
+
+/// Whisper tokens (bytes, start, end) → words: a token starting with a space starts a word. A
+/// word's bytes are decoded together, since one Devanagari or emoji character can span two tokens
+/// (decoding each token alone turned Hindi into "��हा��").
+fn join_tokens(tokens: &[(Vec<u8>, f32, f32)]) -> Vec<Word> {
+    let mut words: Vec<(Word, Vec<u8>)> = vec![];
+    for (bytes, t0, t1) in tokens {
+        if bytes.starts_with(b"[_") || bytes.starts_with(b"<|") {
+            continue; // [_BEG_], [_TT_123], <|endoftext|>
+        }
+        match words.last_mut() {
+            Some((w, b)) if !bytes.starts_with(b" ") => {
+                b.extend_from_slice(bytes);
+                w.end = w.end.max(*t1);
+            }
+            _ => words.push((Word { start: *t0, end: t1.max(*t0), text: String::new() }, bytes.clone())),
+        }
+    }
+    // "[BLANK_AUDIO]" and "[Music]" arrive as ordinary tokens; a lone "." or "-" is noise.
+    words
+        .into_iter()
+        .map(|(w, b)| Word { text: clean_text(String::from_utf8_lossy(&b).trim_start()), ..w })
+        .filter(|w| w.text.chars().any(char::is_alphanumeric))
+        .collect()
 }
 
 /// whisper tiny (multilingual, Q5_1, 32 MB), only to pick the language before turbo transcribes
@@ -679,6 +768,45 @@ fn lid_probs(pcm: &[f32]) -> Option<Vec<f32>> {
     state.lang_detect(0, THREADS).ok().map(|(_, probs)| probs)
 }
 
+/// Another language's score that takes a clip away from the likely ones. Detecting among all 99 put
+/// the owner's short English and Hinglish clips into Thai, Swedish and French; on FLEURS
+/// (de/es/fr, 90 clips) every full-length clip clears 0.8, and 50 of 90 of their first 3 s do.
+const OTHER_LANGUAGE_P: f32 = 0.8;
+
+/// "Detect any language": the likeliest of `likely` (and the last language, `last`), unless another
+/// language scores OTHER_LANGUAGE_P or more.
+fn auto_pick(probs: &[f32], likely: &[String], last: Option<&str>) -> Option<String> {
+    let top = (0..probs.len()).max_by(|&a, &b| probs[a].total_cmp(&probs[b]))?;
+    let top_code = whisper_rs::get_lang_str(top as i32)?;
+    if likely.iter().any(|l| l == top_code) || probs[top] >= OTHER_LANGUAGE_P || likely.is_empty() {
+        return Some(top_code.to_string());
+    }
+    likeliest(probs, likely, last)
+}
+
+/// The languages this user likely speaks: the Mac's preferred languages, English, and the region's
+/// main other language where Echotype's users speak it mixed with English (India: Hindi).
+// ponytail: macOS only, one region rule; other platforms and regions fall back to English.
+fn likely_languages() -> &'static [String] {
+    static LIKELY: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    LIKELY.get_or_init(|| {
+        let read = |key: &str| std::process::Command::new("/usr/bin/defaults").args(["read", "-g", key]).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+        likely_from(&read("AppleLanguages"), &read("AppleLocale"))
+    })
+}
+
+/// `likely_languages` from `defaults read -g AppleLanguages` / `AppleLocale` output.
+fn likely_from(apple_languages: &str, apple_locale: &str) -> Vec<String> {
+    let mut out = vec!["en".to_string()];
+    let codes = apple_languages.split(['"', ',', '(', ')', '\n', ' ']).filter(|c| c.len() >= 2).map(|c| c[..2].to_lowercase());
+    for c in codes.chain((apple_locale.contains("_IN") || apple_locale.contains("rg=in")).then(|| "hi".to_string())) {
+        if whisper_rs::get_lang_id(&c).is_some() && !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// whisper.cpp's own thread count (min(4, cores)), for the language check before a run.
 const THREADS: usize = 4;
 
@@ -705,9 +833,16 @@ fn likeliest(probs: &[f32], codes: &[String], last: Option<&str>) -> Option<Stri
     }
 }
 
+/// whisper.cpp's abort callback: `data` is the &AtomicBool run_local was given.
+unsafe extern "C" fn stop_set(data: *mut std::ffi::c_void) -> bool {
+    // SAFETY: run_local passes a pointer to an AtomicBool that outlives the whisper_full call.
+    unsafe { (*(data as *const AtomicBool)).load(Ordering::SeqCst) }
+}
+
 /// `sticky`: lean to, and remember, the language of the last such run (LAST_LANG); dictation only.
+/// `stop`: whisper aborts (an Err) once it is set.
 #[allow(clippy::too_many_arguments)]
-fn run_local<T>(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, timestamps: bool, sticky: bool, vad: Option<&Path>, read: impl FnOnce(&WhisperState) -> Result<T, String>) -> Result<T, String> {
+fn run_local<T>(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, timestamps: bool, sticky: bool, vad: Option<&Path>, stop: Option<&AtomicBool>, read: impl FnOnce(&WhisperState) -> Result<T, String>) -> Result<T, String> {
     let mut g = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
     if g.as_ref().is_none_or(|e| e.path != model) {
         *g = None; // free the old model before loading the next one
@@ -734,8 +869,20 @@ fn run_local<T>(model: &Path, pcm: &[f32], languages: &[String], translate: bool
         [one] => Some(one.replace('\0', "")),
         _ if !multilingual => None, // an English-only model: nothing to pick
         [] => match &tiny {
-            // The tiny model's pick, so turbo skips its own detection pass (273 ms on an M5).
-            Some(probs) => (0..probs.len()).max_by(|&a, &b| probs[a].total_cmp(&probs[b])).and_then(|i| whisper_rs::get_lang_str(i as i32)).map(String::from),
+            // The tiny model's pick, so turbo skips its own detection pass (273 ms on an M5), among
+            // the languages this user is likely to speak unless another is clearly what was said.
+            Some(probs) => {
+                let mut last = LAST_LANG.lock().unwrap_or_else(|e| e.into_inner());
+                let mut likely = likely_languages().to_vec();
+                if let Some(l) = last.as_ref().filter(|l| sticky && !likely.contains(l)) {
+                    likely.push(l.clone());
+                }
+                let pick = auto_pick(probs, &likely, last.as_deref().filter(|_| sticky));
+                if sticky {
+                    last.clone_from(&pick);
+                }
+                pick
+            }
             None => None, // whisper detects among all 99
         },
         several if tiny.is_some() => {
@@ -776,6 +923,17 @@ fn run_local<T>(model: &Path, pcm: &[f32], languages: &[String], translate: bool
         let mut v = whisper_rs::WhisperVadParams::new();
         v.set_speech_pad(200); // keep word edges; the default 30 ms clips first and last sounds
         p.set_vad_params(v);
+    }
+    if let Some(stop) = stop {
+        // A partial runs whisper's full 30 s window like the final text. Sizing the encoder to the
+        // clip (set_audio_ctx) was 3x cheaper but turbo answers it with garbage ("itcks", "TH" for
+        // the start of "However, due to the slow communication channels"), as it did for dictation.
+        // The raw setters: set_abort_callback_safe's trampoline reads its boxed closure as the wrong type.
+        // SAFETY: `stop` is borrowed for this whole function, so it outlives the state.full call below.
+        unsafe {
+            p.set_abort_callback(Some(stop_set));
+            p.set_abort_callback_user_data(stop as *const AtomicBool as *mut std::ffi::c_void);
+        }
     }
     state.full(p, pcm).map_err(|e| format!("Transcription failed: {e}"))?;
     read(state)
@@ -872,6 +1030,49 @@ mod tests {
             eprintln!("speech with Silero: {text}");
             assert!(text.split_whitespace().count() >= 3, "speech still comes through: {text:?}");
         }
+    }
+
+    /// What a partial costs on 5, 10 and 20 s of speech, and how soon a stopped one hands the
+    /// model back to the final run.
+    /// `ECHOTYPE_TEST_MODEL=<ggml file> ECHOTYPE_TEST_WAV=<16 kHz speech wav> cargo test --release partial_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn partial_timing() {
+        let (Ok(model), Ok(wav)) = (std::env::var("ECHOTYPE_TEST_MODEL"), std::env::var("ECHOTYPE_TEST_WAV")) else { return eprintln!("skipped: no ECHOTYPE_TEST_MODEL / ECHOTYPE_TEST_WAV") };
+        let (model, vad) = (Path::new(&model), crate::speakers::vad());
+        let speech = crate::audio::decode(std::fs::read(&wav).unwrap(), Some("wav")).unwrap();
+        let clip = |secs: usize| speech.iter().copied().cycle().take(16_000 * secs).collect::<Vec<f32>>();
+        let (go, en) = (AtomicBool::new(false), ["en".to_string()]);
+        transcribe_partial(model, &clip(1), &en, false, "", vad.as_deref(), &go).unwrap(); // load + Metal warm-up
+        for secs in [5, 10, 20] {
+            let pcm = clip(secs);
+            let runs: Vec<u128> = (0..3)
+                .map(|_| {
+                    let t = Instant::now();
+                    transcribe_partial(model, &pcm, &en, false, "", vad.as_deref(), &go).unwrap();
+                    t.elapsed().as_millis()
+                })
+                .collect();
+            eprintln!("partial on {secs} s: {runs:?} ms; {:?}", transcribe_partial(model, &pcm, &en, false, "", vad.as_deref(), &go).unwrap());
+        }
+        // Released mid-partial: the final run waits only for the abort.
+        let pcm = clip(crate::PARTIAL_TAIL.as_secs() as usize);
+        for after in [10, 40, 70] {
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let (m, p, s, v, en) = (model.to_path_buf(), pcm.clone(), stop.clone(), vad.clone(), en.clone());
+            let partial = std::thread::spawn(move || {
+                let r = transcribe_partial(&m, &p, &en, false, "", v.as_deref(), &s);
+                (r.is_err(), Instant::now())
+            });
+            std::thread::sleep(Duration::from_millis(after));
+            let t = Instant::now();
+            stop.store(true, Ordering::SeqCst);
+            let (aborted, done) = partial.join().unwrap();
+            eprintln!("stopped {after} ms into a partial on {} s: model free {} ms later (aborted: {aborted})", pcm.len() / 16_000, done.saturating_duration_since(t).as_millis());
+        }
+        let final_text = transcribe_local(model, &clip(20), &["en".into()], false, "", vad.as_deref()).unwrap();
+        unload(); // ggml-metal asserts at exit while a model is resident
+        assert!(final_text.contains("country"), "the final run is unharmed by the aborted one: {final_text}");
     }
 
     /// `secs` of a quiet room with a knock every 600 ms.
@@ -992,12 +1193,110 @@ mod tests {
     }
 
     #[test]
+    fn a_character_split_across_tokens_stays_whole() {
+        let ha = "हाँ".as_bytes(); // 9 bytes: whisper can cut it mid-character
+        let toks = vec![(b" ".iter().chain(&ha[..4]).copied().collect::<Vec<u8>>(), 0.0, 0.2), (ha[4..].to_vec(), 0.2, 0.4), (b" ok".to_vec(), 0.5, 0.7), (b"[_TT_50]".to_vec(), 0.7, 0.7)];
+        let w = join_tokens(&toks);
+        assert_eq!(w.iter().map(|w| w.text.as_str()).collect::<Vec<_>>(), ["हाँ", "ok"]);
+        assert_eq!((w[0].start, w[0].end), (0.0, 0.4));
+    }
+
+    #[test]
     fn a_cancelled_download_stops_once() {
         let dest = models_dir().join("ggml-cancel-test.bin");
         cancel_download("cancel-test");
         assert!(take_cancel(&dest) && !take_cancel(&dest), "a cancel stops one download, not the next");
-        assert!(MODELS.iter().any(|m| m.id == "large-v3-q5_0" && translates(m.id)) && ram_of("large-v3-q5_0") > ram_of("large-v3-turbo-q5_0"));
-        assert_eq!(recommended(16 * 1024), "large-v3-turbo-q5_0", "adding large-v3 leaves Automatic's pick alone");
+        assert_eq!(MODELS.iter().map(|m| m.id).collect::<Vec<_>>(), ["large-v3-turbo-q5_0", "tiny.en"], "Automatic's pick and the practice model");
+    }
+
+    /// A 127.0.0.1 server whose first reply sends half of `body` and drops the connection. Its second
+    /// honours the Range header ("206"), ignores it ("200"), or sends a 206 of a file with a new
+    /// ETag ("changed", then a 200 on a third). Returns the URL and the requests it saw.
+    fn flaky_server(body: Vec<u8>, second: &'static str) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::BufRead;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/model.bin", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for i in 0..if second == "changed" { 3 } else { 2 } {
+                let (mut sock, _) = listener.accept().unwrap();
+                let mut req = String::new();
+                let mut r = std::io::BufReader::new(sock.try_clone().unwrap());
+                while r.read_line(&mut req).unwrap() > 2 {}
+                let from = req.lines().find_map(|l| l.to_lowercase().strip_prefix("range: bytes=")?.trim_end_matches('-').parse::<usize>().ok());
+                let reply = match (i, from) {
+                    (0, _) => [format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"v1\"\r\n\r\n", body.len()).into_bytes(), body[..body.len() / 2].to_vec()].concat(),
+                    (1, Some(a)) if second != "200" => {
+                        // The changed file's bytes differ, so accepting them would fail the checksum.
+                        let (etag, rest) = if second == "206" { ("v1", body[a..].to_vec()) } else { ("v2", vec![0; body.len() - a]) };
+                        [format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {a}-{}/{}\r\nETag: \"{etag}\"\r\nConnection: close\r\n\r\n", body.len() - a, body.len() - 1, body.len()).into_bytes(), rest].concat()
+                    }
+                    _ => [format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes(), body.clone()].concat(),
+                };
+                let _ = sock.write_all(&reply); // the client may have hung up (the cancel test)
+                seen.push(req);
+            }
+            seen
+        });
+        (url, server)
+    }
+
+    fn sha256_hex(b: &[u8]) -> String {
+        sha2::Sha256::digest(b).iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn a_dropped_download_resumes_or_starts_over() {
+        let body: Vec<u8> = (0..300_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect();
+        let dir = std::env::temp_dir().join(format!("echotype-fetch-test-{}", std::process::id()));
+        for second in ["206", "200", "changed"] {
+            let (url, server) = flaky_server(body.clone(), second);
+            let dest = dir.join(format!("resume-{second}.bin"));
+            let mut last = (0, None);
+            fetch(&url, &dest, &sha256_hex(&body), |d, t| last = (d, t)).unwrap();
+            let seen: Vec<String> = server.join().unwrap().iter().map(|r| r.to_lowercase()).collect();
+            assert_eq!(std::fs::read(&dest).unwrap(), body, "{second}");
+            assert!(!dest.with_extension("part").exists());
+            assert_eq!(last, (body.len() as u64, Some(body.len() as u64)), "progress counts the resumed bytes");
+            assert!(seen[1].contains(&format!("range: bytes={}-", body.len() / 2)) && seen[1].contains("if-range: \"v1\""), "{}", seen[1]);
+            assert!(seen.get(2).is_none_or(|r| !r.contains("range:")), "a changed file starts over");
+        }
+
+        // A cancel after the resume still deletes the .part; a bad checksum discards the file.
+        let (url, server) = flaky_server(body.clone(), "206");
+        let dest = dir.join("cancel.bin");
+        let err = fetch(&url, &dest, &sha256_hex(&body), |d, _| {
+            if d > 0 {
+                CANCELLED.lock().unwrap().push(dest.clone());
+            }
+        });
+        assert_eq!(err.unwrap_err(), DOWNLOAD_CANCELLED);
+        assert!(!dest.with_extension("part").exists() && !dest.exists());
+        server.join().unwrap();
+        let (url, server) = flaky_server(body.clone(), "206");
+        assert!(fetch(&url, &dest, &"0".repeat(64), |_, _| {}).unwrap_err().contains("checksum"));
+        assert!(!dest.with_extension("part").exists() && !dest.exists());
+        server.join().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn detect_any_stays_with_the_users_languages_unless_another_is_clear() {
+        assert_eq!(likely_from("(\n    \"en-US\",\n    \"en-IN\"\n)", "en_US@rg=inzzzz"), ["en", "hi"], "the owner's Mac");
+        assert_eq!(likely_from("(\"de-DE\", \"fr-FR\")", "de_DE"), ["en", "de", "fr"]);
+        assert_eq!(likely_from("", ""), ["en"]);
+        let mut probs = vec![0.0f32; whisper_rs::get_lang_max_id() as usize + 1];
+        let id = |c: &str| whisper_rs::get_lang_id(c).unwrap() as usize;
+        let likely = ["en".to_string(), "hi".to_string()];
+        probs[id("th")] = 0.45; // a short Hinglish clip once came out in Thai
+        probs[id("hi")] = 0.30;
+        probs[id("en")] = 0.20;
+        assert_eq!(auto_pick(&probs, &likely, None).as_deref(), Some("hi"));
+        probs[id("th")] = 0.85;
+        assert_eq!(auto_pick(&probs, &likely, None).as_deref(), Some("th"), "clearly Thai is Thai");
+        probs[id("th")] = 0.0;
+        probs[id("en")] = 0.6;
+        assert_eq!(auto_pick(&probs, &likely, None).as_deref(), Some("en"));
     }
 
     #[test]
@@ -1048,28 +1347,25 @@ mod tests {
     fn automatic_picks_by_total_ram_and_uses_what_is_downloaded() {
         let all = |_: &str| true;
         let pick = |total, dl: &dyn Fn(&str) -> bool| list_models_with(total, 64_000, dl).into_iter().find(|m| m.automatic).unwrap().id;
-        assert_eq!(pick(8192, &all), "small", "an 8 GB Mac");
-        assert_eq!(pick(24_576, &all), "large-v3-turbo-q5_0", "a 24 GB Mac: today's default");
-        assert_eq!(pick(16_384, &all), "large-v3-turbo-q5_0");
-        // Until the recommendation is downloaded, the closest downloaded model, smaller first.
-        assert_eq!(pick(8192, &|id| id == "large-v3-turbo-q5_0" || id == "base.en"), "base.en");
-        assert_eq!(pick(8192, &|id| id == "medium"), "medium", "a larger one beats none");
-        assert_eq!(pick(24_576, &|id| id == "small" || id == "medium"), "small");
+        for total in [8192, 16_384, 24_576] {
+            assert_eq!(pick(total, &all), "large-v3-turbo-q5_0", "Turbo on every Mac ({total} MB)");
+        }
+        // Until Turbo is downloaded, the practice model.
+        assert_eq!(pick(8192, &|id| id == "tiny.en"), "tiny.en");
         let m8 = list_models_with(8192, 64_000, all);
-        assert_eq!(m8.iter().filter(|m| m.recommended).count(), 1);
-        assert!(m8.iter().find(|m| m.id == "small").unwrap().recommended);
-        // 3 GB free: turbo-q5 (+ 2048 headroom) fits, medium does not.
-        let tight = list_models_with(24_576, 3_000, all);
-        assert!(tight.iter().find(|m| m.id == "large-v3-turbo-q5_0").unwrap().fits);
-        assert!(!tight.iter().find(|m| m.id == "medium").unwrap().fits);
+        assert_eq!(m8.iter().filter(|m| m.recommended).map(|m| m.id).collect::<Vec<_>>(), ["large-v3-turbo-q5_0"]);
+        // 2.7 GB free: tiny.en (+ 2048 headroom) fits, turbo-q5 does not.
+        let tight = list_models_with(24_576, 2_780, all);
+        assert!(tight.iter().find(|m| m.id == "tiny.en").unwrap().fits);
+        assert!(!tight.iter().find(|m| m.id == "large-v3-turbo-q5_0").unwrap().fits);
     }
 
     #[test]
     fn bigger_models_warn_on_low_memory_macs_only() {
         let m8 = list_models_with(8192, 64_000, |_| true);
         let warn = |id: &str| m8.iter().find(|m| m.id == id).unwrap().warning.clone();
-        assert_eq!(warn("medium").unwrap(), format!("Uses about {} while dictating. On an 8 GB Mac this can slow other apps.", fmt_mb(ram_of("medium"))));
-        assert!(warn("small").is_none() && warn("tiny.en").is_none(), "Automatic's pick and smaller ones carry no warning");
+        assert!(warn("large-v3-turbo-q5_0").is_none() && warn("tiny.en").is_none(), "Automatic's pick and smaller ones carry no warning");
+        assert_eq!(ram_warning(1869, ram_of("large-v3-turbo-q5_0"), 8192).unwrap(), format!("Uses about {} while dictating. On an 8 GB Mac this can slow other apps.", fmt_mb(1869)));
         assert!(list_models_with(24_576, 64_000, |_| true).iter().all(|m| m.warning.is_none()));
         assert_eq!(fmt_mb(800), "800 MB");
         assert_eq!(fmt_mb(2048), "2 GB");
@@ -1121,5 +1417,25 @@ mod tests {
         assert_eq!(clean_text(" Hello [Music] world. "), "Hello world.");
         assert_eq!(prompt(&["Arnav".into(), " ".into(), "Xoxoday".into()]), "Arnav, Xoxoday.");
         assert_eq!(prompt(&[" ".into()]), "");
+    }
+
+    /// Live words against the final text on the same audio: the start of real speech, 2, 4 and 6 s.
+    /// `ECHOTYPE_TEST_MODEL=<ggml> ECHOTYPE_TEST_WAV=<speech> cargo test --release partials_match_the_final_text -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn partials_match_the_final_text() {
+        let (Ok(model), Ok(wav)) = (std::env::var("ECHOTYPE_TEST_MODEL"), std::env::var("ECHOTYPE_TEST_WAV")) else { return eprintln!("skipped") };
+        let model = Path::new(&model);
+        let pcm = crate::audio::decode(std::fs::read(&wav).unwrap(), Some("wav")).unwrap();
+        let en = ["en".to_string()];
+        let stop = AtomicBool::new(false);
+        for secs in [2usize, 4, 6] {
+            let clip = &pcm[..(secs * 16_000).min(pcm.len())];
+            let t = std::time::Instant::now();
+            let partial = transcribe_partial(model, clip, &en, false, "", None, &stop).unwrap();
+            let ms = t.elapsed().as_millis();
+            let full = transcribe_local(model, clip, &en, false, "", None).unwrap();
+            eprintln!("{secs} s ({ms} ms)\n  live:  {partial}\n  final: {full}");
+        }
     }
 }

@@ -24,6 +24,8 @@ pub type Piece = (Source, Vec<f32>, Duration);
 pub struct Capture {
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
+    /// Notices for the meeting while it runs: computer audio stopped and came back, say.
+    pub notes: Arc<Mutex<Vec<String>>>,
 }
 
 impl Capture {
@@ -31,15 +33,16 @@ impl Capture {
     /// returned as a notice (the meeting continues mic-only); a mic failure is an error.
     pub fn start(device: Option<String>, system: bool, started: Instant, tx: Sender<Piece>) -> Result<(Self, Option<String>), String> {
         let stop = Arc::new(AtomicBool::new(false));
+        let notes = Arc::new(Mutex::new(vec![]));
         let mut threads = vec![mic(device, started, tx.clone(), stop.clone())?];
         let mut notice = None;
         if system {
-            match system_audio(started, tx, stop.clone()) {
+            match system_audio(started, tx, stop.clone(), notes.clone()) {
                 Ok(t) => threads.push(t),
                 Err(e) => notice = Some(e),
             }
         }
-        Ok((Self { stop, threads }, notice))
+        Ok((Self { stop, threads, notes }, notice))
     }
 
     /// Stops both streams; every captured sample has been sent when this returns.
@@ -135,25 +138,56 @@ pub const NO_SCREEN_RECORDING: &str = "Only your microphone is being transcribed
 
 /// Windows: WASAPI loopback of the default output. Unlike macOS it includes Echotype's own sounds.
 #[cfg(target_os = "windows")]
-fn system_audio(started: Instant, tx: Sender<Piece>, stop: Arc<AtomicBool>) -> Result<JoinHandle<()>, String> {
+fn system_audio(started: Instant, tx: Sender<Piece>, stop: Arc<AtomicBool>, _: Arc<Mutex<Vec<String>>>) -> Result<JoinHandle<()>, String> {
     pump(Source::System, audio::open_loopback, started, tx, stop).map_err(|e| format!("Only your microphone is being transcribed: {e}"))
 }
 
 // ponytail: Linux meetings are mic-only. Capturing the PulseAudio/PipeWire monitor source needs a
 // Pulse or PipeWire client (cpal's ALSA host cannot pick the monitor for one stream only).
 #[cfg(target_os = "linux")]
-fn system_audio(_: Instant, _: Sender<Piece>, _: Arc<AtomicBool>) -> Result<JoinHandle<()>, String> {
+fn system_audio(_: Instant, _: Sender<Piece>, _: Arc<AtomicBool>, _: Arc<Mutex<Vec<String>>>) -> Result<JoinHandle<()>, String> {
     Err("Only your microphone is being transcribed: computer audio is not captured on Linux yet.".into())
 }
 
-/// Audio-only ScreenCaptureKit stream of the main display's output mix, Echotype excluded.
+/// The computer's audio on macOS. When macOS stops the stream mid-meeting (it did 35 s into a
+/// Teams call, with nobody hearing about it), the stream is opened again every 2 s until it
+/// comes back, and the meeting gets a notice saying when and why.
 #[cfg(target_os = "macos")]
-fn system_audio(started: Instant, tx: Sender<Piece>, stop: Arc<AtomicBool>) -> Result<JoinHandle<()>, String> {
-    use screencapturekit::prelude::*;
+fn system_audio(started: Instant, tx: Sender<Piece>, stop: Arc<AtomicBool>, notes: Arc<Mutex<Vec<String>>>) -> Result<JoinHandle<()>, String> {
     if !screen_recording_allowed() {
         request_screen_recording();
         return Err(NO_SCREEN_RECORDING.into());
     }
+    let first = sc_stream(started, &tx)?;
+    let at = move |t: Instant| crate::meeting::clock(t.duration_since(started).as_secs_f32());
+    Ok(std::thread::spawn(move || {
+        let mut live = Some(first);
+        while !stop.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(100));
+            let why = live.as_ref().and_then(|(_, died)| died.lock().unwrap_or_else(|e| e.into_inner()).take());
+            let Some(why) = why else { continue };
+            let lost = Instant::now();
+            live = None;
+            while live.is_none() && !stop.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_secs(2));
+                live = sc_stream(started, &tx).ok();
+            }
+            let back = if live.is_some() { format!("came back at {}", at(Instant::now())) } else { "did not come back: only your microphone was transcribed after that".into() };
+            notes.lock().unwrap_or_else(|e| e.into_inner()).push(format!("Computer audio stopped at {} ({why}) and {back}.", at(lost)));
+        }
+        if let Some((stream, _)) = live {
+            let _ = stream.stop_capture();
+        }
+        drop(tx);
+    }))
+}
+
+/// One audio-only ScreenCaptureKit stream of the main display's output mix, Echotype excluded,
+/// and where its stop reason lands if macOS ends it.
+#[cfg(target_os = "macos")]
+fn sc_stream(started: Instant, tx: &Sender<Piece>) -> Result<(screencapturekit::prelude::SCStream, Arc<Mutex<Option<String>>>), String> {
+    use screencapturekit::prelude::*;
+    use screencapturekit::stream::ErrorHandler;
     let fail = |e: SCError| format!("Only your microphone is being transcribed: computer audio could not start ({e}).");
     let content = SCShareableContent::get().map_err(fail)?;
     let display = content.displays().into_iter().next().ok_or("Only your microphone is being transcribed: no display to capture audio from.")?;
@@ -167,7 +201,9 @@ fn system_audio(started: Instant, tx: Sender<Piece>, stop: Arc<AtomicBool>) -> R
         .with_excludes_current_process_audio(true)
         .with_sample_rate(audio::RATE as i32)
         .with_channel_count(1);
-    let mut stream = SCStream::new(&filter, &config).map_err(fail)?;
+    let died = Arc::new(Mutex::new(None));
+    let d = died.clone();
+    let mut stream = SCStream::new_with_delegate(&filter, &config, ErrorHandler::new(move |e| *d.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.to_string()))).map_err(fail)?;
     let rs: Mutex<Option<(u32, StreamResampler)>> = Mutex::new(None);
     let audio_tx = tx.clone();
     stream
@@ -189,13 +225,7 @@ fn system_audio(started: Instant, tx: Sender<Piece>, stop: Arc<AtomicBool>) -> R
     // Without a screen output ScreenCaptureKit logs every dropped frame.
     stream.add_output_handler(|_: CMSampleBuffer, _| {}, SCStreamOutputType::Screen).map_err(fail)?;
     stream.start_capture().map_err(fail)?;
-    Ok(std::thread::spawn(move || {
-        while !stop.load(Ordering::SeqCst) {
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        let _ = stream.stop_capture();
-        drop(tx);
-    }))
+    Ok((stream, died))
 }
 
 /// Float or 16-bit PCM, interleaved or one buffer per channel, averaged to mono.
