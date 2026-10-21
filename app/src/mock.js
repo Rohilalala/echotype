@@ -123,6 +123,7 @@ const commands = {
     { name: 'AirPods Pro', bluetooth: true, default: false, builtin: false },
     { name: 'Shure MV7', bluetooth: false, default: false, builtin: false },
   ],
+  writer: { id: 'echotype-writer', label: 'Echotype Writer', note: '1.5B. Edits selected text when you ask: Command Mode and Transforms.', downloadable: true, size_mb: 940, ram_mb: 1150, installed: q.has('writer'), automatic: false, recommended: false, warning: null },
   // ?talk=fn&globe=0|1&im=0|1&relaunch=1 shows each talk-key state.
   shortcut_status: () => {
     const talk = settings.talk_key !== 'accelerator', globe = q.get('globe') !== '0', im = q.get('im') !== '0', relaunch = q.has('relaunch');
