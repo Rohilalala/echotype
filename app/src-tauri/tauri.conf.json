@@ -47,7 +47,6 @@
     },
     "macOS": {
       "entitlements": "Entitlements.plist",
-      "signingIdentity": "-",
       "minimumSystemVersion": "13.0"
     },
     "createUpdaterArtifacts": true
