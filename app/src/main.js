@@ -113,6 +113,7 @@ function syncBound() {
     else if (el.type === 'radio') el.checked = el.value === v;
     else el.value = v ?? '';
   }
+  $('#historyKeep').value = !S.history_enabled ? 'off' : S.history_24h ? 'day' : 'keep';
 }
 function changed(p) {
   if (p === 'mode' || p === 'hotkey') renderHotkey();
@@ -1156,6 +1157,7 @@ const SNIPPET_EXAMPLES = [['my email address', 'you@example.com'], ['my sign-off
 function renderDict() {
   $('#chips').replaceChildren(...S.dictionary.map((w, i) =>
     h('span', { className: 'chip' }, w, h('button', { type: 'button', 'aria-label': `Remove ${w}`, onclick: () => { S.ignored_words.push(...S.dictionary.splice(i, 1)); save(); renderDict(); $('#newWord').focus(); } }, svg(CROSS))))); // removed: never suggested again
+  $('#dictExport').disabled = !S.dictionary.length && !S.replacements.some(r => r.from.trim());
   $('#reps').replaceChildren(...S.replacements.map((r, i) => {
     const field = (k, label) => h('input', { type: 'text', value: r[k], 'aria-label': label, spellcheck: false, placeholder: SNIPPET_EXAMPLES[i % SNIPPET_EXAMPLES.length][k === 'from' ? 0 : 1], oninput: e => { S.replacements[i][k] = e.target.value; saveSoon(); } }); // S, not r: a save's echo replaces S without re-rendering
     return h('div', { className: 'row rep' }, field('from', 'When you say'), field('to', 'Type'),
@@ -1176,6 +1178,46 @@ $('#addRep').addEventListener('click', () => {
   S.replacements.push({ from: '', to: '' });
   renderDict();
   $$('#reps input').at(-2).focus();
+});
+
+// Import and export (wordlist.rs): a file is counted first and added on Add; the core parses it.
+const IMPORT_DESC = $('#dictImportDesc').textContent;
+let dictPending = null; // { text, csv } of the file waiting for Add
+const count = (n, one) => `${n.toLocaleString()} ${n === 1 ? one : `${one}s`}`;
+function dictImportShow(desc, pending = null) {
+  dictPending = pending;
+  $('#dictImportDesc').textContent = desc;
+  $('#dictImportAdd').hidden = $('#dictImportCancel').hidden = !pending;
+  $('#dictImport').hidden = !!pending;
+}
+$('#dictImport').addEventListener('click', () => $('#dictFile').click());
+$('#dictFile').addEventListener('change', async e => {
+  const f = e.target.files[0];
+  e.target.value = ''; // so picking the same file again still counts it
+  if (!f) return;
+  if (f.size > 2e6) return dictImportShow(`${f.name} is too big for a word list (2 MB at most).`);
+  const pending = { text: await f.text(), csv: /\.csv$/i.test(f.name) };
+  try {
+    const p = await invoke('dictionary_import_preview', pending);
+    const adds = [p.words.length && count(p.words.length, 'word'), p.snippets.length && count(p.snippets.length, 'snippet')].filter(Boolean);
+    const skips = [p.duplicates && count(p.duplicates, 'duplicate'), p.over && `${p.over.toLocaleString()} over the 1,000 limit`].filter(Boolean);
+    if (!adds.length) return dictImportShow(skips.length ? `Nothing new in ${f.name}: skips ${skips.join(' and ')}.` : `No words found in ${f.name}.`);
+    dictImportShow(`${f.name}: adds ${adds.join(', ')}${skips.length ? `, skips ${skips.join(' and ')}` : ''}.`, pending);
+    $('#dictImportAdd').focus();
+  } catch (err) { dictImportShow(`Couldn't read ${f.name}: ${err}`); }
+});
+$('#dictImportCancel').addEventListener('click', () => { dictImportShow(IMPORT_DESC); $('#dictImport').focus(); });
+$('#dictImportAdd').addEventListener('click', async () => {
+  try {
+    await save(true); // a snippet still being typed is saved first, so the import's echo can't drop it
+    const p = await invoke('dictionary_import', dictPending);
+    dictImportShow(`Added ${[count(p.words.length, 'word'), p.snippets.length && count(p.snippets.length, 'snippet')].filter(Boolean).join(' and ')}.`);
+  } catch (err) { dictImportShow(`Couldn't import: ${err}`); }
+  $('#dictImport').focus();
+});
+$('#dictExport').addEventListener('click', async () => {
+  try { $('#dictExportDesc').textContent = `Saved to Downloads as ${(await invoke('dictionary_export')).split(/[\\/]/).pop()}.`; }
+  catch (err) { $('#dictExportDesc').textContent = `Couldn't export: ${err}`; }
 });
 
 // ---------- history ----------
@@ -1380,6 +1422,15 @@ $('#rerunLast').addEventListener('change', e => {
   if (!id) return;
   rerunPending = true;
   invoke('rerun', { id }).catch(err => { rerunPending = false; dictation = { state: 'error', error: String(err) }; renderHero(); });
+});
+
+// Keep history: three choices on two settings. "Don't keep" is history off, as it always was.
+$('#historyKeep').addEventListener('change', async e => {
+  S.history_enabled = e.target.value !== 'off';
+  S.history_24h = e.target.value === 'day';
+  await save();
+  changed('history_enabled'); // after the save: choosing 24 hours prunes what History lists
+  invoke('get_history', { limit: 3 }).then(r => { recent = r; renderRecent(); }).catch(() => {});
 });
 
 const confirmClear = on => { $('#clearHistory').hidden = on; $('#clearConfirm').hidden = !on; (on ? $('#clearCancel') : $('#clearHistory')).focus(); };

@@ -70,7 +70,10 @@ pub struct Settings {
     /// Words removed from the Dictionary or undone from `learned`: never suggested again.
     pub ignored_words: Vec<String>,
     pub restore_clipboard: bool,
+    /// Settings → Keep history: off is "Don't keep". With `history_24h` it is "Delete after 24
+    /// hours": entries and their audio go a day after they were recorded (prune_history).
     pub history_enabled: bool,
+    pub history_24h: bool,
     /// Spoken "new line", "new paragraph", "bullet point" and "scratch that" act as commands in a
     /// dictation (cleanup::voice_commands). On for upgraders too.
     pub voice_commands: bool,
@@ -386,6 +389,7 @@ impl Default for Settings {
             ignored_words: vec![],
             restore_clipboard: true,
             history_enabled: true,
+            history_24h: false,
             voice_commands: true,
             send_it: true,
             usage_stats: true,
@@ -866,6 +870,29 @@ pub fn clear_history() -> Result<(), String> {
     }
 }
 
+/// "Delete after 24 hours": drops the entries recorded more than a day ago, with their audio.
+/// Run at launch, hourly, on choosing it and before History is read.
+pub fn prune_history() {
+    prune_history_in(&history_path(), &clips_dir(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64));
+}
+
+fn prune_history_in(path: &Path, clips: &Path, now_ms: u64) {
+    let _g = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
+    prune_clips_in(clips, 1, now_ms);
+    let Ok(old) = std::fs::read_to_string(path) else { return };
+    let young = |l: &&str| serde_json::from_str::<HistoryEntry>(l).is_ok_and(|e| now_ms.saturating_sub(e.ts) <= DAY_MS);
+    let kept: Vec<&str> = old.lines().filter(young).collect();
+    if kept.len() < old.lines().filter(|l| !l.trim().is_empty()).count() {
+        let _ = write_atomic(path, &kept.iter().map(|l| format!("{l}\n")).collect::<String>());
+    }
+}
+
+/// Whether entry `ts` is still kept under these settings: what the History page and the MCP
+/// server show between two prunes, and nothing at all once history is off ("Don't keep").
+pub fn history_keeps(s: &Settings, ts: u64, now_ms: u64) -> bool {
+    s.history_enabled && (!s.history_24h || now_ms.saturating_sub(ts) <= DAY_MS)
+}
+
 // ---------- the audio of recent dictations, for play and Re-run in History ----------
 
 /// At most this many dictations keep their audio (16 kHz 16-bit WAV, about 320 KB a 10 s
@@ -1323,6 +1350,42 @@ mod tests {
         assert_eq!(left(7), [1, 6]);
         assert_eq!(left(0), Vec::<u64>::new(), "0: no audio kept");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "the recording in progress is not pruned");
+    }
+
+    #[test]
+    fn delete_after_24_hours_drops_older_entries_and_their_audio() {
+        let dir = scratch("history-24h");
+        let (path, clips) = (dir.join("history.jsonl"), dir.join("clips"));
+        let now = 100 * DAY_MS;
+        for ago in [DAY_MS + 1, DAY_MS, 60_000] {
+            let e = HistoryEntry { ts: now - ago, raw: "r".into(), text: "t".into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false, cleaned: None, original: None, recovered: false };
+            append_history_to(&path, &e).unwrap();
+            save_clip_in(&clips, now - ago, b"RIFF").unwrap();
+        }
+        std::fs::write(clips.join(format!("{}.part.wav", now - 2 * DAY_MS)), "").unwrap(); // a recording in progress
+        prune_history_in(&path, &clips, now);
+        let left: Vec<u64> = std::fs::read_to_string(&path).unwrap().lines().map(|l| now - serde_json::from_str::<HistoryEntry>(l).unwrap().ts).collect();
+        assert_eq!(left, [DAY_MS, 60_000], "a day old stays until it is older");
+        let mut audio: Vec<u64> = clips_in(&clips).into_iter().map(|(ts, _)| now - ts).collect();
+        audio.sort();
+        assert_eq!(audio, [60_000, DAY_MS], "their audio goes with them");
+        assert!(clips.join(format!("{}.part.wav", now - 2 * DAY_MS)).exists());
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        prune_history_in(&path, &clips, now);
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before, "nothing to drop: not rewritten");
+        prune_history_in(&dir.join("none.jsonl"), &dir.join("no-clips"), now); // no history yet: fine
+        assert!(!dir.join("none.jsonl").exists());
+    }
+
+    #[test]
+    fn keep_history_has_three_choices_on_two_fields() {
+        let now = 10 * DAY_MS;
+        let s = |on, day| Settings { history_enabled: on, history_24h: day, ..Default::default() };
+        assert!(history_keeps(&s(true, false), 0, now), "Keep: forever");
+        assert!(history_keeps(&s(true, true), now - DAY_MS, now) && !history_keeps(&s(true, true), now - DAY_MS - 1, now), "Delete after 24 hours");
+        assert!(!history_keeps(&s(false, false), now, now) && !history_keeps(&s(false, true), now, now), "Don't keep");
+        let old: Settings = serde_json::from_str(r#"{"history_enabled":false}"#).unwrap();
+        assert!(!old.history_enabled && !old.history_24h, "upgraders keep what they chose");
     }
 
     #[test]

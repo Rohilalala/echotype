@@ -16,7 +16,7 @@ const settings = {
   replacements: [{ from: 'my email', to: 'aditya@example.com' }, { from: 'our nav', to: 'Arnav' }],
   // ?learned previews the notice for words picked up from corrections (learn.rs).
   learn_words: true, learned: q.has('learned') ? ['Midhun', 'Xoxoday'] : [], ignored_words: [],
-  restore_clipboard: true, history_enabled: true, voice_commands: true, send_it: true,
+  restore_clipboard: true, history_enabled: !q.has('nohistory'), history_24h: q.has('history24h'), voice_commands: true, send_it: true,
   usage_stats: !q.has('statsoff'), share_telemetry: q.has('telemetry'), display_name: q.get('name') || '',
   onboarded: !q.has('onboarding'), onboard_step: 0,
   talk_key: q.get('talk') || 'accelerator',
@@ -161,7 +161,7 @@ const commands = {
   check_update: () => ({ current: '0.1.0', version: q.has('update') ? '0.2.0' : null, notes: null }),
   install_update: () => { throw 'Browser preview: updates install in the app.'; },
   last_app: () => (q.has('apps') ? { id: 'com.tinyspeck.slackmacgap', name: 'Slack', style: 'casual' } : null),
-  get_history: ({ limit }) => (settings.history_enabled ? history.slice(0, limit) : []),
+  get_history: ({ limit }) => (settings.history_enabled ? history.filter(e => !settings.history_24h || Date.now() - e.ts <= 864e5).slice(0, limit) : []),
   wispr_import_preview: () => (q.has('nowispr') ? null : {
     words: ['Aditya Rohilla', 'Wispr Flow', 'ZopMop', 'Anshi', 'xoxoday'], replacements: [{ from: 'my email address', to: 'me@example.com' }],
     languages: ['en'], app_styles: [{ id: 'com.tinyspeck.slackmacgap', name: 'Slack', style: 'casual' }, { id: 'net.whatsapp.WhatsApp', name: 'WhatsApp', style: 'casual' }],
@@ -170,6 +170,31 @@ const commands = {
   wispr_import: () => {
     settings.display_name ||= 'Aditya';
     return ['5 dictionary words', '1 snippet', 'your languages', 'styles for Slack, WhatsApp', 'your talk key (Left ⌃)'];
+  },
+  // Dictionary import (wordlist.rs): a rough stand-in for its parser, one row a line, "from,to" a snippet.
+  dictionary_import_preview: ({ text }) => {
+    const words = new Set(settings.dictionary.map(w => w.toLowerCase())), from = new Set(settings.replacements.map(r => r.from.toLowerCase()));
+    const out = { words: [], snippets: [], duplicates: 0, over: 0 };
+    for (const line of text.replace(/^\uFEFF/, '').split(/\r?\n/).map(l => l.trim()).filter(Boolean)) {
+      const [a, b] = line.split(',').map(x => x.trim()), seen = b ? from : words;
+      if (seen.has(a.toLowerCase())) out.duplicates++;
+      else if (out.words.length + out.snippets.length >= 1000) out.over++;
+      else { seen.add(a.toLowerCase()); b ? out.snippets.push({ from: a, to: b }) : out.words.push(a); }
+    }
+    return out;
+  },
+  dictionary_import: args => {
+    const p = commands.dictionary_import_preview(args);
+    settings.dictionary.push(...p.words); settings.replacements.push(...p.snippets);
+    setTimeout(() => emit('settings-changed', structuredClone(settings)), 0);
+    return p;
+  },
+  dictionary_export: () => '/Users/you/Downloads/Echotype Dictionary.csv',
+  // ?sharefail: saving the stats card fails. The last card saved is window.__statsCard (base64 PNG), for checks.
+  save_stats_card: ({ png }) => {
+    if (q.has('sharefail')) throw 'Could not save: Permission denied';
+    window.__statsCard = png;
+    return `/Users/you/Downloads/Echotype Stats ${new Date().toISOString().slice(0, 10)}.png`;
   },
   update_history: ({ ts, text }) => {
     const e = history.find(x => x.ts === ts);

@@ -21,6 +21,7 @@ mod stt;
 mod telemetry;
 mod tray;
 mod wispr;
+mod wordlist;
 
 use audio::{LevelStats, Quality};
 use hotkey::{Act, Ev};
@@ -1428,6 +1429,9 @@ fn commit_settings(app: &AppHandle, change: impl FnOnce(&Settings) -> Settings) 
     if new.clip_days != old.clip_days {
         settings::prune_clips(new.clip_days);
     }
+    if new.history_enabled && new.history_24h && !(old.history_enabled && old.history_24h) {
+        settings::prune_history(); // "Delete after 24 hours" applies to what is there now
+    }
     if new.talk_key != old.talk_key {
         apply_talk_key(app, &new);
     }
@@ -1517,8 +1521,15 @@ async fn list_input_devices() -> R<Vec<audio::InputDevice>> {
 }
 
 #[tauri::command]
-async fn get_history(limit: Option<usize>) -> R<Vec<HistoryEntry>> {
-    Ok(settings::get_history(limit.unwrap_or(100)))
+async fn get_history(app: AppHandle, limit: Option<usize>) -> R<Vec<HistoryEntry>> {
+    let s = current_settings(&app);
+    blocking(move || {
+        if s.history_enabled && s.history_24h {
+            settings::prune_history(); // exact to the minute, not to the last hourly prune
+        }
+        Ok(settings::get_history(limit.unwrap_or(100)))
+    })
+    .await
 }
 
 /// What Echotype would bring over from Wispr Flow on this machine (None: not installed).
@@ -1551,6 +1562,54 @@ async fn wispr_import(app: AppHandle) -> R<Vec<String>> {
         s
     })?;
     Ok(done)
+}
+
+/// Dictionary → Import: what a .txt or .csv file's text would add, for the preview.
+#[tauri::command]
+async fn dictionary_import_preview(app: AppHandle, text: String, csv: bool) -> wordlist::Import {
+    wordlist::plan(&current_settings(&app), &text, csv)
+}
+
+/// Adds it, planned again against the settings as they are now. Returns what was added.
+#[tauri::command]
+async fn dictionary_import(app: AppHandle, text: String, csv: bool) -> R<wordlist::Import> {
+    let mut done = wordlist::Import::default();
+    commit_settings(&app, |old| {
+        let mut s = old.clone();
+        done = wordlist::plan(&s, &text, csv);
+        wordlist::apply(&mut s, &done);
+        s
+    })?;
+    Ok(done)
+}
+
+/// Dictionary → Export: the words and snippets as a CSV in Downloads. Returns its path.
+#[tauri::command]
+async fn dictionary_export(app: AppHandle) -> R<String> {
+    let csv = wordlist::to_csv(&current_settings(&app));
+    blocking(move || save_download(&app, "Echotype Dictionary.csv", csv.as_bytes())).await
+}
+
+/// Stats → Share: the card stats.js drew (a base64 PNG, numbers only) into Downloads.
+#[tauri::command]
+async fn save_stats_card(app: AppHandle, png: String) -> R<String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(png).map_err(|e| e.to_string())?;
+    if !bytes.starts_with(b"\x89PNG") {
+        return Err("That is not a PNG image".into());
+    }
+    let name = format!("Echotype Stats {}.png", chrono::Local::now().format("%Y-%m-%d"));
+    blocking(move || save_download(&app, &name, &bytes)).await
+}
+
+/// Writes a file to Downloads and shows it in Finder, as meeting notes are saved. Replaces one of the same name.
+// ponytail: Downloads, not a save dialog (no dialog plugin in the app); add tauri-plugin-dialog if people ask where.
+fn save_download(app: &AppHandle, name: &str, bytes: &[u8]) -> R<String> {
+    use tauri_plugin_opener::OpenerExt;
+    let path = dirs::download_dir().ok_or("No Downloads folder")?.join(name);
+    std::fs::write(&path, bytes).map_err(|e| format!("Could not save: {e}"))?;
+    let _ = app.opener().reveal_item_in_dir(&path);
+    Ok(path.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -2434,6 +2493,15 @@ pub fn run() {
                 settings::prune_clips(s.clip_days); // dictation audio too (Settings → Keep dictation audio)
                 std::thread::sleep(Duration::from_secs(86_400));
             });
+            // "Delete after 24 hours" (Settings → Keep history): at start, then hourly.
+            let h = app.handle().clone();
+            std::thread::spawn(move || loop {
+                let s = current_settings(&h);
+                if s.history_enabled && s.history_24h {
+                    settings::prune_history();
+                }
+                std::thread::sleep(Duration::from_secs(3600));
+            });
             std::thread::spawn(move || {
                 if s.stt.provider == "local" {
                     let _ = speakers::ensure_vad(); // for installs from before dictation used it
@@ -2475,6 +2543,10 @@ pub fn run() {
             update_history,
             wispr_import_preview,
             wispr_import,
+            dictionary_import_preview,
+            dictionary_import,
+            dictionary_export,
+            save_stats_card,
             clear_history,
             get_stats,
             clear_stats,
