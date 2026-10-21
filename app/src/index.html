@@ -308,6 +308,8 @@
           <span class="actions"><button class="hotkey" data-shortcut="copy_last_hotkey" type="button" aria-labelledby="copyLabel"></button><button class="icon-btn" data-clear="copy_last_hotkey" type="button" aria-label="Turn off the copy last shortcut"></button></span></div>
         <div class="row"><span class="row-text"><span class="row-title" id="commandLabel">Command Mode</span><span class="row-desc">Select text and say what to change: “more formal”, “shorter”, “translate to Spanish”. With nothing selected, say what to write.</span><span class="row-desc warn" id="commandNote" hidden>Needs a general model. The Echotype model only cleans up dictation: pick Ollama, LM Studio or an API key under Cleanup.</span><span class="row-desc error" id="command_hotkeyError" role="alert" hidden></span></span>
           <span class="actions"><button class="hotkey" data-shortcut="command_hotkey" type="button" aria-labelledby="commandLabel"></button><button class="icon-btn" data-clear="command_hotkey" type="button" aria-label="Turn off the Command Mode shortcut"></button></span></div>
+        <label class="row"><span class="row-text"><span class="row-title">Voice commands</span><span class="row-desc">Say “new line”, “new paragraph”, “bullet point” or “next bullet”, and “scratch that” to drop the sentence before it. Said as a phrase of its own, so a sentence that only contains the words is typed as you said it.</span></span>
+          <input type="checkbox" class="switch" data-bind="voice_commands" /></label>
       </div>
 
       <h2 class="group-title" id="pillTitle">Pill</h2>

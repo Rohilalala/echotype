@@ -52,6 +52,9 @@ pub struct Settings {
     pub replacements: Vec<Replacement>,
     pub restore_clipboard: bool,
     pub history_enabled: bool,
+    /// Spoken "new line", "new paragraph", "bullet point" and "scratch that" act as commands in a
+    /// dictation (cleanup::voice_commands). On for upgraders too.
+    pub voice_commands: bool,
     /// Count words and speaking speed on this computer (stats.rs). Counts only; on for upgraders too.
     pub usage_stats: bool,
     /// Opt-in anonymous usage counts and crash reports for the beta (telemetry.rs). Off unless
@@ -286,6 +289,7 @@ impl Default for Settings {
             replacements: vec![],
             restore_clipboard: true,
             history_enabled: true,
+            voice_commands: true,
             usage_stats: true,
             share_telemetry: false,
             display_name: String::new(),
@@ -642,6 +646,9 @@ pub struct HistoryEntry {
     /// The cleanup the guard rejected; `text` is the words as spoken.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleaned: Option<String>,
+    /// The text before the first Re-run from History, so the user can go back to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original: Option<String>,
 }
 
 fn history_path() -> PathBuf {
@@ -679,14 +686,32 @@ pub fn update_history(ts: u64, text: &str) -> Result<String, String> {
 }
 
 fn update_history_in(path: &Path, ts: u64, text: &str) -> Result<String, String> {
+    edit_history_in(path, ts, |e| e.text = text.to_string()).map(|was| was.text)
+}
+
+/// A re-run of entry `new.ts`: its result replaces the entry's, and the text it had before its
+/// first re-run is kept as `original`.
+pub fn rerun_history(new: &HistoryEntry) -> Result<(), String> {
+    rerun_history_in(&history_path(), new)
+}
+
+fn rerun_history_in(path: &Path, new: &HistoryEntry) -> Result<(), String> {
+    edit_history_in(path, new.ts, |e| *e = HistoryEntry { original: e.original.take().or_else(|| Some(e.text.clone())), ..new.clone() }).map(drop)
+}
+
+/// Changes the entry recorded at `ts` and returns it as it was.
+fn edit_history_in(path: &Path, ts: u64, edit: impl FnOnce(&mut HistoryEntry)) -> Result<HistoryEntry, String> {
     let _g = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
     let old = std::fs::read_to_string(path).unwrap_or_default();
-    let mut found = None;
+    let (mut found, mut edit) = (None, Some(edit));
     let mut lines = Vec::new();
     for l in old.lines().filter(|l| !l.trim().is_empty()) {
         match serde_json::from_str::<HistoryEntry>(l) {
             Ok(mut e) if e.ts == ts && found.is_none() => {
-                found = Some(std::mem::replace(&mut e.text, text.to_string()));
+                found = Some(e.clone());
+                if let Some(f) = edit.take() {
+                    f(&mut e);
+                }
                 lines.push(serde_json::to_string(&e).map_err(|e| e.to_string())?);
             }
             _ => lines.push(l.to_string()), // other entries stay byte for byte
@@ -699,10 +724,50 @@ fn update_history_in(path: &Path, ts: u64, text: &str) -> Result<String, String>
 
 pub fn clear_history() -> Result<(), String> {
     let _g = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
+    clear_clips();
     match std::fs::remove_file(history_path()) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
         _ => Ok(()),
     }
+}
+
+// ---------- the audio of recent dictations, for Re-run in History ----------
+
+/// How many dictations keep their audio (16 kHz 16-bit WAV, about 1 MB a 30 s dictation).
+const CLIPS_KEPT: usize = 20;
+
+fn clips_dir() -> PathBuf {
+    data_dir().join("clips")
+}
+
+/// The audio of the history entry recorded at `ts`, if it is still kept.
+pub fn clip_path(ts: u64) -> PathBuf {
+    clips_dir().join(format!("{ts}.wav"))
+}
+
+/// Keeps the audio of entry `ts`; only the newest CLIPS_KEPT stay. Only while history is on.
+pub fn save_clip(ts: u64, wav: &[u8]) -> Result<(), String> {
+    save_clip_in(&clips_dir(), ts, wav)
+}
+
+fn save_clip_in(dir: &Path, ts: u64, wav: &[u8]) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(format!("{ts}.wav")), wav).map_err(|e| e.to_string())?;
+    let mut kept: Vec<(u64, PathBuf)> = std::fs::read_dir(dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|f| f.ok().map(|f| f.path()))
+        .filter_map(|p| Some((p.file_stem()?.to_str()?.parse().ok()?, p)))
+        .collect();
+    kept.sort_unstable_by_key(|(ts, _)| std::cmp::Reverse(*ts));
+    for (_, p) in kept.iter().skip(CLIPS_KEPT) {
+        let _ = std::fs::remove_file(p);
+    }
+    Ok(())
+}
+
+/// Every kept clip: history was cleared or switched off.
+pub fn clear_clips() {
+    let _ = std::fs::remove_dir_all(clips_dir());
 }
 
 #[cfg(test)]
@@ -920,7 +985,7 @@ mod tests {
                 let path = path.clone();
                 std::thread::spawn(move || {
                     for i in 0..25u64 {
-                        let e = HistoryEntry { ts: t * 1000 + i, raw: "r".into(), text: "t".into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false, cleaned: None };
+                        let e = HistoryEntry { ts: t * 1000 + i, raw: "r".into(), text: "t".into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false, cleaned: None, original: None };
                         append_history_to(&path, &e).unwrap();
                     }
                 })
@@ -941,7 +1006,7 @@ mod tests {
     fn update_history_changes_only_that_entry() {
         let path = scratch("history-update").join("history.jsonl");
         for ts in 1..=3u64 {
-            let e = HistoryEntry { ts, cleaned: None, raw: format!("r{ts}"), text: format!("t{ts}"), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false };
+            let e = HistoryEntry { ts, cleaned: None, raw: format!("r{ts}"), text: format!("t{ts}"), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false, original: None };
             append_history_to(&path, &e).unwrap();
         }
         let before: Vec<String> = std::fs::read_to_string(&path).unwrap().lines().map(String::from).collect();
@@ -952,6 +1017,36 @@ mod tests {
         assert_eq!((e.ts, e.raw.as_str(), e.text.as_str()), (2, "r2", "Ping Midhun"));
         assert!(update_history_in(&path, 9, "x").is_err(), "a missing entry is an error, not a silent no-op");
         assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), 1, "temp files left behind");
+    }
+
+    #[test]
+    fn a_rerun_replaces_the_entry_and_keeps_its_first_text() {
+        let path = scratch("history-rerun").join("history.jsonl");
+        let e = |ts, text: &str| HistoryEntry { ts, raw: "r".into(), text: text.into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "local:tiny.en".into(), cleanup_provider: None, no_cleanup: false, cleaned: None, original: None };
+        for ts in 1..=2 {
+            append_history_to(&path, &e(ts, "first")).unwrap();
+        }
+        let rerun = HistoryEntry { stt_provider: "local:large-v3-turbo-q5_0".into(), ..e(1, "second") };
+        rerun_history_in(&path, &rerun).unwrap();
+        rerun_history_in(&path, &HistoryEntry { text: "third".into(), ..rerun.clone() }).unwrap();
+        let all: Vec<HistoryEntry> = std::fs::read_to_string(&path).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!((all[0].text.as_str(), all[0].original.as_deref(), all[0].stt_provider.as_str()), ("third", Some("first"), "local:large-v3-turbo-q5_0"), "the text before the first re-run");
+        assert_eq!(all[1], e(2, "first"), "other entries untouched");
+        assert!(rerun_history_in(&path, &e(9, "x")).is_err());
+        assert!(!std::fs::read_to_string(&path).unwrap().lines().nth(1).unwrap().contains("original"), "no field until a re-run");
+    }
+
+    #[test]
+    fn only_the_newest_clips_are_kept() {
+        let dir = scratch("clips");
+        for ts in (1..=25u64).rev().chain([30]) {
+            save_clip_in(&dir, ts * 1000, b"RIFF").unwrap();
+        }
+        std::fs::write(dir.join("notes.txt"), "").unwrap(); // not a clip: never counted or removed
+        let mut kept: Vec<u64> = std::fs::read_dir(&dir).unwrap().filter_map(|f| f.unwrap().path().file_stem()?.to_str()?.parse().ok()).collect();
+        kept.sort();
+        assert_eq!(kept, (7..=25).chain([30]).map(|t| t * 1000).collect::<Vec<_>>(), "the 20 newest by time, whatever order they were written in");
+        assert!(dir.join("notes.txt").exists());
     }
 
     #[test]
