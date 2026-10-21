@@ -126,23 +126,19 @@ fn when(ms: u64) -> String {
     chrono::DateTime::from_timestamp_millis(ms as i64).map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default()
 }
 
-fn fold(s: &str) -> String {
-    s.to_lowercase()
-}
-
 /// Dictations holding every word of `query` (all of them for ""), newest first. A recovered
 /// dictation not transcribed yet has no text, so it is left out. Settings → Keep history holds
 /// here too, with the app closed: none when it is "Don't keep", the last day's on "Delete after 24 hours".
 // ponytail: reads all of history.jsonl (500 entries at most) per call.
 fn search_history(dirs: &Dirs, query: &str, limit: usize) -> Vec<Value> {
-    let words: Vec<String> = query.split_whitespace().map(fold).collect();
+    let has = settings::word_match(query);
     let (s, now) = (settings_in(&dirs.config), chrono::Utc::now().timestamp_millis() as u64);
     let file = std::fs::read_to_string(dirs.data.join("history.jsonl")).unwrap_or_default();
     file.lines()
         .rev()
         .filter_map(|l| serde_json::from_str::<HistoryEntry>(l).ok())
         .filter(|e| settings::history_keeps(&s, e.ts, now))
-        .filter(|e| !e.text.is_empty() && words.iter().all(|w| fold(&e.text).contains(w.as_str())))
+        .filter(|e| !e.text.is_empty() && has(&e.text))
         .take(limit)
         .map(|e| json!({ "when": when(e.ts), "ts": e.ts, "text": e.text }))
         .collect()
@@ -154,7 +150,7 @@ fn meetings(data: &Path) -> Vec<Meeting> {
 }
 
 fn search_meetings(data: &Path, query: &str) -> Vec<Value> {
-    let words: Vec<String> = query.split_whitespace().map(fold).collect();
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     let mut hits: Vec<(u64, Value)> = meetings(data)
         .into_iter()
         .filter_map(|m| {

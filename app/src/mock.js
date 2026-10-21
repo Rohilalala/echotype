@@ -11,7 +11,7 @@ const settings = {
   local_api: { enabled: false, port: 7811 },
   stt: { provider: 'local', local_model: q.has('onboarding') ? '' : 'large-v3-turbo-q5_0', model: '', base_url: '' },
   cleanup: { enabled: !q.has('nocleanup'), provider: 'ollama', model: 'gemma3:4b', base_url: '', style: 'default', level: q.get('level') || 'medium', custom_instructions: '',
-    match_app: q.has('apps'), app_styles: q.has('apps') ? [{ id: 'com.apple.Terminal', name: 'Terminal', style: '', cleanup: false, languages: [] }, { id: 'com.google.Chrome', name: 'Google Chrome', style: 'casual', cleanup: null, languages: ['hi', 'en'] }] : [] },
+    match_app: q.has('apps'), app_styles: q.has('apps') ? [{ id: 'com.apple.Terminal', name: 'Terminal', style: '', cleanup: false, languages: [] }, { id: 'com.google.Chrome', name: 'Google Chrome', style: 'casual', cleanup: null, languages: ['hi', 'en'], instructions: 'No full stop at the end of a message.' }] : [] },
   dictionary: ['Echotype', 'Tauri', 'Hinglish', 'Supabase'], screen_context: !q.has('noscreen'),
   replacements: [{ from: 'my email', to: 'aditya@example.com' }, { from: 'our nav', to: 'Arnav' }],
   // ?learned previews the notice for words picked up from corrections (learn.rs).
@@ -163,6 +163,13 @@ const commands = {
   install_update: () => { throw 'Browser preview: updates install in the app.'; },
   last_app: () => (q.has('apps') ? { id: 'com.tinyspeck.slackmacgap', name: 'Slack', style: 'casual' } : null),
   get_history: ({ limit }) => (settings.history_enabled ? history.filter(e => !settings.history_24h || Date.now() - e.ts <= 864e5).slice(0, limit) : []),
+  // As settings.rs search_history: every word in any of an entry's texts, any case or accent.
+  history_search: ({ query, limit }) => {
+    const fold = t => t.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase(), words = fold(query).split(/\s+/).filter(Boolean);
+    const all = commands.get_history({ limit: Infinity });
+    const hits = all.filter(e => words.every(w => fold([e.text, e.raw, e.original ?? '', e.cleaned ?? ''].join('\n')).includes(w)));
+    return { total: all.length, matched: hits.length, items: hits.slice(0, limit) };
+  },
   wispr_import_preview: () => (q.has('nowispr') ? null : {
     words: ['Aditya Rohilla', 'Wispr Flow', 'ZopMop', 'Anshi', 'xoxoday'], replacements: [{ from: 'my email address', to: 'me@example.com' }],
     languages: ['en'], app_styles: [{ id: 'com.tinyspeck.slackmacgap', name: 'Slack', style: 'casual' }, { id: 'net.whatsapp.WhatsApp', name: 'WhatsApp', style: 'casual' }],

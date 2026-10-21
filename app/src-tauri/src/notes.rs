@@ -104,10 +104,10 @@ pub fn delete(dir: &Path, id: u64) -> R<()> {
     store(dir, &notes)
 }
 
-/// Notes holding every word of `query` (any case), newest edit first.
+/// Notes holding every word of `query` (settings::word_match), newest edit first.
 pub fn search<'a>(notes: &'a [Note], query: &str) -> Vec<&'a Note> {
-    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
-    notes.iter().filter(|n| !n.text.trim().is_empty() && words.iter().all(|w| n.text.to_lowercase().contains(w.as_str()))).collect()
+    let has = crate::settings::word_match(query);
+    notes.iter().filter(|n| !n.text.trim().is_empty() && has(&n.text)).collect()
 }
 
 // ---------- commands ----------

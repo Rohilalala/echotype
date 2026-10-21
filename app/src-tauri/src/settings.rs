@@ -266,6 +266,10 @@ pub struct Cleanup {
     /// The user's picks per app, over APP_STYLES. A list, not a map: merge() and main.js merge3
     /// replace lists whole, so a removed row stays removed.
     pub app_styles: Vec<AppStyle>,
+    /// The app in front's own instructions (AppStyle::instructions), set by apply_app for one
+    /// dictation or edit. Never saved.
+    #[serde(skip)]
+    pub app_instructions: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -280,7 +284,13 @@ pub struct AppStyle {
     pub cleanup: Option<bool>,
     /// The languages spoken in this app, ["auto"] for any; empty: the user's `Settings::languages`.
     pub languages: Vec<String>,
+    /// The user's own words for how to write in this app ("no full stop at the end"), added to the
+    /// cleanup and Command Mode prompts there (cleanup::app_block). "" for none.
+    pub instructions: String,
 }
+
+/// The most of an app's instructions a prompt gets (the field holds no more either).
+pub const APP_INSTRUCTIONS_MAX: usize = 300;
 
 /// Built-in styles by bundle id (an id ending in '.' matches the prefix). Browsers and every
 /// other app keep the user's style.
@@ -320,11 +330,17 @@ pub fn app_style<'a>(c: &'a Cleanup, id: Option<&str>) -> &'a str {
     }
 }
 
-/// A dictation into app `id` with that app's style, cleanup switch and languages over the user's,
+/// What the user asked for in app `id` (AppStyle::instructions), while "Match the app" is on.
+pub fn app_instructions<'a>(c: &'a Cleanup, id: &str) -> &'a str {
+    c.app_styles.iter().find(|a| a.id == id && c.match_app).map_or("", |a| &a.instructions)
+}
+
+/// A dictation into app `id` with that app's style, cleanup switch, languages and instructions over the user's,
 /// while "Match the app" is on (app_style).
 pub fn apply_app(s: &mut Settings, id: &str) {
     s.cleanup.style = app_style(&s.cleanup, Some(id)).to_string();
     let Some(a) = s.cleanup.app_styles.iter().find(|a| a.id == id).filter(|_| s.cleanup.match_app) else { return };
+    s.cleanup.app_instructions = a.instructions.clone();
     if let Some(on) = a.cleanup {
         s.cleanup.enabled = on;
     }
@@ -485,6 +501,7 @@ impl Default for Cleanup {
             custom_instructions: String::new(),
             match_app: false,
             app_styles: vec![],
+            app_instructions: String::new(),
         }
     }
 }
@@ -824,6 +841,48 @@ fn append_history_to(path: &Path, entry: &HistoryEntry) -> Result<(), String> {
 pub fn get_history(limit: usize) -> Vec<HistoryEntry> {
     let s = std::fs::read_to_string(history_path()).unwrap_or_default();
     s.lines().rev().filter_map(|l| serde_json::from_str(l).ok()).take(limit).collect()
+}
+
+/// The History page's search box: up to `limit` entries holding every word of `query` in their
+/// text, what was heard, the text before a re-run or the rejected cleanup, newest first.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct HistorySearch {
+    /// Entries kept, matching or not ("12 of 340").
+    pub total: usize,
+    pub matched: usize,
+    pub items: Vec<HistoryEntry>,
+}
+
+pub fn search_history(query: &str, limit: usize) -> HistorySearch {
+    search_history_in(&history_path(), query, limit)
+}
+
+// ponytail: reads all of history.jsonl (HISTORY_CAP entries at most) per keystroke, after a debounce.
+fn search_history_in(path: &Path, query: &str, limit: usize) -> HistorySearch {
+    let all: Vec<HistoryEntry> = std::fs::read_to_string(path).unwrap_or_default().lines().rev().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let has = word_match(query);
+    // A recovered dictation has no text yet: listed with the rest, never a match for a word.
+    let hits: Vec<HistoryEntry> = all.iter().filter(|e| query.trim().is_empty() || has(&[&e.text, &e.raw, e.original.as_deref().unwrap_or(""), e.cleaned.as_deref().unwrap_or("")].join("\n"))).cloned().collect();
+    HistorySearch { total: all.len(), matched: hits.len(), items: hits.into_iter().take(limit).collect() }
+}
+
+/// Search's word match, shared by History, Notes and the MCP tools: whether a text holds every
+/// word of `query` (any text for ""), in any case and with or without accents ("cafe" finds "Café").
+pub fn word_match(query: &str) -> impl Fn(&str) -> bool {
+    let words: Vec<String> = query.split_whitespace().map(fold).collect();
+    move |text| {
+        let t = fold(text);
+        words.iter().all(|w| t.contains(w.as_str()))
+    }
+}
+
+// ponytail: Latin accents only, one char for one; Unicode decomposition (a new crate) if other scripts need it.
+const ACCENTED: &str = "àáâãäåāăąçćĉċčďđèéêëēĕėęěĝğġģĥìíîïĩīĭįıĵķĺļľŀłñńņňòóôõöøōŏőŕŗřśŝşšţťùúûüũūŭůűųŵýÿŷźżž";
+const PLAIN: &str = "aaaaaaaaacccccddeeeeeeeeegggghiiiiiiiiijklllllnnnnooooooooorrrssssttuuuuuuuuuuwyyyzzz";
+
+/// Lowercase without accents, for word_match.
+fn fold(s: &str) -> String {
+    s.chars().flat_map(char::to_lowercase).map(|c| ACCENTED.chars().position(|a| a == c).and_then(|i| PLAIN.chars().nth(i)).unwrap_or(c)).collect()
 }
 
 /// A fix from the History page: replaces the text of the entry recorded at `ts`.
@@ -1200,6 +1259,17 @@ mod tests {
         assert_eq!(run(&s, "com.googlecode.iterm2"), (true, vec!["en".into()], "verbatim".into()), "no row: the user's, in the built-in style");
         s.cleanup.enabled = false;
         assert!(run(&s, "com.apple.mail").0, "an app can turn cleanup on too");
+        s.cleanup.app_styles[0].instructions = "No full stop at the end".into();
+        let mut t = s.clone();
+        apply_app(&mut t, "com.apple.Terminal");
+        assert_eq!((t.cleanup.app_instructions.as_str(), app_instructions(&s.cleanup, "com.apple.Terminal")), ("No full stop at the end", "No full stop at the end"));
+        apply_app(&mut t, "com.apple.mail");
+        assert_eq!(t.cleanup.app_instructions, "", "another app's own, or none");
+        s.cleanup.match_app = false;
+        assert_eq!(app_instructions(&s.cleanup, "com.apple.Terminal"), "", "only while Match the app is on");
+        let old: AppStyle = serde_json::from_str(r#"{"id":"com.apple.mail","name":"Mail","style":""}"#).unwrap();
+        assert_eq!(old.instructions, "", "rows saved before instructions read as none");
+        assert!(!serde_json::to_string(&s).unwrap().contains("app_instructions"), "the app's instructions for one run are never saved");
     }
 
     #[test]
@@ -1207,7 +1277,7 @@ mod tests {
         let mut s = Settings::default();
         s.dictionary = vec!["Arnav".into()];
         s.replacements = vec![Replacement { from: "my email".into(), to: "me@example.com".into() }];
-        s.cleanup.app_styles = vec![AppStyle { id: "com.apple.mail".into(), name: "Mail".into(), style: "casual".into(), cleanup: Some(false), languages: vec!["hi".into()] }];
+        s.cleanup.app_styles = vec![AppStyle { id: "com.apple.mail".into(), name: "Mail".into(), style: "casual".into(), cleanup: Some(false), languages: vec!["hi".into()], instructions: "Sign off with Best, Aditya".into() }];
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
     }
@@ -1289,6 +1359,34 @@ mod tests {
         assert_eq!(ts, want);
         let leftovers = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
         assert_eq!(leftovers, 1, "temp files left behind");
+    }
+
+    #[test]
+    fn word_match_needs_every_word_in_any_case_and_with_or_without_accents() {
+        assert_eq!(ACCENTED.chars().count(), PLAIN.chars().count(), "one plain letter per accented one");
+        let has = word_match("CAFE  résumé");
+        assert!(has("Lunch at the Café, then fix my resume"));
+        assert!(!has("Lunch at the café"), "every word");
+        assert!(word_match("")("anything") && word_match("Łódź")("lodz") && word_match("ok")("Ökonomie"));
+    }
+
+    #[test]
+    fn history_search_finds_words_in_any_text_an_entry_kept() {
+        let path = scratch("history-search").join("history.jsonl");
+        let e = |ts: u64, raw: &str, text: &str| HistoryEntry { ts, raw: raw.into(), text: text.into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false, cleaned: None, original: None, recovered: false };
+        append_history_to(&path, &e(1, "um invoice for arnav", "Invoice for Arnav.")).unwrap();
+        append_history_to(&path, &HistoryEntry { original: Some("Ship the Café menu".into()), ..e(2, "ship it", "Ship it.") }).unwrap();
+        append_history_to(&path, &HistoryEntry { cleaned: Some("Call Midhun at noon.".into()), ..e(3, "call midhun at noon", "call midhun at noon") }).unwrap();
+        append_history_to(&path, &HistoryEntry { recovered: true, ..e(4, "", "") }).unwrap();
+        let ts = |q: &str, limit| search_history_in(&path, q, limit).items.iter().map(|e| e.ts).collect::<Vec<_>>();
+        assert_eq!(ts("", 10), [4, 3, 2, 1], "no query: all, newest first, a recovered one too");
+        assert_eq!(ts("INVOICE arnav", 10), [1]);
+        assert_eq!(ts("cafe menu", 10), [2], "the text before a re-run, without its accent");
+        assert_eq!(ts("noon", 10), [3]);
+        assert_eq!(ts("um invoice", 10), [1], "what was heard");
+        assert_eq!(ts("invoice ship", 10), Vec::<u64>::new(), "every word in one entry");
+        let r = search_history_in(&path, "i", 1);
+        assert_eq!((r.total, r.matched, r.items.len()), (4, 3, 1), "counts past the limit");
     }
 
     #[test]

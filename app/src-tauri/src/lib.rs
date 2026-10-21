@@ -956,7 +956,11 @@ fn process_edit(app: &AppHandle, busy: Arc<AtomicBool>, run: impl FnOnce(&AppHan
     let app = app.clone();
     std::thread::spawn(move || {
         let guard = Busy(busy);
-        let s = current_settings(&app);
+        let mut s = current_settings(&app);
+        // The app's own instructions (Cleanup → Style per app), read now: the edit goes to the app in front.
+        if let Some(f) = platform::frontmost_app(&app).filter(|_| s.cleanup.match_app) {
+            s.cleanup.app_instructions = settings::app_instructions(&s.cleanup, &f.id).to_string();
+        }
         let ev = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&app, &s)))
             .unwrap_or_else(|_| DictationState { state: "error", error: Some("Command Mode crashed unexpectedly. Your text is unchanged.".into()), ..Default::default() });
         drop(guard);
@@ -1032,7 +1036,7 @@ fn run_transform(app: &AppHandle, s: &Settings, name: &str) -> DictationState {
 fn apply_edit(app: &AppHandle, s: &Settings, what: &str, selection: Option<&str>, instruction: &str, paste: bool, nowhere: bool) -> DictationState {
     emit_state(app, simple("cleaning"));
     let provider = settings::preset(&s.cleanup.provider).map_or(s.cleanup.provider.clone(), |p| p.label.to_string());
-    let text = match cleanup::chat(s, cleanup::COMMAND_PROMPT, &cleanup::command_input(selection, instruction), Duration::from_secs(60)) {
+    let text = match cleanup::chat(s, &cleanup::command_prompt(s), &cleanup::command_input(selection, instruction), Duration::from_secs(60)) {
         Ok(t) if !t.is_empty() => t,
         Ok(_) => return edit_error(format!("{provider} returned nothing. Your text is unchanged.")),
         Err(e) => return DictationState { action: Some("cleanup"), ..edit_error(format!("{what} failed: {provider}: {}. Your text is unchanged.", e.lines().next().unwrap_or_default().trim_end_matches('.'))) },
@@ -1565,6 +1569,19 @@ async fn get_history(app: AppHandle, limit: Option<usize>) -> R<Vec<HistoryEntry
             settings::prune_history(); // exact to the minute, not to the last hourly prune
         }
         Ok(settings::get_history(limit.unwrap_or(100)))
+    })
+    .await
+}
+
+/// The History page's search box (settings::search_history); "" lists them all.
+#[tauri::command]
+async fn history_search(app: AppHandle, query: String, limit: Option<usize>) -> R<settings::HistorySearch> {
+    let s = current_settings(&app);
+    blocking(move || {
+        if s.history_enabled && s.history_24h {
+            settings::prune_history(); // as get_history
+        }
+        Ok(settings::search_history(&query, limit.unwrap_or(100)))
     })
     .await
 }
@@ -2567,6 +2584,7 @@ pub fn run() {
             cancel_download,
             list_input_devices,
             get_history,
+            history_search,
             history_clips,
             history_audio,
             update_history,

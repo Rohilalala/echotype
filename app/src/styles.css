@@ -1013,6 +1013,11 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .snippet time { flex: none; color: var(--fg-3); font-variant-numeric: tabular-nums; }
 .snippet mark { background: var(--accent-weak); color: var(--fg); border-radius: 2px; }
 
+/* History search: the box and "12 of 340" beside it. */
+.history-search { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; }
+.history-search input { flex: 1; }
+.history-search .hint { flex: none; color: var(--fg-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+
 /* Notes (notes.js): the list, and one note's editor filling the page. */
 #notes .note-search { width: 100%; margin: 0 0 8px; }
 #notes .note-editor { display: block; min-height: max(280px, calc(100vh - 290px)); margin: 10px 0 0; padding: 12px 14px; font-size: 14px; line-height: 1.55; resize: none; }
@@ -1057,3 +1062,4 @@ html.film-pre :is(.ob-top, .ob-stage, .ob-foot, .ob-model), html.film-out :is(.o
 /* An app's "More" options sit under its row, with no divider between them. */
 #appStyles > .app-more { justify-content: flex-end; gap: 8px; padding-top: 0; min-height: 0; }
 #appStyles > .app-more::before { display: none; }
+#appStyles > .app-instructions textarea { flex: 1; resize: vertical; }

@@ -856,7 +856,8 @@ function renderAppStyles() {
     h('select', { 'aria-label': `Style in ${a.name}`, onchange: e => { list()[i].style = e.target.value; save(); } }, APP_STYLE_OPTS.map(([v, l]) => h('option', { value: v, selected: v === a.style }, l))),
     h('button', { className: 'btn quiet', type: 'button', 'aria-expanded': String(appMore.has(a.id)), onclick: () => { appMore.has(a.id) ? appMore.delete(a.id) : appMore.add(a.id); renderAppStyles(); } }, 'More'),
     h('button', { className: 'icon-btn', type: 'button', 'aria-label': `Remove ${a.name}`, onclick: () => { list().splice(i, 1); save(); renderAppStyles(); } }, svg(CROSS))),
-    appMore.has(a.id) && appMoreRow(a, () => list()[i])]).filter(Boolean),
+    appMore.has(a.id) && appMoreRow(a, () => list()[i]),
+    appMore.has(a.id) && appInstructionsRow(a, () => list()[i])]).filter(Boolean),
   h('div', { className: 'row' },
     h('span', { className: 'row-text' }, h('span', { className: 'row-desc' }, add ? `Your last dictation went to ${add.name}, which uses ${label(add.style)}.` : 'Pick an app to set its style.')),
     add && h('button', { className: 'btn', type: 'button', onclick: () => { list().push({ id: add.id, name: add.name, style: add.style }); save(); renderAppStyles(); } }, `Add ${add.name}`),
@@ -868,7 +869,15 @@ function renderAppStyles() {
 }
 // "More" on an app's row: cleanup on or off and the languages spoken there, over the user's (settings::apply_app).
 const appMore = new Set();
-const appExtras = a => [a.cleanup === false && 'No cleanup', a.cleanup === true && 'Cleanup on', a.languages?.length && a.languages.map(c => c === 'auto' ? 'Any language' : langName(c)).join(', ')].filter(Boolean).join(', ');
+const appExtras = a => [a.cleanup === false && 'No cleanup', a.cleanup === true && 'Cleanup on', a.languages?.length && a.languages.map(c => c === 'auto' ? 'Any language' : langName(c)).join(', '), a.instructions?.trim() && 'Own instructions'].filter(Boolean).join(', ');
+// The app's own instructions, added to the cleanup and Command Mode prompts there (cleanup.rs app_block).
+// Saved as typed; no re-render, which would take the caret away.
+function appInstructionsRow(a, row) {
+  return h('div', { className: 'row app-more app-instructions' },
+    h('textarea', { rows: 2, maxLength: 300, value: a.instructions ?? '', 'aria-label': `Instructions for ${a.name}`, spellcheck: false,
+      placeholder: `Instructions for ${a.name}, in your words. For example: no full stop at the end, or sign off with “Best” and my name.`,
+      oninput: e => { row().instructions = e.target.value; saveSoon(); } }));
+}
 function appMoreRow(a, row) {
   const langs = (a.languages ?? []).join(','), cleanup = a.cleanup == null ? '' : a.cleanup ? 'on' : 'off';
   const changed = () => { save(); renderAppStyles(); };
@@ -1276,19 +1285,32 @@ function fmtAgo(ts) {
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
+// The search box: every word, in the text or what was heard, any case or accent (settings.rs search_history).
+let historySeq = 0, historyTimer;
+$('#historySearch').addEventListener('input', () => { clearTimeout(historyTimer); historyTimer = setTimeout(renderHistory, 150); });
 async function renderHistory() {
-  const list = $('#historyList');
+  const list = $('#historyList'), q = $('#historySearch').value.trim(), seq = ++historySeq;
   if (!list.children.length) list.replaceChildren(h('p', { className: 'empty' }, 'Loading history…'));
-  let items;
-  try { items = await invoke('get_history', { limit: 200 }); }
+  let found;
+  try { found = await invoke('history_search', { query: q, limit: 200 }); }
   catch (e) {
     list.replaceChildren(h('p', { className: 'empty', role: 'alert' }, `Couldn't read history: ${e}`,
       h('button', { className: 'btn', type: 'button', onclick: renderHistory }, 'Try again')));
     return;
   }
-  $('#clearHistory').disabled = !items.length;
+  if (seq !== historySeq) return; // an older, slower search must not win
+  const { items, total, matched } = found;
+  $('#clearHistory').disabled = !total;
+  $('#historySearchRow').hidden = !total && !q;
+  $('#historyCount').textContent = q ? `${matched.toLocaleString()} of ${total.toLocaleString()}` : '';
   renderRerun();
   const clips = new Set(await invoke('history_clips').catch(() => []));
+  if (q && !items.length) {
+    const clear = () => { $('#historySearch').value = ''; renderHistory(); $('#historySearch').focus(); };
+    list.replaceChildren(h('p', { className: 'empty' }, `Nothing you dictated has every word of “${q}”. Try fewer words or another spelling. `,
+      h('button', { className: 'btn', type: 'button', onclick: clear }, 'Clear search')));
+    return;
+  }
   if (!items.length) {
     list.replaceChildren(S.history_enabled
       ? h('p', { className: 'empty' }, 'Your dictations show up here. ', verb(), ' ', hotkeyText(S.hotkey), ' in any text field to start.')
