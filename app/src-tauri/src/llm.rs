@@ -27,7 +27,7 @@ pub struct Cleaner {
 
 /// The Echotype cleanup models (Qwen2.5 Instruct fine-tunes, Apache-2.0), from the 2026-10-16
 /// distillation: on 12,198 real clips they add 0.31 (Tiny) and 0.51 (Medium) points of WER over raw
-/// whisper, against 5.23 for the first 1.5B they replace. Automatic gives low-memory Macs Tiny.
+/// whisper, against 5.23 for the first 1.5B they replace. Automatic uses Tiny, the first.
 pub const CLEANERS: &[Cleaner] = &[
     Cleaner { id: "echotype-tiny", label: "Echotype Tiny", file: "echotype-tiny-q5_k_m.gguf", size_mb: 401, sha256: "5b6faf7e64f41d34569413409bc0628e4c48d2893ad95ace9b51192b6bee2be9", note: "0.5B. Light and quick; best for English." },
     Cleaner { id: "echotype-medium", label: "Echotype Medium", file: "echotype-medium-q4_k_m.gguf", size_mb: 940, sha256: "944fa5a9221b7a1c0e8b8617392df071ef57323a64dc3e99f5a563e02ace6f37", note: "1.5B. Catches more; uses about twice the memory." },
@@ -76,12 +76,11 @@ fn installed(c: &Cleaner) -> bool {
     model_path(c).is_file()
 }
 
-/// The cleaner Automatic uses on a Mac with this much memory: the 1.5B, or on a low-memory Mac
-/// the smallest one; the closest installed one until that is installed.
-fn auto_cleaner(total_mb: u64, installed: impl Fn(&str) -> bool) -> &'static Cleaner {
-    let by_ram = |c: &&Cleaner| stt::ram_of(c.id);
-    let want = if stt::low_ram(total_mb) { CLEANERS.iter().min_by_key(by_ram) } else { CLEANERS.iter().max_by_key(by_ram) };
-    let want = want.expect("CLEANERS is not empty").id;
+/// The cleaner Automatic uses: Echotype Tiny on every Mac (71 of 100 benchmark dictations exact
+/// against Medium's 74, at half the size and twice the speed); the closest installed one until
+/// Tiny is, so a Mac with only Medium keeps cleaning up.
+fn auto_cleaner(installed: impl Fn(&str) -> bool) -> &'static Cleaner {
+    let want = CLEANERS[0].id;
     let id = stt::closest(CLEANERS.iter().map(|c| c.id), want, installed).unwrap_or(want);
     CLEANERS.iter().find(|c| c.id == id).expect("an id from CLEANERS")
 }
@@ -89,7 +88,7 @@ fn auto_cleaner(total_mb: u64, installed: impl Fn(&str) -> bool) -> &'static Cle
 /// The cleaner these settings use: the manual pick (`cleanup.model`) with advanced settings on, else Automatic's.
 pub fn cleaner(s: &Settings) -> &'static Cleaner {
     let manual = CLEANERS.iter().find(|c| s.advanced && c.id == s.cleanup.model);
-    manual.unwrap_or_else(|| auto_cleaner(stt::ram_mb().0, |id| CLEANERS.iter().any(|c| c.id == id && installed(c))))
+    manual.unwrap_or_else(|| auto_cleaner(|id| CLEANERS.iter().any(|c| c.id == id && installed(c))))
 }
 
 /// "save" (macOS may page the mapped model out under pressure) or "ready" (locked in RAM):
@@ -124,13 +123,16 @@ pub struct CleanerStatus {
     pub size_mb: u64,
     pub ram_mb: u64,
     pub installed: bool,
+    /// What Automatic uses now.
     pub automatic: bool,
+    /// What Automatic wants (Tiny), installed or not.
+    pub recommended: bool,
     pub warning: Option<String>,
 }
 
 /// Every cleaner for the Cleanup page, with the same RAM labels and warnings as the speech models.
 pub fn cleaners(total_mb: u64) -> Vec<CleanerStatus> {
-    let auto = auto_cleaner(total_mb, |id| CLEANERS.iter().any(|c| c.id == id && installed(c)));
+    let auto = auto_cleaner(|id| CLEANERS.iter().any(|c| c.id == id && installed(c)));
     CLEANERS
         .iter()
         .map(|c| CleanerStatus {
@@ -142,6 +144,7 @@ pub fn cleaners(total_mb: u64) -> Vec<CleanerStatus> {
             ram_mb: stt::ram_of(c.id),
             installed: installed(c),
             automatic: c.id == auto.id,
+            recommended: c.id == CLEANERS[0].id,
             warning: stt::ram_warning(stt::ram_of(c.id), stt::ram_of(auto.id), total_mb),
         })
         .collect()
@@ -452,9 +455,12 @@ mod tests {
 
     #[test]
     fn automatic_cleaner_memory_and_context_follow_the_mac() {
-        assert_eq!(auto_cleaner(8192, |_| true).id, "echotype-tiny", "8 GB: the smallest");
-        assert_eq!(auto_cleaner(24_576, |_| true).id, "echotype-medium");
-        assert_eq!(auto_cleaner(24_576, |id| id == "echotype-tiny").id, "echotype-tiny", "the installed one until Medium is");
+        assert_eq!(auto_cleaner(|_| true).id, "echotype-tiny", "Tiny on every Mac");
+        assert_eq!(auto_cleaner(|_| false).id, "echotype-tiny", "and to download when none is");
+        assert_eq!(auto_cleaner(|id| id == "echotype-medium").id, "echotype-medium", "a Medium-only Mac keeps Medium until Tiny is in");
+        let mut s = Settings { advanced: true, ..Default::default() };
+        s.cleanup.model = "echotype-medium".into();
+        assert_eq!(cleaner(&s).id, "echotype-medium", "a hand-picked Medium stays");
         let mut s = Settings { cleaner_memory: "save".into(), cleaner_context: 4096, cleaner_idle_unload: true, cleaner_idle_minutes: 1, ..Default::default() };
         assert_eq!(context(&s), CONTEXT, "advanced off: the one constant");
         assert_eq!(idle(&s), None);

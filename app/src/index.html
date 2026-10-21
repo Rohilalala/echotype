@@ -306,6 +306,10 @@
           <span class="actions"><button class="hotkey" data-shortcut="paste_last_hotkey" type="button" aria-labelledby="pasteLabel"></button><button class="icon-btn" data-clear="paste_last_hotkey" type="button" aria-label="Turn off the paste last shortcut"></button></span></div>
         <div class="row"><span class="row-text"><span class="row-title" id="copyLabel">Copy last</span><span class="row-desc">Puts your last dictation on the clipboard.</span><span class="row-desc error" id="copy_last_hotkeyError" role="alert" hidden></span></span>
           <span class="actions"><button class="hotkey" data-shortcut="copy_last_hotkey" type="button" aria-labelledby="copyLabel"></button><button class="icon-btn" data-clear="copy_last_hotkey" type="button" aria-label="Turn off the copy last shortcut"></button></span></div>
+        <div class="row"><span class="row-text"><span class="row-title" id="commandLabel">Command Mode</span><span class="row-desc">Select text and say what to change: “more formal”, “shorter”, “translate to Spanish”. With nothing selected, say what to write.</span><span class="row-desc warn" id="commandNote" hidden>Needs a general model. The Echotype model only cleans up dictation: pick Ollama, LM Studio or an API key under Cleanup.</span><span class="row-desc error" id="command_hotkeyError" role="alert" hidden></span></span>
+          <span class="actions"><button class="hotkey" data-shortcut="command_hotkey" type="button" aria-labelledby="commandLabel"></button><button class="icon-btn" data-clear="command_hotkey" type="button" aria-label="Turn off the Command Mode shortcut"></button></span></div>
+        <label class="row"><span class="row-text"><span class="row-title">Voice commands</span><span class="row-desc">Say “new line”, “new paragraph”, “bullet point” or “next bullet”, and “scratch that” to drop the sentence before it. Said as a phrase of its own, so a sentence that only contains the words is typed as you said it.</span></span>
+          <input type="checkbox" class="switch" data-bind="voice_commands" /></label>
       </div>
 
       <h2 class="group-title" id="pillTitle">Pill</h2>
@@ -323,6 +327,8 @@
           <button class="btn" id="pillHide" type="button"></button></div>
         <label class="row" id="pillRecRow"><span class="row-text"><span class="row-title">Show pill in screen recordings</span><span class="row-desc">Off keeps it out of screenshots and screen sharing. Some screen-sharing apps may still show it.</span></span>
           <input type="checkbox" class="switch" data-bind="pill_in_recordings" /></label>
+        <label class="row" id="pillLiveRow"><span class="row-text"><span class="row-title">Show words as you speak</span><span class="row-desc">The last few words heard so far, while you dictate. With a speech model on this Mac only.</span></span>
+          <input type="checkbox" class="switch" data-bind="live_text" /></label>
         <label class="row" id="pillFadeRow"><span class="row-text"><span class="row-title">Fade when the pointer is away</span><span class="row-desc">The ball dims until your pointer comes near it. Off keeps it at full strength.</span></span>
           <input type="checkbox" class="switch" data-bind="pill_fade" /></label>
         <div class="row" id="pillSizeRow"><span class="row-text"><span class="row-title" id="pillSizeLabel">Pill size</span><span class="row-desc">The orb, notices and the card, with their text.</span></span>
@@ -361,13 +367,32 @@
 
       <h2 class="group-title" id="meetingsTitle">Meetings</h2>
       <div class="group" id="meetingsGroup">
-        <label class="row"><span class="row-text"><span class="row-title">Detect calls</span><span class="row-desc">When Zoom, Teams, Google Meet or another call app starts using the microphone, Echotype offers to take notes. It only checks which app is using the microphone and the browser's window title. It never listens, and nothing is recorded until you click Start.</span></span>
+        <label class="row"><span class="row-text"><span class="row-title">Detect calls</span><span class="row-desc">When Zoom, Teams, Google Meet or another call app starts using the microphone, Echotype offers to take notes. It only checks which app is using the microphone and the browser's window title. It never listens, and records nothing unless you start notes or set an app to Always start.</span></span>
           <input type="checkbox" class="switch" data-bind="detect_meetings" /></label>
-        <div class="row"><span class="row-text"><span class="row-title" id="meetingEndLabel">When the call ends</span><span class="row-desc">For notes started during a detected call. A call has ended 20 seconds after its app stops using the microphone and speakers.</span></span>
-          <span class="seg" role="radiogroup" aria-labelledby="meetingEndLabel">
-            <label><input type="radio" name="meeting_end" value="ask" data-bind="meeting_end" /><span>Ask</span></label>
-            <label><input type="radio" name="meeting_end" value="auto" data-bind="meeting_end" /><span>Stop notes</span></label>
-          </span></div>
+        <label class="row" id="autoStopRow"><span class="row-text"><span class="row-title">Stop notes when the call ends</span><span class="row-desc">For notes started by a call or its offer, 45 seconds after the call app stops using the microphone and speakers. Off, Echotype asks. Notes you start yourself are never stopped.</span></span>
+          <input type="checkbox" class="switch" data-bind="meeting_auto_stop" /></label>
+        <label class="row"><span class="row-text"><span class="row-title">Keep meeting audio</span><span class="row-desc">Older recordings are deleted to save space. Transcripts and notes stay.</span></span>
+          <select data-bind="meeting_audio_days" data-num><option value="7">7 days</option><option value="30">30 days</option><option value="0">Forever</option></select></label>
+      </div>
+
+      <h2 class="group-title" id="callAppsTitle">When a call starts</h2>
+      <div class="group" id="callAppsGroup">
+        <label class="row"><span class="row-text"><span class="row-title">Google Meet</span><span class="row-desc">In a browser, while the Meet tab is in front.</span></span>
+          <select data-bind="call_start.meet"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">Microsoft Teams</span><span class="row-desc">The app, or Teams in a browser.</span></span>
+          <select data-bind="call_start.teams"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">Zoom</span><span class="row-desc">The app, or Zoom in a browser.</span></span>
+          <select data-bind="call_start.zoom"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">Slack huddles</span></span>
+          <select data-bind="call_start.slack"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">FaceTime</span></span>
+          <select data-bind="call_start.facetime"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">Webex</span></span>
+          <select data-bind="call_start.webex"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">Discord</span></span>
+          <select data-bind="call_start.discord"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">Other calls</span><span class="row-desc">WhatsApp, Skype, Signal, Telegram and the like, and any other browser tab using the microphone.</span></span>
+          <select data-bind="call_start.other"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
       </div>
 
       <h2 class="group-title">Appearance</h2>
@@ -396,6 +421,8 @@
           <input type="checkbox" class="switch" data-bind="history_enabled" /></label>
         <label class="row"><span class="row-text"><span class="row-title">Restore clipboard</span><span class="row-desc">Put back what you had copied after Echotype pastes.</span></span>
           <input type="checkbox" class="switch" data-bind="restore_clipboard" /></label>
+        <label class="row"><span class="row-text"><span class="row-title">Share anonymous usage stats and crash reports</span><span class="row-desc">Off unless you turn it on. Once a day Echotype sends a random install ID that is not linked to you or your account, the app version, the system and chip type, and that day's counts: dictations, words, failures by kind, median speech and cleanup times, which speech and cleanup models are in use, and meetings started and finished. A crash adds the fixed wording of the error and where in Echotype's code it happened. Never audio, text, your dictionary, app names, file paths, names or emails.</span></span>
+          <input type="checkbox" class="switch" data-bind="share_telemetry" /></label>
         <label class="row"><span class="row-text"><span class="row-title">Local API on 127.0.0.1</span><span class="row-desc">Scripts and agents on this computer can send audio to Echotype and get text back through the same pipeline. OpenAI-compatible.</span></span>
           <input type="checkbox" class="switch" data-bind="local_api.enabled" /></label>
         <div id="apiBody">

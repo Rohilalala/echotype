@@ -10,6 +10,8 @@ let summarizing = null, summaryError = ''; // the meeting whose Pro summary is b
 let windowMode = false; // the meeting window: this meeting only, no list
 const answers = {}; // Pro Ask: meeting id → [{ q, a }], for this session
 let asking = false, askError = '';
+let query = '', results = null, searchSeq = 0, searchBox = null, searchTimer; // results: meeting_search hits for query
+let hitAt = null; // start of the transcript line a search snippet opened, highlighted
 
 const clock = s => {
   s = Math.max(0, Math.floor(s));
@@ -37,6 +39,7 @@ export function init(helpers) {
 
 export async function show() {
   await refresh();
+  if (query.trim()) await search(); // a delete or rename since the last search
   if (open) await load(open.id).catch(() => { open = null; });
   render();
 }
@@ -60,8 +63,10 @@ function render() {
   const root = $('#meetings'), main = $('#main');
   // Live: keep following the conversation unless the reader has scrolled up.
   const follow = open && live()?.id === open.id && main.scrollHeight - main.scrollTop - main.clientHeight < 120;
+  const typing = searchBox && document.activeElement === searchBox; // a live update re-renders mid-query
   root.replaceChildren(...(open ? viewMeeting(open) : viewList()).filter(k => k != null && k !== false && k !== ''));
   if (follow) main.scrollTop = main.scrollHeight;
+  if (typing && !open) searchBox.focus();
 }
 
 function tick() {
@@ -98,6 +103,37 @@ function startCard() {
       h('button', { className: 'btn', type: 'button', onclick: () => invoke('open_permission_settings', { kind: 'screen_recording' }) }, 'Allow')));
 }
 
+// ---------- search ----------
+function searchInput() {
+  searchBox ??= h('input', { type: 'search', className: 'meeting-search', placeholder: 'Search meetings', 'aria-label': 'Search meetings', spellcheck: false, oninput: () => {
+    query = searchBox.value;
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(async () => { await search(); render(); }, 150);
+  } });
+  return searchBox;
+}
+
+async function search() {
+  const seq = ++searchSeq, q = query.trim();
+  const found = q ? await invoke('meeting_search', { query: q }).catch(() => []) : null;
+  if (seq === searchSeq) results = found; // an older, slower query must not win
+}
+
+// The query's words marked in a snippet (as text, never HTML).
+function marked(text) {
+  const words = query.trim().split(/\s+/).filter(Boolean).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  return text.split(new RegExp(`(${words.join('|')})`, 'gi')).map((part, i) => i % 2 ? h('mark', {}, part) : part);
+}
+
+function viewResults() {
+  if (!results.length) return h('p', { className: 'empty' }, 'No meetings match.');
+  return results.map(r => h('div', { className: 'result' },
+    h('button', { className: 'row entry meeting-row', type: 'button', onclick: () => openMeeting(r.id) },
+      h('span', { className: 'text' }, r.title), h('span', { className: 'when' }, when(r.started_ms))),
+    r.snippets.map(s => h('button', { className: 'snippet', type: 'button', onclick: () => openMeeting(r.id, s.start) },
+      h('time', {}, clock(s.start)), h('span', {}, marked(s.text))))));
+}
+
 function viewList() {
   const rows = meetings.map(m => h('button', { className: 'row entry meeting-row', type: 'button', onclick: () => openMeeting(m.id) },
     h('span', { className: 'text' }, m.title),
@@ -110,7 +146,8 @@ function viewList() {
       : 'Notes for calls and meetings. Your microphone is You; everyone else comes from the computer’s audio, labelled Others.'),
     startCard(),
     h('h2', { className: 'group-title' }, 'Past meetings'),
-    h('div', { className: 'list' }, rows.length ? rows : h('p', { className: 'empty' }, 'Your meetings show up here.')),
+    meetings.length > 0 && searchInput(),
+    h('div', { className: 'list' }, query.trim() && results ? viewResults() : rows.length ? rows : h('p', { className: 'empty' }, 'Your meetings show up here.')),
   ];
 }
 
@@ -130,11 +167,14 @@ async function stop() {
   render();
 }
 
-async function openMeeting(id) {
-  editing = null; confirmDelete = false; startError = '';
+// `at`: the start of a line to scroll to and highlight (a search snippet).
+async function openMeeting(id, at = null) {
+  editing = null; confirmDelete = false; startError = ''; hitAt = at;
   try { await load(id); } catch (e) { startError = String(e); open = null; await refresh(); }
   render();
-  $('#main').scrollTop = live()?.id === id ? $('#main').scrollHeight : 0;
+  const hit = at != null && $('#meetings .said.hit');
+  if (hit) hit.scrollIntoView({ block: 'center' });
+  else $('#main').scrollTop = live()?.id === id ? $('#main').scrollHeight : 0;
 }
 
 // The meeting window shows meeting `id` (meeting.rs show_window).
@@ -242,8 +282,8 @@ const FORMATS = [['md', 'Markdown (.md)'], ['txt', 'Text (.txt)'], ['json', 'JSO
 function turns(segments) {
   const out = [];
   for (const s of segments) {
-    if (out.at(-1)?.speaker === s.speaker) out.at(-1).lines.push(s.text);
-    else out.push({ speaker: s.speaker, start: s.start, lines: [s.text] });
+    if (out.at(-1)?.speaker === s.speaker) out.at(-1).lines.push(s);
+    else out.push({ speaker: s.speaker, start: s.start, lines: [s] });
   }
   return out;
 }
@@ -262,7 +302,7 @@ function viewMeeting(m) {
     ? [h('span', { className: 'rec-line' }, h('i', { className: 'rec-dot' }), 'Recording · ', h('span', { 'data-elapsed': '' }, clock(elapsed())))]
     : [`${when(m.started_ms)} · ${clock(m.duration_s)}`, STATE[m.state] && h('span', { className: 'tag' }, STATE[m.state])];
   return [
-    !windowMode && h('button', { className: 'btn quiet back', type: 'button', onclick: () => { open = null; startError = ''; show(); } }, '‹ Meetings'),
+    !windowMode && h('button', { className: 'btn quiet back', type: 'button', onclick: () => { open = null; hitAt = null; startError = ''; show(); } }, '‹ Meetings'),
     h('div', { className: 'page-head' }, h('h1', { className: 'text' }, m.title),
       isLive ? h('button', { className: 'btn primary', type: 'button', onclick: stop }, 'Stop')
         : confirmDelete ? h('span', { className: 'confirm' }, 'Delete this meeting and its audio?',
@@ -288,7 +328,7 @@ function viewMeeting(m) {
     h('div', { className: 'transcript text', 'aria-live': isLive ? 'polite' : null },
       m.segments.length ? turns(m.segments).map(t => h('div', { className: 'turn' },
         h('span', { className: 'who' }, dot(t.speaker), name(m, t.speaker), h('time', {}, clock(t.start))),
-        t.lines.map(text => h('p', { className: 'said' }, text))))
+        t.lines.map(l => h('p', { className: l.start === hitAt ? 'said hit' : 'said' }, l.text))))
         : h('p', { className: 'empty' }, isLive ? 'Listening. Lines show up a few seconds after each pause.' : 'Nothing was said.')),
   ];
 }

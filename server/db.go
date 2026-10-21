@@ -54,6 +54,27 @@ CREATE TABLE IF NOT EXISTS stripe_events (
 	id TEXT PRIMARY KEY,
 	at INTEGER NOT NULL
 );
+
+-- Opt-in anonymous app telemetry (POST /v1/telemetry): a random install id, never an account.
+CREATE TABLE IF NOT EXISTS telemetry_days (
+	install_id  TEXT NOT NULL,
+	date        TEXT NOT NULL,
+	version     TEXT NOT NULL,
+	os          TEXT NOT NULL,
+	arch        TEXT NOT NULL,
+	data        TEXT NOT NULL,
+	received_at INTEGER NOT NULL,
+	PRIMARY KEY (install_id, date)
+);
+CREATE TABLE IF NOT EXISTS telemetry_crashes (
+	install_id  TEXT NOT NULL,
+	version     TEXT NOT NULL,
+	os          TEXT NOT NULL,
+	arch        TEXT NOT NULL,
+	message     TEXT NOT NULL,
+	backtrace   TEXT NOT NULL,
+	received_at INTEGER NOT NULL
+);
 `
 
 // openDB opens (and migrates) the SQLite database. path ":memory:" is used by tests.

@@ -98,7 +98,7 @@ function bindAll() {
     const text = el.tagName === 'TEXTAREA' || ['text', 'url', 'password', 'number'].includes(el.type);
     el.addEventListener(text ? 'input' : 'change', () => {
       if (el.type === 'number' && !el.checkValidity()) return;
-      let v = el.type === 'checkbox' ? el.checked : ['number', 'range'].includes(el.type) ? Number(el.value) : el.value;
+      let v = el.type === 'checkbox' ? el.checked : ['number', 'range'].includes(el.type) || 'num' in el.dataset ? Number(el.value) : el.value;
       if ('null' in el.dataset && v === '') v = null;
       set(p, v);
       text ? saveSoon() : save();
@@ -128,6 +128,7 @@ function changed(p) {
   if (p === 'pill_idle' || p === 'show_in') renderPill();
   if (p === 'pill_size' || p === 'ball_size') sizePreview();
   if (p === 'sounds') $('#soundPackRow').hidden = !S.sounds;
+  if (p === 'detect_meetings') renderStartup();
   if (p === 'greetings' || p === 'display_name') renderGreeting();
   if (p === 'sound_pack') invoke('preview_sounds', { pack: S.sound_pack }).catch(() => {}); // hear it as you pick it
   if (p === 'advanced' || p === 'cleaner_memory') { renderAdvanced(); renderStt(); fillRemote('cleanup'); renderLangNote(); renderHero(); }
@@ -194,6 +195,7 @@ function renderHotkey() {
     btn.replaceChildren(...(v ? keycaps(v) : [h('span', { className: 'none' }, 'None')]));
   }
   for (const b of $$('[data-clear]')) { b.hidden = !S[b.dataset.clear]; b.replaceChildren(svg(CROSS)); }
+  $('#commandNote').hidden = !S.command_hotkey || S.cleanup.provider !== 'echotype'; // cleanup.rs command_blocked
   $('#modeDesc').textContent = S.mode === 'toggle'
     ? 'Press once to start, again to stop. Esc cancels.'
     : 'Hold while you speak, let go to paste. Tap twice to go hands-free.';
@@ -490,7 +492,7 @@ function fillRemote(kind) {
   url.placeholder = custom ? 'http://localhost:8000/v1' : '';
   $(`#${kind}UrlDesc`).textContent = custom
     ? `Any OpenAI-compatible ${kind === 'stt' ? '/audio/transcriptions' : '/chat/completions'} endpoint.`
-    : cfg.provider === 'echotype' ? `Built in: runs on this Mac, nothing to start. ${sys?.echotype_model_installed ? `Installed, ${fmtMB(sys.echotype_model_mb)}.` : `Not installed (${fmtMB(sys?.echotype_model_mb ?? 940)}).`}`
+    : cfg.provider === 'echotype' ? `Built in: runs on this Mac, nothing to start. ${sys?.echotype_model_installed ? `Installed, ${fmtMB(sys.echotype_model_mb)}.` : `Not installed (${fmtMB(sys?.echotype_model_mb ?? 401)}).`}`
     : `Set by the ${p?.label ?? ''} preset.`;
   if (kind === 'cleanup') renderCleaner();
   const model = $(`#${kind}Model`);
@@ -652,7 +654,7 @@ function cleanerRow(c) {
   return h('div', { className: 'row model' },
     h('span', { className: 'tile', 'aria-hidden': 'true' }, svg(WAVE)),
     h('span', { className: 'row-text' },
-      h('span', { className: 'model-name' }, c.label, c.automatic && h('span', { className: 'tag rec' }, 'Recommended')),
+      h('span', { className: 'model-name' }, c.label, c.recommended && h('span', { className: 'tag rec' }, 'Recommended')),
       h('span', { className: 'row-desc' }, c.note),
       h('span', { className: 'model-meta' }, h('span', {}, fmtMB(c.size_mb)), h('span', {}, `about ${fmtMB(c.ram_mb)} RAM`)),
       c.warning && h('span', { className: 'row-desc warn' }, c.warning),
@@ -751,7 +753,7 @@ function renderCleaner() {
   pick.replaceChildren(...(S.advanced ? list.map(c => h('option', { value: c.id }, label(c))) : [h('option', { value: '' }, 'Automatic (recommended)')]));
   const cur = S.advanced ? list.find(c => c.id === S.cleanup.model) ?? auto : auto;
   pick.value = S.advanced ? cur?.id ?? '' : '';
-  $('#cleanerDesc').textContent = S.advanced ? cur?.warning ?? '' : auto ? `Uses ${auto.label}, picked for this Mac.` : '';
+  $('#cleanerDesc').textContent = S.advanced ? cur?.warning ?? '' : auto ? `Uses ${auto.label}.` : '';
   $('#cleanerDesc').classList.toggle('warn', S.advanced && !!cur?.warning);
 }
 $('#cleanerPick').addEventListener('change', e => { S.cleanup.model = e.target.value; save(); renderCleaner(); });
@@ -1067,9 +1069,14 @@ async function renderHistory() {
     copy.onclick = e => { e.preventDefault(); copyText(it.text, copy); };
     const text = h('span', { className: 'text' }, it.text);
     const fix = h('button', { className: 'btn', type: 'button', onclick: () => startFix(it, text, fix) }, 'Fix');
-    return h('details', {},
+    const restore = h('button', { className: 'btn quiet', type: 'button', onclick: async () => {
+      try { await invoke('update_history', { ts: it.ts, text: it.original }); renderHistory(); }
+      catch { restore.textContent = "Couldn't restore"; }
+    } }, 'Restore');
+    return h('details', { ontoggle: e => e.target.open && addRerun(it, fix) },
       h('summary', {}, text, it.no_cleanup && h('span', { className: 'tag' }, 'No cleanup'), h('time', { className: 'when', title: fmtTime(it.ts).replace('\n', ' ') }, fmtAgo(it.ts)), copy),
       h('div', { className: 'detail' }, fix,
+        it.original && it.original !== it.text && h('p', { className: 'raw text' }, h('b', {}, 'Before re-run: '), it.original, ' ', restore),
         it.raw !== it.text && h('p', { className: 'raw text' }, h('b', {}, 'Heard: '), it.raw),
         it.cleaned && h('p', { className: 'raw text' }, h('b', {}, 'Cleanup had (not pasted): '), it.cleaned, ' ', cleanedCopy(it.cleaned)),
         h('span', { className: 'timing' },
@@ -1162,8 +1169,24 @@ function cleanedCopy(text) {
 }
 
 // Re-run last dictation: the clip Echotype still holds in memory, with one thing changed. The result
-// is copied and shown on the pill, and lands here as a new entry.
+// is copied and shown on the pill, and replaces the entry's text here (Restore goes back).
 let rerunPending = false;
+// An entry's own Re-run, offered when it opens and its audio is still kept (the newest 20).
+async function addRerun(it, fix) {
+  if (fix.dataset.rerun) return;
+  fix.dataset.rerun = '1';
+  const opts = await invoke('rerun_options', { ts: it.ts }).catch(() => []);
+  if (!opts.length) return;
+  const sel = h('select', { className: 'rerun', 'aria-label': 'Re-run this dictation' }, h('option', { value: '' }, 'Re-run…'), ...opts.map(o => h('option', { value: o.id }, o.label)));
+  sel.onchange = () => {
+    const id = sel.value;
+    sel.value = '';
+    if (!id) return;
+    rerunPending = true;
+    invoke('rerun', { id, ts: it.ts }).catch(err => { rerunPending = false; dictation = { state: 'error', error: String(err) }; renderHero(); });
+  };
+  fix.after(sel);
+}
 async function renderRerun() {
   const sel = $('#rerunLast');
   const opts = await invoke('rerun_options').catch(() => []);
@@ -1238,6 +1261,7 @@ function renderStartup() {
   $('#talkRow').hidden = $('#obTalkRow').hidden = !isMac; // talk keys are macOS-only; sounds play everywhere
   $('#pillTitle').hidden = $('#pillGroup').hidden = !isMac; // so is the idle pill
   $('#meetingsTitle').hidden = $('#meetingsGroup').hidden = !isMac; // and call detection (calls.rs)
+  $('#callAppsTitle').hidden = $('#callAppsGroup').hidden = $('#autoStopRow').hidden = !isMac || !S.detect_meetings;
   $('#preferBuiltinRow').hidden = $('#pauseMusicRow').hidden = !isMac; // and both (audio.rs pick_input, music.rs)
 }
 
@@ -1248,7 +1272,7 @@ function renderPill() {
   const bar = S.show_in === 'menubar';
   $('#showInDesc').textContent = bar ? 'No pill on screen. The menu bar icon shows when Echotype listens; click it to dictate, right-click for options.'
     : 'Drag the pill anywhere on any display; double-click it to put it back.';
-  $('#pillFollowRow').hidden = $('#pillIdleRow').hidden = $('#pillHideRow').hidden = $('#pillRecRow').hidden = bar;
+  $('#pillFollowRow').hidden = $('#pillIdleRow').hidden = $('#pillHideRow').hidden = $('#pillRecRow').hidden = $('#pillLiveRow').hidden = bar;
   $('#pillSizeRow').hidden = $('#ballSizeRow').hidden = $('#pillPreviewRow').hidden = $('#pillFadeRow').hidden = bar;
   for (const id of ['orbListenRow', 'orbThinkRow', 'orbDetailRow', 'orbColorRow']) $('#' + id).hidden = bar;
   $('#soundPackRow').hidden = !S.sounds;

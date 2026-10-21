@@ -1,12 +1,13 @@
 //! Call detection (macOS 14.2+): when a call app has held the microphone for a few seconds,
-//! Echotype offers meeting notes, and when that call ends it offers to stop them (or stops them,
-//! if the user chose that). It looks only at which apps have the microphone or speakers open
-//! (CoreAudio's process list, once a second) and, for a browser, at its window titles. It never
-//! reads audio and never starts notes by itself: Start on the card or in the menu does.
+//! Echotype offers meeting notes (or starts them, or does nothing: the user's choice per app), and
+//! when that call ends it stops the notes it started, or offers to. It looks only at which apps have
+//! the microphone or speakers open (CoreAudio's process list, once a second) and, for a browser, at
+//! its window titles. It never reads audio, and starts notes by itself only for an app set to Always start.
 // ponytail: macOS only. Windows: the CapabilityAccessManager ConsentStore keys
 // (HKCU\...\ConsentStore\microphone\<app>\LastUsedTimeStop == 0 while in use); Linux: PipeWire/Pulse
 // source-outputs with their application.process.binary. Add when meetings ship there.
 
+use crate::settings::CallStart;
 use crate::{DictationState, lock, state};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -20,6 +21,8 @@ const SETTLE: Duration = Duration::from_secs(6);
 /// A call has ended once its app has used neither the microphone nor the speakers for this long,
 /// so muting yourself or a quiet stretch is not an end.
 const END_AFTER: Duration = Duration::from_secs(20);
+/// A call with its notes running gets longer, so a dropped call rejoined in time keeps its notes.
+const NOTES_END_AFTER: Duration = Duration::from_secs(45);
 
 /// Call apps by bundle id; a helper's id starts with its app's (com.tinyspeck.slackmacgap.helper).
 /// The name is the meeting's title. An id that is wrong only means that app is never offered.
@@ -169,7 +172,7 @@ impl Detector {
             if !s.call {
                 return s.last == now; // a gap on the way to SETTLE starts the wait over
             }
-            if now.duration_since(s.last) < END_AFTER {
+            if now.duration_since(s.last) < if s.ours { NOTES_END_AFTER } else { END_AFTER } {
                 return true;
             }
             out.push(Event::Ended { app: app.clone(), ours: s.ours });
@@ -188,6 +191,51 @@ impl Detector {
     }
 }
 
+// ---------- what a call does ----------
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Action {
+    Start,
+    Stop,
+    /// The card: Start notes (a call began) or Stop notes (it ended).
+    Ask,
+    Ignore,
+}
+
+/// The user's choice for a call, by its name (APPS, SITES): "ask" | "start" | "never". A browser
+/// call on no known site ("Chrome call") and the apps not listed in Settings are Other calls.
+pub fn choice<'a>(c: &'a CallStart, call: &str) -> &'a str {
+    match call {
+        "Google Meet call" => &c.meet,
+        "Teams call" => &c.teams,
+        "Zoom call" => &c.zoom,
+        "Slack huddle" => &c.slack,
+        "FaceTime call" => &c.facetime,
+        "Webex meeting" => &c.webex,
+        "Discord call" => &c.discord,
+        _ => &c.other,
+    }
+}
+
+/// A call has settled and no notes are running.
+pub fn on_call(c: &CallStart, call: &str) -> Action {
+    match choice(c, call) {
+        "start" => Action::Start,
+        "never" => Action::Ignore,
+        _ => Action::Ask,
+    }
+}
+
+/// A call has ended while notes run. `ours`: they started during it. `for_call`: they started
+/// because of it (by themselves or from its offer), not by hand; only those are ever stopped.
+pub fn on_end(ours: bool, for_call: bool, auto_stop: bool) -> Action {
+    match (ours, for_call && auto_stop) {
+        (false, _) => Action::Ignore,
+        (true, true) => Action::Stop,
+        (true, false) => Action::Ask,
+    }
+}
+
 // ---------- the offer ----------
 
 #[derive(Debug, Clone, PartialEq)]
@@ -199,6 +247,26 @@ enum Offer {
 
 /// What Start on the card (or the menu's meeting item) does now.
 static OFFER: Mutex<Option<Offer>> = Mutex::new(None);
+
+/// The call (its Detector key) the running notes were started for, and their meeting id, so notes
+/// started by hand later in that call are never taken for its own.
+static FOR_CALL: Mutex<Option<(String, String)>> = Mutex::new(None);
+
+/// Starts notes as this call's: its end may stop them.
+fn start_for(app: &AppHandle, key: String, title: String) -> Result<(), String> {
+    let m = crate::meeting::start(app, Some(title))?;
+    *lock(&FOR_CALL) = Some((key, m.id));
+    Ok(())
+}
+
+/// The menu's Start: the notes of the call on offer ("Start notes · Zoom call"), else plain notes.
+pub fn start_offered(app: &AppHandle) -> Result<(), String> {
+    let offer = lock(&OFFER).clone();
+    match offer {
+        Some(Offer::Start { app: key, title }) => start_for(app, key, title),
+        _ => crate::meeting::start(app, None).map(|_| ()),
+    }
+}
 
 /// The title the meeting item starts notes with while a call is on offer.
 pub fn offered_title() -> Option<String> {
@@ -237,6 +305,19 @@ fn show(app: &AppHandle, line: &str, question: &str, button: &'static str) {
     }
 }
 
+/// Says what Echotype did by itself: on the pill (as a card with `undo` on its button, set as the
+/// offer), or as a notification in menu-bar mode.
+fn tell(app: &AppHandle, line: &str, what: &str, undo: Option<&'static str>) {
+    crate::emit_state(app, match undo {
+        Some(button) => card(line, what, button),
+        None => crate::hint(format!("{line}. {what}"), None),
+    });
+    if crate::pill::in_menu_bar(&crate::current_settings(app)) {
+        #[cfg(target_os = "macos")]
+        mac::notify(app, line, what);
+    }
+}
+
 /// Start (or Stop) on the card. Without an offer (it was taken from the menu) it only closes.
 #[tauri::command]
 pub async fn pill_offer(app: AppHandle) -> Result<(), String> {
@@ -245,7 +326,7 @@ pub async fn pill_offer(app: AppHandle) -> Result<(), String> {
         let taken = lock(&OFFER).clone();
         set_offer(&app, None);
         let res = match taken {
-            Some(Offer::Start { title, .. }) => crate::meeting::start(&app, Some(title)).map(|_| ()),
+            Some(Offer::Start { app: key, title }) => start_for(&app, key, title),
             Some(Offer::Stop { .. }) if crate::meeting::recording() => crate::meeting::stop(&app),
             _ => Ok(()),
         };
@@ -297,25 +378,43 @@ pub fn run(app: AppHandle) {
                                 None => (format!("{b} call"), format!("{b} is using the microphone")),
                             },
                         };
-                        set_offer(&app, Some(Offer::Start { app: key, title }));
-                        show(&app, &line, "Take notes of this call? Nothing is recorded until you start.", "Start notes");
-                    }
-                    Event::Ended { app: key, ours } if ours && crate::meeting::recording() => {
-                        let line = format!("{key} ended");
-                        if s.meeting_end == "auto" {
-                            set_offer(&app, None);
-                            if let Err(e) = crate::meeting::stop(&app) {
-                                eprintln!("echotype: {e}");
+                        match on_call(&s.call_start, &title) {
+                            Action::Start if crate::meeting::recording() => {} // another call's, started this same second
+                            // A card, not a hint: the pill's one line cuts a hint this long, and Stop notes undoes it.
+                            Action::Start => match start_for(&app, key.clone(), title) {
+                                Ok(()) => {
+                                    set_offer(&app, Some(Offer::Stop { app: key }));
+                                    tell(&app, &line, "Meeting notes on. Let everyone know they're being transcribed.", Some("Stop notes"));
+                                }
+                                Err(e) => crate::emit_state(&app, DictationState { state: "error", error: Some(e), ..Default::default() }),
+                            },
+                            Action::Ask => {
+                                set_offer(&app, Some(Offer::Start { app: key, title }));
+                                show(&app, &line, "Take notes of this call? Nothing is recorded until you start.", "Start notes");
                             }
-                            crate::emit_state(&app, crate::hint(format!("{line}. Meeting notes stopped."), None));
-                        } else {
-                            set_offer(&app, Some(Offer::Stop { app: key }));
-                            show(&app, &line, "Stop the meeting notes? They keep going until you do.", "Stop notes");
+                            _ => {}
                         }
                     }
-                    Event::Ended { app: key, .. } => {
-                        if lock(&OFFER).as_ref().is_some_and(|o| matches!(o, Offer::Start { app, .. } | Offer::Stop { app } if *app == key)) {
-                            set_offer(&app, None);
+                    Event::Ended { app: key, ours } => {
+                        let line = format!("{key} ended");
+                        let for_call = lock(&FOR_CALL).as_ref().is_some_and(|(k, id)| *k == key && crate::meeting::recording_id().as_ref() == Some(id));
+                        match if crate::meeting::recording() { on_end(ours, for_call, s.meeting_auto_stop) } else { Action::Ignore } {
+                            Action::Stop => {
+                                set_offer(&app, None);
+                                if let Err(e) = crate::meeting::stop(&app) {
+                                    eprintln!("echotype: {e}");
+                                }
+                                tell(&app, &line, "Meeting notes stopped.", None);
+                            }
+                            Action::Ask => {
+                                set_offer(&app, Some(Offer::Stop { app: key }));
+                                show(&app, &line, "Stop the meeting notes? They keep going until you do.", "Stop notes");
+                            }
+                            _ => {
+                                if lock(&OFFER).as_ref().is_some_and(|o| matches!(o, Offer::Start { app, .. } | Offer::Stop { app } if *app == key)) {
+                                    set_offer(&app, None);
+                                }
+                            }
                         }
                     }
                 }
@@ -635,7 +734,53 @@ mod tests {
         assert_eq!(run(&mut d, t0, 110, 112, &[("Teams call", true)], false, false), vec![(110, Event::Offer("Teams call".into()))]);
         // Notes started from the offer are this call's: its end may stop them.
         assert_eq!(run(&mut d, t0, 112, 200, &[("Teams call", true)], true, false), vec![]);
-        assert_eq!(run(&mut d, t0, 200, 221, &[], true, false), vec![(219, Event::Ended { app: "Teams call".into(), ours: true })]);
+        assert_eq!(run(&mut d, t0, 200, 246, &[], true, false), vec![(244, Event::Ended { app: "Teams call".into(), ours: true })]);
+    }
+
+    #[test]
+    fn a_dropped_call_rejoined_in_time_keeps_its_notes() {
+        let (mut d, t0) = (Detector::default(), Instant::now());
+        run(&mut d, t0, 0, 7, &[("Zoom call", true)], false, false); // offered at 6, started
+        assert_eq!(run(&mut d, t0, 7, 60, &[("Zoom call", true)], true, false), vec![]);
+        // Off the microphone for 40 s, longer than a call without notes lasts, then back.
+        assert_eq!(run(&mut d, t0, 60, 100, &[], true, false), vec![]);
+        assert_eq!(run(&mut d, t0, 100, 160, &[("Zoom call", true)], true, false), vec![], "the same call, no new offer");
+        assert_eq!(run(&mut d, t0, 160, 206, &[], true, false), vec![(204, Event::Ended { app: "Zoom call".into(), ours: true })]);
+    }
+
+    #[test]
+    fn each_app_starts_asks_or_ignores_by_its_choice() {
+        let mut c = CallStart::default();
+        assert_eq!(on_call(&c, "Zoom call"), Action::Ask, "Ask is the default everywhere");
+        c.zoom = "start".into();
+        c.meet = "never".into();
+        c.other = "start".into();
+        assert_eq!(on_call(&c, "Zoom call"), Action::Start);
+        assert_eq!(on_call(&c, "Google Meet call"), Action::Ignore);
+        assert_eq!(on_call(&c, "Teams call"), Action::Ask, "one app's choice is its own");
+        for other in ["WhatsApp call", "Chrome call", "Whereby call", "Skype call"] {
+            assert_eq!(on_call(&c, other), Action::Start, "{other} is an Other call");
+        }
+        // Every call name an app or a site gives maps to the field for its row in Settings.
+        let named = [("Google Meet call", "meet"), ("Teams call", "teams"), ("Zoom call", "zoom"), ("Slack huddle", "slack"), ("FaceTime call", "facetime"), ("Webex meeting", "webex"), ("Discord call", "discord")];
+        let fields = serde_json::to_value(CallStart::default()).unwrap();
+        for (call, field) in named {
+            let mut v = fields.clone();
+            v[field] = "never".into();
+            assert_eq!(on_call(&serde_json::from_value(v).unwrap(), call), Action::Ignore, "{call}");
+            assert!(APPS.iter().chain(SITES).any(|(_, n)| *n == call), "{call} is a name calls.rs gives");
+        }
+        assert_eq!(on_call(&CallStart { zoom: "bogus".into(), ..c }, "Zoom call"), Action::Ask, "an unknown choice asks");
+    }
+
+    #[test]
+    fn only_notes_started_for_the_call_stop_with_it() {
+        assert_eq!(on_end(true, true, true), Action::Stop, "started by the call or its offer, auto-stop on");
+        assert_eq!(on_end(true, true, false), Action::Ask, "auto-stop off asks, as before");
+        assert_eq!(on_end(true, false, true), Action::Ask, "started by hand during the call: asked, never stopped");
+        assert_eq!(on_end(true, false, false), Action::Ask);
+        assert_eq!(on_end(false, false, true), Action::Ignore, "notes from before the call are not its");
+        assert_eq!(on_end(false, true, true), Action::Ignore);
     }
 
     #[test]

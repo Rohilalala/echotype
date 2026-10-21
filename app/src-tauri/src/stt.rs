@@ -6,6 +6,7 @@ use serde::Serialize;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use sha2::Digest;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState};
@@ -56,8 +57,8 @@ pub fn ram_of(id: &str) -> u64 {
     RAM_MB.iter().find(|(m, _)| *m == id).map_or(1900, |(_, mb)| *mb)
 }
 
-/// Macs with this much memory or less get the light setup: whisper small, the smallest
-/// Echotype cleaner and "save" memory. Above it, turbo, the 1.5B cleaner and "ready".
+/// Macs with this much memory or less get the light setup: whisper small and "save" memory.
+/// Above it, turbo and "ready". Every Mac gets Echotype Tiny for cleanup.
 pub const LOW_RAM_MB: u64 = 8192;
 
 pub fn low_ram(total_mb: u64) -> bool {
@@ -294,45 +295,45 @@ fn take_cancel(dest: &Path) -> bool {
     was
 }
 
+/// Tries per download; each one after the first resumes the .part file with an HTTP Range request.
+const ATTEMPTS: u32 = 5;
+const BACKOFF: Duration = if cfg!(test) { Duration::from_millis(10) } else { Duration::from_secs(2) };
+
 pub fn fetch(url: &str, dest: &Path, want: &str, mut progress: impl FnMut(u64, Option<u64>)) -> Result<(), String> {
     std::fs::create_dir_all(dest.parent().ok_or("bad model path")?).map_err(|e| e.to_string())?;
     take_cancel(dest); // a cancel from an earlier attempt does not stop this one
     let part = dest.with_extension("part");
-    let client = reqwest::blocking::Client::builder().timeout(None::<Duration>).connect_timeout(Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
-    let mut resp = client.get(url).send().and_then(|r| r.error_for_status()).map_err(|e| format!("Download failed: {e}"))?;
-    let total = resp.content_length();
-    let result = (|| {
-        let mut f = std::fs::File::create(&part).map_err(|e| e.to_string())?;
-        let mut buf = vec![0u8; 1 << 16];
-        let (mut done, mut last) = (0u64, Instant::now());
+    // reqwest's blocking timeout is per read: it catches a stalled connection without capping a slow download.
+    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).connect_timeout(Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
+    let mut validator = None;
+    let mut attempt = 1;
+    let result = 'retry: loop {
+        match fetch_part(&client, url, dest, &part, &mut validator, &mut progress) {
+            Err((true, _)) if attempt < ATTEMPTS => {
+                // 2, 4, 8, 16 s, still answering a cancel.
+                let until = Instant::now() + BACKOFF * 2u32.pow(attempt - 1);
+                while Instant::now() < until {
+                    if take_cancel(dest) {
+                        break 'retry Err(DOWNLOAD_CANCELLED.to_string());
+                    }
+                    std::thread::sleep(BACKOFF.min(Duration::from_millis(100)));
+                }
+                attempt += 1;
+            }
+            Err((true, e)) => return Err(e), // keeps the .part, so the next try resumes it
+            Err((false, e)) => break Err(e),
+            Ok(()) => break Ok(()),
+        }
+    };
+    let result = result.and_then(|()| {
         let mut hasher = sha2::Sha256::new();
-        loop {
-            let n = resp.read(&mut buf).map_err(|e| format!("Download interrupted: {e}"))?;
-            if n == 0 {
-                break;
-            }
-            if take_cancel(dest) {
-                return Err(DOWNLOAD_CANCELLED.to_string());
-            }
-            f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-            hasher.update(&buf[..n]);
-            done += n as u64;
-            if last.elapsed() >= Duration::from_millis(250) {
-                progress(done, total);
-                last = Instant::now();
-            }
-        }
-        f.sync_all().map_err(|e| e.to_string())?;
-        if total.is_some_and(|t| t != done) {
-            return Err("Download ended early; try again".to_string());
-        }
+        std::io::copy(&mut std::fs::File::open(&part).map_err(|e| e.to_string())?, &mut hasher).map_err(|e| e.to_string())?;
         let got: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
         if got != want {
             return Err("Downloaded model failed its checksum and was discarded; try again".to_string());
         }
-        progress(done, total);
         Ok(())
-    })();
+    });
     match result {
         Ok(()) => std::fs::rename(&part, dest).map_err(|e| e.to_string()),
         Err(e) => {
@@ -340,6 +341,78 @@ pub fn fetch(url: &str, dest: &Path, want: &str, mut progress: impl FnMut(u64, O
             Err(e)
         }
     }
+}
+
+/// One request for the rest of `part`; Err((true, _)) is a network failure worth retrying.
+/// `validator` (the ETag or Last-Modified seen last) makes the server send the whole file, a 200,
+/// if it changed since; a server without ranges answers 200 too, and either way we start over.
+// ponytail: the validator lives for one fetch, so a .part left by an earlier one resumes unchecked
+// and a changed file fails the checksum; store it beside the .part if that ever bites.
+fn fetch_part(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    dest: &Path,
+    part: &Path,
+    validator: &mut Option<String>,
+    progress: &mut impl FnMut(u64, Option<u64>),
+) -> Result<(), (bool, String)> {
+    use reqwest::{header, StatusCode};
+    let have = part.metadata().map_or(0, |m| m.len());
+    let mut req = client.get(url);
+    if have > 0 {
+        req = req.header(header::RANGE, format!("bytes={have}-"));
+        if let Some(v) = validator.as_deref() {
+            req = req.header(header::IF_RANGE, v);
+        }
+    }
+    let mut resp = req.send().map_err(|e| (true, format!("Download failed: {e}")))?;
+    let status = resp.status();
+    if status == StatusCode::RANGE_NOT_SATISFIABLE {
+        let _ = std::fs::remove_file(part); // longer than the file: start over
+        return Err((true, "Download failed: bad partial file".to_string()));
+    }
+    if !status.is_success() {
+        let retry = status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS || status == StatusCode::REQUEST_TIMEOUT;
+        return Err((retry, format!("Download failed: HTTP {status}")));
+    }
+    let get = |h| resp.headers().get(h).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let etag = get(header::ETAG).filter(|e| !e.starts_with("W/")); // If-Range takes only a strong ETag
+    let seen = etag.or_else(|| get(header::LAST_MODIFIED));
+    let resumed = status == StatusCode::PARTIAL_CONTENT && have > 0 && get(header::CONTENT_RANGE).is_some_and(|r| r.starts_with(&format!("bytes {have}-")));
+    // R2 answers 206 whatever If-Range says, so a changed file shows only in a new validator.
+    if resumed && validator.is_some() && seen.is_some() && seen != *validator {
+        let _ = std::fs::remove_file(part);
+        *validator = seen;
+        return Err((true, "Download failed: the file changed".to_string()));
+    }
+    *validator = seen;
+    let mut done = if resumed { have } else { 0 };
+    let total = resp.content_length().map(|n| n + done);
+    let mut f = std::fs::OpenOptions::new().create(true).write(true).append(resumed).truncate(!resumed).open(part).map_err(|e| (false, e.to_string()))?;
+    let mut buf = vec![0u8; 1 << 16];
+    let mut last = Instant::now();
+    progress(done, total);
+    loop {
+        let n = resp.read(&mut buf).map_err(|e| (true, format!("Download interrupted: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        if take_cancel(dest) {
+            return Err((false, DOWNLOAD_CANCELLED.to_string()));
+        }
+        f.write_all(&buf[..n]).map_err(|e| (false, e.to_string()))?;
+        done += n as u64;
+        if last.elapsed() >= Duration::from_millis(250) {
+            progress(done, total);
+            last = Instant::now();
+        }
+    }
+    f.sync_all().map_err(|e| (false, e.to_string()))?;
+    if total.is_some_and(|t| t != done) {
+        return Err((true, "Download ended early; try again".to_string()));
+    }
+    progress(done, total);
+    Ok(())
 }
 
 /// Deletes only files inside Echotype's own models dir.
@@ -551,6 +624,18 @@ pub fn clean_text(s: &str) -> String {
 /// room) comes back empty instead of whisper's "Thank you." or "I'm going to go to the next one."
 /// Segments wholly outside Silero's speech are dropped (heard).
 pub fn transcribe_local(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, vad: Option<&Path>) -> Result<String, String> {
+    transcribe(model, pcm, languages, translate, prompt, vad, None)
+}
+
+/// The words so far while still recording (lib.rs partials): like transcribe_local, but it never
+/// moves LAST_LANG, and whisper gives up as soon as `stop` is set, so the final run on release
+/// gets the model at once instead of waiting for this one.
+pub fn transcribe_partial(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, vad: Option<&Path>, stop: &AtomicBool) -> Result<String, String> {
+    transcribe(model, pcm, languages, translate, prompt, vad, Some(stop))
+}
+
+/// `stop`: None for a dictation (sticky language, never aborted), Some for a partial.
+fn transcribe(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, vad: Option<&Path>, stop: Option<&AtomicBool>) -> Result<String, String> {
     if pcm.is_empty() {
         return Ok(String::new());
     }
@@ -558,7 +643,7 @@ pub fn transcribe_local(model: &Path, pcm: &[f32], languages: &[String], transla
     if spans.as_ref().is_some_and(Vec::is_empty) {
         return Ok(String::new());
     }
-    run_local(model, pcm, languages, translate, prompt, false, true, vad, |state| {
+    run_local(model, pcm, languages, translate, prompt, false, stop.is_none(), vad, stop, |state| {
         let mut text = String::new();
         for i in 0..state.full_n_segments() {
             let Some(seg) = state.get_segment(i) else { continue };
@@ -601,7 +686,7 @@ pub fn transcribe_words(model: &Path, pcm: &[f32], languages: &[String], prompt:
 }
 
 fn words_of(model: &Path, pcm: &[f32], languages: &[String], prompt: &str, vad: Option<&Path>, spans: Option<&[(f32, f32)]>) -> Result<Vec<Word>, String> {
-    run_local(model, pcm, languages, false, prompt, true, false, vad, |state| {
+    run_local(model, pcm, languages, false, prompt, true, false, vad, None, |state| {
         let mut tokens: Vec<(Vec<u8>, f32, f32)> = vec![];
         for i in 0..state.full_n_segments() {
             let Some(seg) = state.get_segment(i) else { continue };
@@ -748,9 +833,16 @@ fn likeliest(probs: &[f32], codes: &[String], last: Option<&str>) -> Option<Stri
     }
 }
 
+/// whisper.cpp's abort callback: `data` is the &AtomicBool run_local was given.
+unsafe extern "C" fn stop_set(data: *mut std::ffi::c_void) -> bool {
+    // SAFETY: run_local passes a pointer to an AtomicBool that outlives the whisper_full call.
+    unsafe { (*(data as *const AtomicBool)).load(Ordering::SeqCst) }
+}
+
 /// `sticky`: lean to, and remember, the language of the last such run (LAST_LANG); dictation only.
+/// `stop`: whisper aborts (an Err) once it is set.
 #[allow(clippy::too_many_arguments)]
-fn run_local<T>(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, timestamps: bool, sticky: bool, vad: Option<&Path>, read: impl FnOnce(&WhisperState) -> Result<T, String>) -> Result<T, String> {
+fn run_local<T>(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, timestamps: bool, sticky: bool, vad: Option<&Path>, stop: Option<&AtomicBool>, read: impl FnOnce(&WhisperState) -> Result<T, String>) -> Result<T, String> {
     let mut g = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
     if g.as_ref().is_none_or(|e| e.path != model) {
         *g = None; // free the old model before loading the next one
@@ -831,6 +923,17 @@ fn run_local<T>(model: &Path, pcm: &[f32], languages: &[String], translate: bool
         let mut v = whisper_rs::WhisperVadParams::new();
         v.set_speech_pad(200); // keep word edges; the default 30 ms clips first and last sounds
         p.set_vad_params(v);
+    }
+    if let Some(stop) = stop {
+        // A partial runs whisper's full 30 s window like the final text. Sizing the encoder to the
+        // clip (set_audio_ctx) was 3x cheaper but turbo answers it with garbage ("itcks", "TH" for
+        // the start of "However, due to the slow communication channels"), as it did for dictation.
+        // The raw setters: set_abort_callback_safe's trampoline reads its boxed closure as the wrong type.
+        // SAFETY: `stop` is borrowed for this whole function, so it outlives the state.full call below.
+        unsafe {
+            p.set_abort_callback(Some(stop_set));
+            p.set_abort_callback_user_data(stop as *const AtomicBool as *mut std::ffi::c_void);
+        }
     }
     state.full(p, pcm).map_err(|e| format!("Transcription failed: {e}"))?;
     read(state)
@@ -927,6 +1030,49 @@ mod tests {
             eprintln!("speech with Silero: {text}");
             assert!(text.split_whitespace().count() >= 3, "speech still comes through: {text:?}");
         }
+    }
+
+    /// What a partial costs on 5, 10 and 20 s of speech, and how soon a stopped one hands the
+    /// model back to the final run.
+    /// `ECHOTYPE_TEST_MODEL=<ggml file> ECHOTYPE_TEST_WAV=<16 kHz speech wav> cargo test --release partial_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn partial_timing() {
+        let (Ok(model), Ok(wav)) = (std::env::var("ECHOTYPE_TEST_MODEL"), std::env::var("ECHOTYPE_TEST_WAV")) else { return eprintln!("skipped: no ECHOTYPE_TEST_MODEL / ECHOTYPE_TEST_WAV") };
+        let (model, vad) = (Path::new(&model), crate::speakers::vad());
+        let speech = crate::audio::decode(std::fs::read(&wav).unwrap(), Some("wav")).unwrap();
+        let clip = |secs: usize| speech.iter().copied().cycle().take(16_000 * secs).collect::<Vec<f32>>();
+        let (go, en) = (AtomicBool::new(false), ["en".to_string()]);
+        transcribe_partial(model, &clip(1), &en, false, "", vad.as_deref(), &go).unwrap(); // load + Metal warm-up
+        for secs in [5, 10, 20] {
+            let pcm = clip(secs);
+            let runs: Vec<u128> = (0..3)
+                .map(|_| {
+                    let t = Instant::now();
+                    transcribe_partial(model, &pcm, &en, false, "", vad.as_deref(), &go).unwrap();
+                    t.elapsed().as_millis()
+                })
+                .collect();
+            eprintln!("partial on {secs} s: {runs:?} ms; {:?}", transcribe_partial(model, &pcm, &en, false, "", vad.as_deref(), &go).unwrap());
+        }
+        // Released mid-partial: the final run waits only for the abort.
+        let pcm = clip(crate::PARTIAL_TAIL.as_secs() as usize);
+        for after in [10, 40, 70] {
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let (m, p, s, v, en) = (model.to_path_buf(), pcm.clone(), stop.clone(), vad.clone(), en.clone());
+            let partial = std::thread::spawn(move || {
+                let r = transcribe_partial(&m, &p, &en, false, "", v.as_deref(), &s);
+                (r.is_err(), Instant::now())
+            });
+            std::thread::sleep(Duration::from_millis(after));
+            let t = Instant::now();
+            stop.store(true, Ordering::SeqCst);
+            let (aborted, done) = partial.join().unwrap();
+            eprintln!("stopped {after} ms into a partial on {} s: model free {} ms later (aborted: {aborted})", pcm.len() / 16_000, done.saturating_duration_since(t).as_millis());
+        }
+        let final_text = transcribe_local(model, &clip(20), &["en".into()], false, "", vad.as_deref()).unwrap();
+        unload(); // ggml-metal asserts at exit while a model is resident
+        assert!(final_text.contains("country"), "the final run is unharmed by the aborted one: {final_text}");
     }
 
     /// `secs` of a quiet room with a knock every 600 ms.
@@ -1061,6 +1207,77 @@ mod tests {
         cancel_download("cancel-test");
         assert!(take_cancel(&dest) && !take_cancel(&dest), "a cancel stops one download, not the next");
         assert_eq!(MODELS.iter().map(|m| m.id).collect::<Vec<_>>(), ["large-v3-turbo-q5_0", "tiny.en"], "Automatic's pick and the practice model");
+    }
+
+    /// A 127.0.0.1 server whose first reply sends half of `body` and drops the connection. Its second
+    /// honours the Range header ("206"), ignores it ("200"), or sends a 206 of a file with a new
+    /// ETag ("changed", then a 200 on a third). Returns the URL and the requests it saw.
+    fn flaky_server(body: Vec<u8>, second: &'static str) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::BufRead;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/model.bin", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for i in 0..if second == "changed" { 3 } else { 2 } {
+                let (mut sock, _) = listener.accept().unwrap();
+                let mut req = String::new();
+                let mut r = std::io::BufReader::new(sock.try_clone().unwrap());
+                while r.read_line(&mut req).unwrap() > 2 {}
+                let from = req.lines().find_map(|l| l.to_lowercase().strip_prefix("range: bytes=")?.trim_end_matches('-').parse::<usize>().ok());
+                let reply = match (i, from) {
+                    (0, _) => [format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"v1\"\r\n\r\n", body.len()).into_bytes(), body[..body.len() / 2].to_vec()].concat(),
+                    (1, Some(a)) if second != "200" => {
+                        // The changed file's bytes differ, so accepting them would fail the checksum.
+                        let (etag, rest) = if second == "206" { ("v1", body[a..].to_vec()) } else { ("v2", vec![0; body.len() - a]) };
+                        [format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {a}-{}/{}\r\nETag: \"{etag}\"\r\nConnection: close\r\n\r\n", body.len() - a, body.len() - 1, body.len()).into_bytes(), rest].concat()
+                    }
+                    _ => [format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes(), body.clone()].concat(),
+                };
+                let _ = sock.write_all(&reply); // the client may have hung up (the cancel test)
+                seen.push(req);
+            }
+            seen
+        });
+        (url, server)
+    }
+
+    fn sha256_hex(b: &[u8]) -> String {
+        sha2::Sha256::digest(b).iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn a_dropped_download_resumes_or_starts_over() {
+        let body: Vec<u8> = (0..300_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect();
+        let dir = std::env::temp_dir().join(format!("echotype-fetch-test-{}", std::process::id()));
+        for second in ["206", "200", "changed"] {
+            let (url, server) = flaky_server(body.clone(), second);
+            let dest = dir.join(format!("resume-{second}.bin"));
+            let mut last = (0, None);
+            fetch(&url, &dest, &sha256_hex(&body), |d, t| last = (d, t)).unwrap();
+            let seen: Vec<String> = server.join().unwrap().iter().map(|r| r.to_lowercase()).collect();
+            assert_eq!(std::fs::read(&dest).unwrap(), body, "{second}");
+            assert!(!dest.with_extension("part").exists());
+            assert_eq!(last, (body.len() as u64, Some(body.len() as u64)), "progress counts the resumed bytes");
+            assert!(seen[1].contains(&format!("range: bytes={}-", body.len() / 2)) && seen[1].contains("if-range: \"v1\""), "{}", seen[1]);
+            assert!(seen.get(2).is_none_or(|r| !r.contains("range:")), "a changed file starts over");
+        }
+
+        // A cancel after the resume still deletes the .part; a bad checksum discards the file.
+        let (url, server) = flaky_server(body.clone(), "206");
+        let dest = dir.join("cancel.bin");
+        let err = fetch(&url, &dest, &sha256_hex(&body), |d, _| {
+            if d > 0 {
+                CANCELLED.lock().unwrap().push(dest.clone());
+            }
+        });
+        assert_eq!(err.unwrap_err(), DOWNLOAD_CANCELLED);
+        assert!(!dest.with_extension("part").exists() && !dest.exists());
+        server.join().unwrap();
+        let (url, server) = flaky_server(body.clone(), "206");
+        assert!(fetch(&url, &dest, &"0".repeat(64), |_, _| {}).unwrap_err().contains("checksum"));
+        assert!(!dest.with_extension("part").exists() && !dest.exists());
+        server.join().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1200,5 +1417,25 @@ mod tests {
         assert_eq!(clean_text(" Hello [Music] world. "), "Hello world.");
         assert_eq!(prompt(&["Arnav".into(), " ".into(), "Xoxoday".into()]), "Arnav, Xoxoday.");
         assert_eq!(prompt(&[" ".into()]), "");
+    }
+
+    /// Live words against the final text on the same audio: the start of real speech, 2, 4 and 6 s.
+    /// `ECHOTYPE_TEST_MODEL=<ggml> ECHOTYPE_TEST_WAV=<speech> cargo test --release partials_match_the_final_text -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn partials_match_the_final_text() {
+        let (Ok(model), Ok(wav)) = (std::env::var("ECHOTYPE_TEST_MODEL"), std::env::var("ECHOTYPE_TEST_WAV")) else { return eprintln!("skipped") };
+        let model = Path::new(&model);
+        let pcm = crate::audio::decode(std::fs::read(&wav).unwrap(), Some("wav")).unwrap();
+        let en = ["en".to_string()];
+        let stop = AtomicBool::new(false);
+        for secs in [2usize, 4, 6] {
+            let clip = &pcm[..(secs * 16_000).min(pcm.len())];
+            let t = std::time::Instant::now();
+            let partial = transcribe_partial(model, clip, &en, false, "", None, &stop).unwrap();
+            let ms = t.elapsed().as_millis();
+            let full = transcribe_local(model, clip, &en, false, "", None).unwrap();
+            eprintln!("{secs} s ({ms} ms)\n  live:  {partial}\n  final: {full}");
+        }
     }
 }

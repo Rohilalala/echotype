@@ -2,6 +2,7 @@
 //! Everything leaves this module as 16 kHz mono f32, which is what whisper wants.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -480,6 +481,33 @@ pub struct Recorder {
     /// The recording, sent before the stream is torn down (CoreAudio takes 100-200 ms to stop a
     /// stream, which the hand-back no longer waits for).
     done: mpsc::Receiver<(Vec<f32>, u32)>,
+    tap: Tap,
+}
+
+/// A look at a running recording from another thread (lib.rs partials).
+#[derive(Clone)]
+pub struct Tap {
+    buf: Arc<Mutex<Vec<f32>>>,
+    /// The device rate `buf` is at; a reopen can change it.
+    rate: Arc<AtomicU32>,
+}
+
+impl Tap {
+    /// Seconds recorded so far.
+    pub fn secs(&self) -> f32 {
+        let n = self.buf.lock().unwrap_or_else(|e| e.into_inner()).len();
+        n as f32 / self.rate.load(Ordering::SeqCst).max(1) as f32
+    }
+
+    /// The last `secs` seconds as 16 kHz mono.
+    pub fn tail(&self, secs: f32) -> Vec<f32> {
+        let (tail, rate) = {
+            let b = self.buf.lock().unwrap_or_else(|e| e.into_inner());
+            let rate = self.rate.load(Ordering::SeqCst);
+            (b[b.len().saturating_sub((secs * rate as f32) as usize)..].to_vec(), rate)
+        };
+        resample(&tail, rate, RATE)
+    }
 }
 
 impl Recorder {
@@ -489,8 +517,9 @@ impl Recorder {
         let (stop, stop_rx) = mpsc::channel::<()>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
         let (done_tx, done) = mpsc::channel::<(Vec<f32>, u32)>();
+        let tap = Tap { buf: Arc::new(Mutex::new(Vec::<f32>::with_capacity(48_000 * 30))), rate: Arc::new(AtomicU32::new(RATE)) };
+        let (buf, shared_rate) = (tap.buf.clone(), tap.rate.clone());
         std::thread::spawn(move || {
-            let buf = Arc::new(Mutex::new(Vec::<f32>::with_capacity(48_000 * 30)));
             let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let (mut stream, mut rate) = match open_stream(device.clone(), buf.clone(), lost.clone()) {
                 Ok(s) => s,
@@ -499,6 +528,7 @@ impl Recorder {
                     return;
                 }
             };
+            shared_rate.store(rate, Ordering::SeqCst);
             let _ = ready_tx.send(Ok(()));
             let (mut seen, mut live_at, mut reopens, mut ever_live) = (0usize, Instant::now(), 0, false);
             while let Err(mpsc::RecvTimeoutError::Timeout) = stop_rx.recv_timeout(Duration::from_millis(50)) {
@@ -529,6 +559,7 @@ impl Recorder {
                             }
                             seen = b.len();
                             rate = r;
+                            shared_rate.store(r, Ordering::SeqCst);
                             eprintln!("echotype: the microphone delivered nothing, reopened it ({r} Hz)");
                             s
                         }
@@ -548,10 +579,14 @@ impl Recorder {
             drop(stream); // after the hand-back: the caller transcribes while CoreAudio stops it
         });
         match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self { stop, done }),
+            Ok(Ok(())) => Ok(Self { stop, done, tap }),
             Ok(Err(e)) => Err(e),
             Err(_) => Err("The audio thread stopped unexpectedly".into()),
         }
+    }
+
+    pub fn tap(&self) -> Tap {
+        self.tap.clone()
     }
 
     /// Stops and returns the recording as 16 kHz mono.
