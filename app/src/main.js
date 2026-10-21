@@ -125,6 +125,7 @@ function changed(p) {
   if (p === 'cleanup.enabled') { setCleanupInert(); renderCloud(); refreshCloud(); }
   if (p === 'cleanup.match_app') refreshLastApp();
   if (p === 'cleanup.level') renderLevel();
+  if (p === 'cleanup.enabled' || p === 'cleanup.level' || p === 'cleanup.style') renderAutoTransform();
   if (p.startsWith('local_api')) refreshApi();
   if (p === 'history_enabled') { renderHistory(); $('#clipDaysRow').hidden = !S.history_enabled; }
   if (p === 'clip_days') renderHistory();
@@ -308,8 +309,11 @@ function renderAutoTransform() {
   if (S.auto_transform === TRANSLATE && !names.includes(TRANSLATE)) names.push(TRANSLATE);
   $('#autoTransform').replaceChildren(h('option', { value: '' }, 'None'), ...names.map(n => h('option', { value: n, selected: n === S.auto_transform }, n)));
   // cleanup.rs run: it only runs with cleanup on, the user's choice to send text to that provider.
-  $('#autoTransformDesc').textContent = S.cleanup.enabled ? 'Runs after cleanup on everything you dictate.' : 'Runs after cleanup, so turn Cleanup on to use it.';
-  $('#autoTransformDesc').classList.toggle('warn', !S.cleanup.enabled && !!S.auto_transform);
+  // cleanup.rs auto_transform_on: Level None and the Verbatim style skip the model, and so the transform.
+  const skip = S.cleanup.level === 'none' || S.cleanup.style === 'verbatim';
+  $('#autoTransformDesc').textContent = !S.cleanup.enabled ? 'Runs after cleanup, so turn Cleanup on to use it.'
+    : skip ? 'Runs after cleanup, so not at Level None or with the Verbatim style.' : 'Runs after cleanup on everything you dictate.';
+  $('#autoTransformDesc').classList.toggle('warn', (!S.cleanup.enabled || skip) && !!S.auto_transform);
 }
 $('#autoTransform').addEventListener('change', e => { S.auto_transform = e.target.value; save(); renderLangNote(); renderChips(); });
 $('#addTransform').addEventListener('click', () => {

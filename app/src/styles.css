@@ -452,14 +452,15 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 
 .drop-results { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
 .result { background: var(--pane); border: 1px solid var(--line-strong); border-radius: var(--r-card); padding: 12px 10px 12px 14px; }
-.result-head { display: flex; align-items: center; gap: 10px; }
-.result-name { font-weight: var(--fw-semi); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; } /* controls wrap below a long name at 720px */
+.result-name { font-weight: var(--fw-semi); flex: 1 1 8em; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .result-meta { color: var(--fg-3); font-size: 12px; font-variant-numeric: tabular-nums; }
 .result p { margin: 8px 4px 0 0; font-size: 13.5px; line-height: 1.55; white-space: pre-wrap; }
 .result.err p:not(.hint) { color: var(--bad); }
 .result .hint { color: var(--fg-2); font-size: 12px; margin-top: 2px; }
 .result .seg span { padding: 2px 9px; font-size: 12px; }
 .result-head select { width: auto; min-width: 0; flex: none; } /* Save as… beside Copy */
+#soundPackRow select { width: auto; } /* 45% of a shrink-to-fit .actions clipped “Classic” */
 .batch-head { padding: 0 4px 2px 0; } /* "Transcribing 4 files" above the queue */
 .working { color: var(--fg-2); }
 .working::after { content: ""; display: inline-block; width: 10px; height: 10px; margin-left: 8px; border: 1.5px solid var(--line-strong); border-top-color: var(--fg-2); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -1px; }
@@ -941,7 +942,7 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 @media (max-width: 620px) {
   :root { --side-w: 52px; }
   .sidebar { padding-left: 8px; padding-right: 8px; }
-  .preview-note { display: none; }
+  .preview-note, .side-notice { display: none; } /* no room beside the icons */
   nav button { font-size: 0; justify-content: center; padding: 0; }
   main { padding: 40px 16px 32px; }
   .hero { margin-top: 4vh; }
