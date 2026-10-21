@@ -256,10 +256,12 @@ pub fn wake_accessibility() {
 
 /// The text either side of the caret in the focused element of the app in front, at most `before`
 /// and `after` characters (UTF-16 units) of it: only that window is read, never a whole document.
-/// None for a password field, no text element, Accessibility off, or no answer within 250 ms.
-pub fn caret_text(before: usize, after: usize) -> Option<(String, String)> {
+/// Comes back as (before, selected, after): the selection, if any, apart. None for a password
+/// field, while secure input is on (a password being typed anywhere), no text element,
+/// Accessibility off, or no answer within 250 ms.
+pub fn caret_text(before: usize, after: usize) -> Option<(String, String, String)> {
     #[cfg(target_os = "macos")]
-    return mac::caret_text(before, after);
+    return if mac::secure_input() { None } else { mac::caret_text(before, after) };
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (before, after);
@@ -651,9 +653,21 @@ mod mac {
         }
     }
 
+    #[link(name = "Carbon", kind = "framework")]
+    unsafe extern "C" {
+        fn IsSecureEventInputEnabled() -> bool;
+    }
+
+    /// A password field somewhere has secure input on (Terminal's sudo prompt, a browser's
+    /// password box): nothing on screen is read meanwhile.
+    pub fn secure_input() -> bool {
+        // SAFETY: no arguments; reads a process-wide flag.
+        unsafe { IsSecureEventInputEnabled() }
+    }
+
     /// super::caret_text: the window around the caret through AXStringForRange, or out of AXValue
     /// when the app has no AXStringForRange and the text is short.
-    pub fn caret_text(before: usize, after: usize) -> Option<(String, String)> {
+    pub fn caret_text(before: usize, after: usize) -> Option<(String, String, String)> {
         use core_foundation::base::CFRange;
         use core_foundation::number::CFNumber;
         let attr = |name: &'static str| CFString::from_static_string(name);
@@ -693,7 +707,9 @@ mod mac {
                 None => return None,
             };
             let cut = ((sel.location - from).max(0) as usize).min(window.len());
-            Some((String::from_utf16_lossy(&window[..cut]), String::from_utf16_lossy(&window[cut..])))
+            let end = (cut + sel.length.max(0) as usize).min(window.len());
+            let part = |r: std::ops::Range<usize>| String::from_utf16_lossy(&window[r]);
+            Some((part(0..cut), part(cut..end), part(end..window.len())))
         }
     }
 

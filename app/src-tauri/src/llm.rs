@@ -47,7 +47,7 @@ pub const DOWNLOAD_URL: Option<&str> = Some("https://models.tryechotype.tech");
 pub const WRITER: Cleaner = Cleaner { id: "echotype-writer", label: "Echotype Writer", file: "echotype-writer-iq4_xs.gguf", size_mb: 860, sha256: "223d1f0457e5326b9781c4355ebd90355b54fdc7364481866620d4035f1922f7", note: "1.5B. Edits selected text when you ask: Command Mode and Transforms." };
 
 /// Context the writer is served with: a selection and its rewrite, kept in an 8-bit KV cache.
-const WRITER_CONTEXT: u32 = 2048;
+pub const WRITER_CONTEXT: u32 = 2048;
 
 pub fn find(id: &str) -> Option<&'static Cleaner> {
     CLEANERS.iter().chain(std::iter::once(&WRITER)).find(|c| c.id == id)

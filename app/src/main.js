@@ -121,6 +121,7 @@ function changed(p) {
   if (p === 'talk_key') saving.then(refreshStatus); // after the save, or the check re-applies the old key
   if (p === 'input_device' || p === 'prefer_builtin_mic') renderMicNote();
   if (p === 'cleanup.enabled') renderRaw();
+  if (p === 'screen_context') renderScreenSend();
   if (p === 'languages' || p === 'script') { renderLanguages(); if (obStep === 2 && !$('#onboard').hidden) obLangsRender(); }
   if (p === 'cleanup.enabled') { setCleanupInert(); renderCloud(); refreshCloud(); }
   if (p === 'cleanup.match_app') refreshLastApp();
@@ -589,6 +590,15 @@ function setProvider(kind, id) {
   refreshCloud();
 }
 
+// "Send text on screen to …" only for a cleanup provider off this Mac (cleanup.rs screen_ok).
+function renderScreenSend() {
+  const c = S.cleanup;
+  const local = ['echotype', 'ollama', 'lmstudio'].includes(c.provider)
+    || (c.provider === 'custom' && /^https?:\/\/(localhost|127\.[\d.]+|\[::1\])(:\d+)?(\/|$)/i.test((c.base_url || '').trim()));
+  $('#screenSend').hidden = local || !S.screen_context;
+  $('#screenSendName').textContent = preset(c.provider)?.label ?? c.provider;
+}
+
 function fillRemote(kind) {
   const cfg = S[kind], p = preset(cfg.provider), custom = cfg.provider === 'custom';
   const url = $(`#${kind}Url`);
@@ -599,7 +609,7 @@ function fillRemote(kind) {
   $(`#${kind}UrlDesc`).textContent = custom
     ? `Any OpenAI-compatible ${kind === 'stt' ? '/audio/transcriptions' : '/chat/completions'} endpoint.`
     : `Set by the ${p?.label ?? ''} preset.`;
-  if (kind === 'cleanup') renderCleaner();
+  if (kind === 'cleanup') { renderCleaner(); renderScreenSend(); }
   const model = $(`#${kind}Model`);
   model.value = cfg.model;
   const example = p?.[kind === 'stt' ? 'default_stt_model' : 'default_cleanup_model'];
@@ -607,7 +617,7 @@ function fillRemote(kind) {
   renderKey(kind);
 }
 for (const kind of ['stt', 'cleanup']) {
-  $(`#${kind}Url`).addEventListener('input', e => { if (S[kind].provider === 'custom') { S[kind].base_url = e.target.value.trim(); saveSoon(); } });
+  $(`#${kind}Url`).addEventListener('input', e => { if (S[kind].provider === 'custom') { S[kind].base_url = e.target.value.trim(); saveSoon(); if (kind === 'cleanup') renderScreenSend(); } });
 }
 
 async function renderKey(kind) {
