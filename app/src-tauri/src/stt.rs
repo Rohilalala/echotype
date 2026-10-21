@@ -547,12 +547,53 @@ pub fn quiet_whisper_logs() {
     whisper_rs::install_logging_hooks();
 }
 
-/// Whisper prompt from the dictionary: biases spelling of names at no latency cost. Whisper
+/// A few sentences of each language as people type it in English letters. Whisper writes in the
+/// script of its prompt, so one of these first gets that language back in English letters
+/// (Settings `script` "latin"): Hindi comes out as "Namaste, aap kaise hai?", not "नमस्ते". Only
+/// languages checked with large-v3-turbo are here: their speech comes back in English letters (the
+/// romanised_prompts test) and English clips decoded as them under their prompt stay English.
+/// Telugu and Kannada romanised well but turned English into Dutch or mangled numbers; Tamil
+/// looped; Arabic, Russian, Ukrainian, Greek and Japanese kept their own script.
+pub const ROMANISED: &[(&str, &str)] = &[
+    ("hi", "Namaste, aap kaise hain? Main theek hoon, shukriya. Kal milte hain."),
+    ("mr", "Namaskar, tumhi kase aahat? Mi thik aahe, dhanyavaad. Udya bhetu."),
+    ("ur", "Assalam alaikum, aap kaise hain? Main theek hoon, shukriya. Kal milte hain."),
+    ("bn", "Nomoskar, apni kemon achhen? Ami bhalo achhi, dhonnobad. Kal dekha hobe."),
+];
+
+/// The user's ROMANISED languages when they want them in English letters ("latin"). A
+/// translation is English whatever the prompt, so it has none.
+fn romanised(s: &Settings) -> Vec<&'static (&'static str, &'static str)> {
+    let latin = s.script == "latin" && !s.translate_to_english;
+    ROMANISED.iter().filter(|(l, _)| latin && s.languages.iter().any(|x| x == l)).collect()
+}
+
+/// Dictations come back in English letters for one of the user's languages.
+pub fn romanising(s: &Settings) -> bool {
+    !romanised(s).is_empty()
+}
+
+/// Whisper prompt: the romanised sentences of the user's languages when they want English
+/// letters, then the dictionary, which biases spelling of names at no latency cost. Whisper
 /// copies the prompt's style, so it ends like a sentence: a bare comma list made it drop full
 /// stops, which ran a meeting's sentences (and so its speakers) together.
-pub fn prompt(dictionary: &[String]) -> String {
-    let words: Vec<String> = dictionary.iter().map(|w| w.trim().replace('\0', "")).filter(|w| !w.is_empty()).collect();
-    if words.is_empty() { String::new() } else { format!("{}.", words.join(", ")) }
+pub fn prompt(s: &Settings) -> String {
+    let mut parts: Vec<String> = romanised(s).iter().map(|(_, p)| p.to_string()).collect();
+    let words: Vec<String> = s.dictionary.iter().map(|w| w.trim().replace('\0', "")).filter(|w| !w.is_empty()).collect();
+    if !words.is_empty() {
+        parts.push(format!("{}.", words.join(", ")));
+    }
+    parts.join(" ")
+}
+
+/// The languages whisper picks among: in English letters, only the romanised ones, so English and
+/// mixed speech are decoded as Hindi (say) under its romanised prompt instead of being detected.
+/// With [en, hi], detection called the owner's mixed "Hello aap kaise hai" English (0.37 to 0.13)
+/// and whisper translated it to "Hello, how are you?"; as Hindi with the prompt it came back as
+/// said, and his English clips stayed English word for word.
+pub fn languages(s: &Settings) -> Vec<String> {
+    let mine: Vec<String> = romanised(s).iter().map(|(l, _)| l.to_string()).collect();
+    if mine.is_empty() { s.languages.clone() } else { mine }
 }
 
 pub fn norm(w: &str) -> String {
@@ -971,7 +1012,7 @@ pub fn transcribe_remote(s: &Settings, pcm: &[f32], prompt: &str) -> Result<Stri
     let file = reqwest::blocking::multipart::Part::bytes(crate::audio::wav_bytes(pcm)).file_name("audio.wav").mime_str("audio/wav").map_err(|e| e.to_string())?;
     let mut form = reqwest::blocking::multipart::Form::new().part("file", file).text("model", model).text("response_format", "json");
     // An upload names at most one language: with two or three the provider detects among all.
-    if let (false, [one]) = (s.translate_to_english, s.languages.as_slice()) {
+    if let (false, [one]) = (s.translate_to_english, languages(s).as_slice()) {
         form = form.text("language", one.clone());
     }
     if !prompt.is_empty() {
@@ -998,6 +1039,32 @@ pub fn transcribe_remote(s: &Settings, pcm: &[f32], prompt: &str) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each ROMANISED language spoken, in both scripts: native comes back in its own script, English
+    /// letters with no other. ECHOTYPE_TEST_MODEL=<large-v3-turbo> ECHOTYPE_TEST_CLIPS=<folder of
+    /// <code>.wav, e.g. `say -v Lekha -o hi.aiff "…"` then 16 kHz mono>
+    /// `cargo test --release romanised_prompts -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn romanised_prompts() {
+        let (Ok(model), Ok(dir)) = (std::env::var("ECHOTYPE_TEST_MODEL"), std::env::var("ECHOTYPE_TEST_CLIPS")) else { return eprintln!("skipped") };
+        for (code, _) in ROMANISED {
+            let Ok(wav) = std::fs::read(Path::new(&dir).join(format!("{code}.wav"))) else { eprintln!("{code}: no clip"); continue };
+            let pcm = crate::audio::decode(wav, Some("wav")).unwrap();
+            let mut s = Settings { languages: vec![code.to_string()], ..Default::default() };
+            let run = |s: &Settings| transcribe_local(Path::new(&model), &pcm, &languages(s), false, &prompt(s), None).unwrap();
+            let native = run(&s);
+            s.script = "latin".into();
+            let latin = run(&s);
+            s.languages.insert(0, "en".into());
+            let mixed = run(&s);
+            eprintln!("{code} native: {native}\n{code} latin: {latin}\n{code} en+{code} latin: {mixed}");
+            assert!(native.chars().any(|c| c.is_alphabetic() && !c.is_ascii()), "{code} in its own script: {native:?}");
+            for t in [&latin, &mixed] {
+                assert!(t.chars().all(|c| !c.is_alphabetic() || c.is_ascii()) && t.chars().any(char::is_alphabetic), "{code} in English letters: {t:?}");
+            }
+        }
+    }
 
     /// A quiet room with a knock every 600 ms (owner report: tapping the laptop typed "Thank you.",
     /// a finger snap "I'm going to go to the next one."), through the real model: with Silero,
@@ -1415,8 +1482,38 @@ mod tests {
     fn whisper_text_cleanup_and_prompt() {
         assert_eq!(clean_text(" [BLANK_AUDIO] "), "");
         assert_eq!(clean_text(" Hello [Music] world. "), "Hello world.");
-        assert_eq!(prompt(&["Arnav".into(), " ".into(), "Xoxoday".into()]), "Arnav, Xoxoday.");
-        assert_eq!(prompt(&[" ".into()]), "");
+        let mut s = Settings { dictionary: vec!["Arnav".into(), " ".into(), "Xoxoday".into()], ..Default::default() };
+        assert_eq!(prompt(&s), "Arnav, Xoxoday.");
+        assert_eq!(prompt(&Settings { dictionary: vec![" ".into()], ..Default::default() }), "");
+        let hi = ROMANISED.iter().find(|(l, _)| *l == "hi").unwrap().1;
+        s.languages = vec!["en".into(), "hi".into()];
+        assert_eq!(prompt(&s), "Arnav, Xoxoday.", "native script: the dictionary only");
+        s.script = "latin".into();
+        assert_eq!(prompt(&s), format!("{hi} Arnav, Xoxoday."), "English letters: Hindi's romanised sentence first");
+        s.dictionary.clear();
+        assert_eq!(prompt(&s), hi);
+        s.translate_to_english = true;
+        assert_eq!(prompt(&s), "", "a translation is English anyway");
+        s.translate_to_english = false;
+        s.languages = vec!["en".into(), "fr".into()];
+        assert_eq!(prompt(&s), "", "no romanised sentence for a Latin-script language");
+        s.languages.clear();
+        assert_eq!(prompt(&s), "", "auto-detect: no language to romanise");
+    }
+
+    #[test]
+    fn english_letters_decode_as_the_romanised_language() {
+        let mut s = Settings { languages: vec!["en".into(), "hi".into()], ..Default::default() };
+        assert_eq!(languages(&s), ["en", "hi"], "native script: each clip goes to the likeliest");
+        s.script = "latin".into();
+        assert_eq!(languages(&s), ["hi"], "English letters: no detection, English and mixed speech decode as Hindi under its prompt");
+        s.translate_to_english = true;
+        assert_eq!(languages(&s), ["en", "hi"], "a translation detects as before");
+        s.translate_to_english = false;
+        s.languages = vec!["en".into(), "fr".into()];
+        assert_eq!(languages(&s), ["en", "fr"], "nothing to romanise: unchanged");
+        s.languages.clear();
+        assert!(languages(&s).is_empty(), "auto-detect stays auto-detect");
     }
 
     /// Live words against the final text on the same audio: the start of real speech, 2, 4 and 6 s.

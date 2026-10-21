@@ -374,9 +374,13 @@ pub struct Output {
     pub cleaned: Option<String>,
 }
 
-/// `verbatim` keeps the recognizer's words and skips the LLM entirely.
+/// `verbatim` keeps the recognizer's words and skips the LLM entirely, and so does the built-in
+/// model for words typed in English letters (stt::ROMANISED): trained on English, it dropped
+/// what was said in 2 of 12 Hinglish lines ("Arnav ko bolo ki woh mujhe call kare, wait, message
+/// kare" became "Arnav ko message kare", "push karenge Thursday tak" lost "Thursday tak").
+// ponytail: also skips that user's English dictations; lift it with a cleaner trained on Hinglish.
 pub fn wants_cleanup(s: &Settings, text: &str) -> bool {
-    s.cleanup.enabled && s.cleanup.style != "verbatim" && !text.trim().is_empty()
+    s.cleanup.enabled && s.cleanup.style != "verbatim" && !text.trim().is_empty() && !(s.cleanup.provider == "echotype" && stt::romanising(s))
 }
 
 /// True when the transcript holds at least one letter or digit in any script. Whisper turns
@@ -624,10 +628,10 @@ pub fn keyless(s: &Settings) -> bool {
 /// or API upload keeps its words.
 pub fn run(s: &Settings, pcm: &[f32], dictated: bool, on_cleaning: impl FnOnce()) -> Result<Output, String> {
     let t = Instant::now();
-    let prompt = stt::prompt(&s.dictionary);
+    let prompt = stt::prompt(s);
     let (raw, warning) = if s.stt.provider == "local" {
         let (model, warning) = stt::pick_local_model(s)?;
-        (stt::transcribe_local(&model, pcm, &s.languages, s.translate_to_english, &prompt, crate::speakers::vad().as_deref())?, warning)
+        (stt::transcribe_local(&model, pcm, &stt::languages(s), s.translate_to_english, &prompt, crate::speakers::vad().as_deref())?, warning)
     } else {
         (stt::transcribe_remote(s, pcm, &prompt)?, None)
     };
@@ -758,6 +762,13 @@ mod tests {
         assert!(!wants_cleanup(&s, "  "));
         s.cleanup.style = "verbatim".into();
         assert!(!wants_cleanup(&s, "hello"));
+        s.cleanup.style = "default".into();
+        (s.languages, s.script) = (vec!["en".into(), "hi".into()], "latin".into());
+        assert!(wants_cleanup(&s, "Kal milte hain, um, Thursday ko."), "another provider still cleans English letters");
+        s.cleanup.provider = "echotype".into();
+        assert!(!wants_cleanup(&s, "Kal milte hain, um, Thursday ko."), "the built-in model, trained on English, does not");
+        s.script = "native".into();
+        assert!(wants_cleanup(&s, "hello"));
     }
 
     fn post(s: &Settings, raw: &str) -> Output {

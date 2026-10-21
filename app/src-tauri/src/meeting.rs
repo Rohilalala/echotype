@@ -871,10 +871,10 @@ fn transcriber(s: &Settings) -> Result<Transcribe, String> {
     let mut s = s.clone();
     s.translate_to_english = false;
     stt::ready(&s)?;
-    let prompt = stt::prompt(&s.dictionary);
+    let prompt = stt::prompt(&s);
     if s.stt.provider == "local" {
         let (model, _) = stt::pick_local_model(&s)?;
-        let langs = s.languages.clone();
+        let langs = stt::languages(&s);
         Ok(Box::new(move |pcm| stt::transcribe_words(&model, pcm, &langs, &prompt, speakers::vad().as_deref())))
     } else {
         Ok(Box::new(move |pcm| Ok(spread(&stt::transcribe_remote(&s, pcm, &prompt)?, pcm.len() as f32 / RATE as f32))))

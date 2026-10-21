@@ -517,7 +517,7 @@ fn spawn_partials(app: &AppHandle, s: &Settings, tap: audio::Tap, stop: Arc<Atom
     let (app, s) = (app.clone(), s.clone());
     std::thread::spawn(move || {
         let Ok((model, _)) = stt::pick_local_model(&s) else { return };
-        let (prompt, vad) = (stt::prompt(&s.dictionary), speakers::vad());
+        let (prompt, vad) = (stt::prompt(&s), speakers::vad());
         let mut last: Option<Instant> = None;
         while !stop.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(100));
@@ -526,7 +526,7 @@ fn spawn_partials(app: &AppHandle, s: &Settings, tap: audio::Tap, stop: Arc<Atom
             }
             last = Some(Instant::now());
             let pcm = tap.tail(PARTIAL_TAIL.as_secs_f32());
-            let Ok(text) = stt::transcribe_partial(&model, &pcm, &s.languages, s.translate_to_english, &prompt, vad.as_deref(), &stop) else { continue };
+            let Ok(text) = stt::transcribe_partial(&model, &pcm, &stt::languages(&s), s.translate_to_english, &prompt, vad.as_deref(), &stop) else { continue };
             // Silence keeps the words already up.
             if stop.load(Ordering::SeqCst) || !cleanup::has_speech(&text) {
                 continue;
@@ -630,10 +630,10 @@ fn main_window_focused(app: &AppHandle) -> bool {
 }
 
 /// Whether a finished dictation is pasted into the app in front rather than copied: never into
-/// Echotype's own window, and during onboarding only from its real-app step (3) on, so practice
+/// Echotype's own window, and during onboarding only from its real-app step (4) on, so practice
 /// runs land in the practice field.
 fn pastes(s: &Settings, main_focused: bool) -> bool {
-    (s.onboarded || s.onboard_step >= 3) && !main_focused
+    (s.onboarded || s.onboard_step >= 4) && !main_focused
 }
 
 /// STT + cleanup + paste + history on a worker thread, so the hotkey stays responsive.
@@ -2578,11 +2578,11 @@ mod tests {
     fn onboarding_pastes_only_from_its_real_app_step_and_never_into_echotype() {
         use super::pastes;
         let mut s = Settings::default();
-        assert!(!pastes(&s, false), "steps 1-2: practice lands in onboarding's own field");
-        s.onboard_step = 2;
-        assert!(!pastes(&s, false));
+        assert!(!pastes(&s, false), "steps 1-3: practice lands in onboarding's own field");
         s.onboard_step = 3;
-        assert!(pastes(&s, false), "step 3 tries a real paste in another app");
+        assert!(!pastes(&s, false));
+        s.onboard_step = 4;
+        assert!(pastes(&s, false), "step 4 tries a real paste in another app");
         assert!(!pastes(&s, true), "but never into Echotype's own window");
         let done = Settings { onboarded: true, ..Default::default() };
         assert!(pastes(&done, false) && !pastes(&done, true));
