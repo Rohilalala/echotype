@@ -177,6 +177,11 @@
           <input type="checkbox" class="switch" id="langAuto" /></label>
         <div class="row col"><span class="row-text"><span class="row-title" id="langPickTitle">Languages you speak</span><span class="row-desc" id="langPickDesc"></span></span>
           <div class="lang-chips" id="langChips" role="group" aria-labelledby="langPickTitle"></div></div>
+        <div class="row" id="scriptRow"><span class="row-text"><span class="row-title" id="scriptLabel">How should your words look?</span><span class="row-desc" id="scriptDesc" dir="auto"></span></span>
+          <span class="seg" role="radiogroup" aria-labelledby="scriptLabel">
+            <label><input type="radio" name="script" value="latin" data-bind="script" /><span>English letters</span></label>
+            <label><input type="radio" name="script" value="native" data-bind="script" /><span>Native script</span></label>
+          </span></div>
         <label class="row"><span class="row-text"><span class="row-title">Translate to English</span><span class="row-desc">Speak Hindi, Hinglish or any language and get English. Turbo models can’t translate, so Echotype switches to a multilingual model you have downloaded.</span></span>
           <input type="checkbox" class="switch" data-bind="translate_to_english" /></label>
       </div>
@@ -459,12 +464,12 @@
     </section>
   </main>
 
-  <!-- First run: five steps in one card, with the orb (orb.js) moving between their .ob-orb slots. -->
+  <!-- First run: six steps in one card, with the orb (orb.js) moving between their .ob-orb slots. -->
   <div class="onboard" id="onboard" data-tauri-drag-region role="dialog" aria-modal="true" aria-labelledby="obT1" hidden>
     <div class="film-shell" id="filmShell" aria-hidden="true"><p class="film-welcome" id="filmWelcome">Welcome to Echotype</p></div>
     <div class="ob-card" data-tauri-drag-region>
       <div class="ob-top" data-tauri-drag-region>
-        <ol class="ob-dots" id="obDots" aria-label="Setup, step 1 of 5"><li></li><li></li><li></li><li></li><li></li></ol>
+        <ol class="ob-dots" id="obDots" aria-label="Setup, step 1 of 6"><li></li><li></li><li></li><li></li><li></li><li></li></ol>
         <button class="btn quiet" id="obSkip" type="button">Skip setup</button>
       </div>
 
@@ -479,7 +484,28 @@
           </div>
         </section>
 
-        <section class="ob-step split" data-step="2" aria-labelledby="obT2" hidden>
+        <!-- Before the try, so the first dictation already uses these languages. -->
+        <section class="ob-step split" data-step="2" aria-labelledby="obTLang" hidden>
+          <div class="ob-orb" aria-hidden="true"></div>
+          <div class="ob-body">
+            <h2 id="obTLang" tabindex="-1">Your languages. Your&nbsp;voice.</h2>
+            <p class="lede">Speak naturally, in one language or a mix of them, and Echotype writes it down. Tell it the languages you use most.</p>
+            <div class="ob-langs">
+              <label class="ob-field"><span>Primary language</span><select id="obLang1"></select></label>
+              <label class="ob-field"><span>Second language</span><select id="obLang2"></select></label>
+            </div>
+            <div class="ob-script" id="obScriptRow" hidden>
+              <p class="ob-field" id="obScriptLabel">How should your words look?</p>
+              <span class="seg" role="radiogroup" aria-labelledby="obScriptLabel">
+                <label><input type="radio" name="obScript" value="latin" data-bind="script" /><span>English letters</span></label>
+                <label><input type="radio" name="obScript" value="native" data-bind="script" /><span>Native script</span></label>
+              </span>
+              <p class="ob-result" id="obScriptSample" dir="auto"></p>
+            </div>
+          </div>
+        </section>
+
+        <section class="ob-step split" data-step="3" aria-labelledby="obT2" hidden>
           <div class="ob-orb" aria-hidden="true"></div>
           <div class="ob-body">
             <h2 id="obT2" tabindex="-1">Try it</h2>
@@ -492,7 +518,7 @@
           </div>
         </section>
 
-        <section class="ob-step split" data-step="3" aria-labelledby="obT3" hidden>
+        <section class="ob-step split" data-step="4" aria-labelledby="obT3" hidden>
           <div class="ob-orb" aria-hidden="true"></div>
           <div class="ob-body">
             <h2 id="obT3" tabindex="-1">Let Echotype type for&nbsp;you</h2>
@@ -514,9 +540,9 @@
           </div>
         </section>
 
-        <!-- Step 4 is a run of single questions (.ob-q), one at a time. A tile saves when picked and
+        <!-- Step 5 is a run of single questions (.ob-q), one at a time. A tile saves when picked and
              stays; Continue and Back walk the questions. -->
-        <section class="ob-step split" data-step="4" aria-labelledby="obT4" hidden>
+        <section class="ob-step split" data-step="5" aria-labelledby="obT4" hidden>
           <div class="ob-orb" aria-hidden="true"></div>
           <div class="ob-body">
             <p class="ob-count" id="obCount"></p>
@@ -535,17 +561,6 @@
               <h2 id="obT4" tabindex="-1">What should I call you?</h2>
               <input type="text" class="ob-name" id="obName" autocomplete="given-name" spellcheck="false" placeholder="Your first name" maxlength="40" aria-labelledby="obT4" aria-describedby="obHello" />
               <p class="ob-hello" id="obHello"></p>
-            </div>
-
-            <div class="ob-q" data-q="lang" hidden>
-              <h2 id="obQLang" tabindex="-1">What do you speak?</h2>
-              <div class="ob-tiles" role="radiogroup" aria-labelledby="obQLang">
-                <button type="button" class="ob-tile" role="radio" data-v="auto"><b>Any language</b><span>Detected each time you talk</span></button>
-                <button type="button" class="ob-tile" role="radio" data-v="mine"><b>My languages</b><span>Up to 3, fewer mix-ups</span></button>
-              </div>
-              <div class="lang-chips" id="obLangChips" role="group" aria-label="Languages you speak" hidden></div>
-              <label class="ob-pick" id="obHinglishRow" hidden><span>Type my Hindi in English letters</span><input type="checkbox" class="switch" id="obHinglish" /></label>
-              <p class="lede" id="obLangDesc"></p>
             </div>
 
             <div class="ob-q" data-q="speed" hidden>
@@ -667,7 +682,7 @@
           </div>
         </section>
 
-        <section class="ob-step center" data-step="5" aria-labelledby="obT5" hidden>
+        <section class="ob-step center" data-step="6" aria-labelledby="obT5" hidden>
           <div class="ob-orb" aria-hidden="true"></div>
           <h2 id="obT5" tabindex="-1">You're set</h2>
           <ul class="ob-recap" id="obRecap"></ul>

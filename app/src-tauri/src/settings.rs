@@ -44,6 +44,9 @@ pub struct Settings {
     /// Builds before 2026-10-16 saved one code or "auto" here; migrate() moves it into `languages`.
     #[serde(skip_serializing)]
     pub language: String,
+    /// How a language with its own script is typed: "native" (हिंदी) or "latin" (English letters,
+    /// "Hinglish"). Only the languages in stt::ROMANISED have a "latin"; the rest stay native.
+    pub script: String,
     pub translate_to_english: bool,
     pub local_api: LocalApi,
     pub stt: Stt,
@@ -63,7 +66,7 @@ pub struct Settings {
     /// Shown on the Stats page ("Aditya's stats"). Stays on this computer.
     pub display_name: String,
     pub onboarded: bool,
-    /// The onboarding step on screen (1-5), so a relaunch resumes there. From step 3 on, a
+    /// The onboarding step on screen (1-6), so a relaunch resumes there. From step 4 on, a
     /// dictation into another app is pasted (the real-app try); before it, it only lands in
     /// onboarding's practice field.
     pub onboard_step: u8,
@@ -284,6 +287,7 @@ impl Default for Settings {
             pause_music: false,
             languages: vec![],
             language: String::new(),
+            script: "native".into(),
             translate_to_english: false,
             local_api: LocalApi::default(),
             stt: Stt::default(),
@@ -412,6 +416,9 @@ impl Settings {
             true
         });
         self.languages.truncate(3);
+        if !matches!(self.script.as_str(), "native" | "latin") {
+            self.script = "native".into();
+        }
         if !matches!(self.look.as_str(), "system" | "light" | "dark") {
             self.look = "system".into(); // the Classic, Ink and Foundry looks are gone: follow macOS
         }
@@ -876,6 +883,18 @@ mod tests {
         assert_eq!(l, ["hi", "de"]);
         toggle_language(&mut l, "auto");
         assert!(l.is_empty());
+    }
+
+    #[test]
+    fn the_script_choice_defaults_to_native() {
+        let load = |j: &str| {
+            let mut s: Settings = serde_json::from_str(j).unwrap();
+            s.migrate();
+            s.script
+        };
+        assert_eq!(load("{}"), "native", "upgraders keep their language's own script");
+        assert_eq!(load(r#"{"script":"latin"}"#), "latin");
+        assert_eq!(load(r#"{"script":"cyrillic"}"#), "native", "an unknown value loads as native");
     }
 
     #[test]
