@@ -11,6 +11,9 @@ use std::sync::Mutex;
 /// Words per minute needs at least this much speech and this many words; shorter clips give silly numbers.
 const WPM_MIN_MS: u64 = 3_000;
 const WPM_MIN_WORDS: u64 = 5;
+/// Faster than anyone talks (fast speech is about 250): a rate above it is a timing error, such as
+/// speech the clock missed, and is not counted.
+const WPM_MAX: f64 = 350.0;
 /// Days with activity kept one by one (2+ years for a daily user, ~70 KB). Older ones fold into `archive`.
 const KEEP_DAYS: usize = 800;
 /// Grid width when the page asks for nothing else: a year, GitHub style.
@@ -90,7 +93,9 @@ pub fn to_count(s: &settings::Settings, text: &str) -> Option<u64> {
 }
 
 pub fn wpm(source: Source, words: u64, speaking_ms: u64) -> Option<f64> {
-    (source == Source::Dictation && speaking_ms >= WPM_MIN_MS && words >= WPM_MIN_WORDS).then(|| words as f64 * 60_000.0 / speaking_ms as f64)
+    (source == Source::Dictation && speaking_ms >= WPM_MIN_MS && words >= WPM_MIN_WORDS)
+        .then(|| words as f64 * 60_000.0 / speaking_ms as f64)
+        .filter(|w| *w <= WPM_MAX)
 }
 
 pub fn day_of<Tz: TimeZone>(ts_ms: u64, tz: &Tz) -> NaiveDate {
@@ -297,6 +302,18 @@ fn path() -> PathBuf {
     settings::data_dir().join("stats.json")
 }
 
+/// Bests saved before WPM_MAX existed ("New best speed, 504 wpm") are dropped on load. The day's
+/// average keeps that dictation's words and time: they can't be told apart from the rest of the day.
+fn without_impossible_bests(mut s: Store) -> Store {
+    for d in s.days.values_mut().filter(|d| d.best_wpm > WPM_MAX) {
+        d.best_wpm = 0.0;
+    }
+    if s.archive.best_wpm.is_some_and(|b| b.value > WPM_MAX) {
+        s.archive.best_wpm = None;
+    }
+    s
+}
+
 /// A missing file is a fresh store that still imports history. A damaged one is moved aside to
 /// stats.json.bak, never written over, and counting starts again without importing history (it
 /// may have been cleared on purpose). Err only when it can't be read or moved: then nothing is written.
@@ -304,7 +321,7 @@ fn load(path: &Path) -> Result<Store, String> {
     let bad = match std::fs::read_to_string(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Store::default()),
         Ok(s) => match serde_json::from_str(&s) {
-            Ok(store) => return Ok(store),
+            Ok(store) => return Ok(without_impossible_bests(store)),
             Err(e) => e.to_string(),
         },
         Err(e) => e.to_string(),
@@ -391,6 +408,8 @@ mod tests {
         assert_eq!(wpm(Source::Dictation, 30, 2_999), None, "under 3 s");
         assert_eq!(wpm(Source::File, 300, 60_000), None);
         assert_eq!(wpm(Source::Api, 300, 60_000), None);
+        assert_eq!(wpm(Source::Dictation, 42, 5_000), None, "504 wpm is a timing error");
+        assert_eq!(wpm(Source::Dictation, 35, 6_000), Some(350.0));
         assert_eq!(words("  Hello,\nworld  it's  me "), 4);
     }
 
@@ -557,6 +576,18 @@ mod tests {
         let s = load(&p).unwrap();
         assert!(s.backfilled);
         assert_eq!(s.view(d("2026-10-14"), 1).words_total, 3 + 12 + 1);
+    }
+
+    #[test]
+    fn an_impossible_best_saved_before_the_cap_is_dropped_on_load() {
+        let p = scratch("best");
+        let mut store = Store { backfilled: true, ..Default::default() };
+        store.record(d("2026-10-16"), 5, Source::Dictation, 30, 12_000); // 150 wpm
+        store.days.get_mut(&d("2026-10-16")).unwrap().best_wpm = 504.0; // what an older build saved
+        save(&p, &store).unwrap();
+        let v = load(&p).unwrap().view(d("2026-10-16"), 1);
+        assert_eq!(v.best_wpm, None, "504 wpm is not a best");
+        assert_eq!(v.words_total, 30, "the words still count");
     }
 
     #[test]
