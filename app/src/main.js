@@ -98,7 +98,7 @@ function bindAll() {
     const text = el.tagName === 'TEXTAREA' || ['text', 'url', 'password', 'number'].includes(el.type);
     el.addEventListener(text ? 'input' : 'change', () => {
       if (el.type === 'number' && !el.checkValidity()) return;
-      let v = el.type === 'checkbox' ? el.checked : ['number', 'range'].includes(el.type) ? Number(el.value) : el.value;
+      let v = el.type === 'checkbox' ? el.checked : ['number', 'range'].includes(el.type) || 'num' in el.dataset ? Number(el.value) : el.value;
       if ('null' in el.dataset && v === '') v = null;
       set(p, v);
       text ? saveSoon() : save();
@@ -128,6 +128,7 @@ function changed(p) {
   if (p === 'pill_idle' || p === 'show_in') renderPill();
   if (p === 'pill_size' || p === 'ball_size') sizePreview();
   if (p === 'sounds') $('#soundPackRow').hidden = !S.sounds;
+  if (p === 'detect_meetings') renderStartup();
   if (p === 'greetings' || p === 'display_name') renderGreeting();
   if (p === 'sound_pack') invoke('preview_sounds', { pack: S.sound_pack }).catch(() => {}); // hear it as you pick it
   if (p === 'advanced' || p === 'cleaner_memory') { renderAdvanced(); renderStt(); fillRemote('cleanup'); renderLangNote(); renderHero(); }
@@ -194,6 +195,7 @@ function renderHotkey() {
     btn.replaceChildren(...(v ? keycaps(v) : [h('span', { className: 'none' }, 'None')]));
   }
   for (const b of $$('[data-clear]')) { b.hidden = !S[b.dataset.clear]; b.replaceChildren(svg(CROSS)); }
+  $('#commandNote').hidden = !S.command_hotkey || S.cleanup.provider !== 'echotype'; // cleanup.rs command_blocked
   $('#modeDesc').textContent = S.mode === 'toggle'
     ? 'Press once to start, again to stop. Esc cancels.'
     : 'Hold while you speak, let go to paste. Tap twice to go hands-free.';
@@ -490,7 +492,7 @@ function fillRemote(kind) {
   url.placeholder = custom ? 'http://localhost:8000/v1' : '';
   $(`#${kind}UrlDesc`).textContent = custom
     ? `Any OpenAI-compatible ${kind === 'stt' ? '/audio/transcriptions' : '/chat/completions'} endpoint.`
-    : cfg.provider === 'echotype' ? `Built in: runs on this Mac, nothing to start. ${sys?.echotype_model_installed ? `Installed, ${fmtMB(sys.echotype_model_mb)}.` : `Not installed (${fmtMB(sys?.echotype_model_mb ?? 940)}).`}`
+    : cfg.provider === 'echotype' ? `Built in: runs on this Mac, nothing to start. ${sys?.echotype_model_installed ? `Installed, ${fmtMB(sys.echotype_model_mb)}.` : `Not installed (${fmtMB(sys?.echotype_model_mb ?? 401)}).`}`
     : `Set by the ${p?.label ?? ''} preset.`;
   if (kind === 'cleanup') renderCleaner();
   const model = $(`#${kind}Model`);
@@ -652,7 +654,7 @@ function cleanerRow(c) {
   return h('div', { className: 'row model' },
     h('span', { className: 'tile', 'aria-hidden': 'true' }, svg(WAVE)),
     h('span', { className: 'row-text' },
-      h('span', { className: 'model-name' }, c.label, c.automatic && h('span', { className: 'tag rec' }, 'Recommended')),
+      h('span', { className: 'model-name' }, c.label, c.recommended && h('span', { className: 'tag rec' }, 'Recommended')),
       h('span', { className: 'row-desc' }, c.note),
       h('span', { className: 'model-meta' }, h('span', {}, fmtMB(c.size_mb)), h('span', {}, `about ${fmtMB(c.ram_mb)} RAM`)),
       c.warning && h('span', { className: 'row-desc warn' }, c.warning),
@@ -751,7 +753,7 @@ function renderCleaner() {
   pick.replaceChildren(...(S.advanced ? list.map(c => h('option', { value: c.id }, label(c))) : [h('option', { value: '' }, 'Automatic (recommended)')]));
   const cur = S.advanced ? list.find(c => c.id === S.cleanup.model) ?? auto : auto;
   pick.value = S.advanced ? cur?.id ?? '' : '';
-  $('#cleanerDesc').textContent = S.advanced ? cur?.warning ?? '' : auto ? `Uses ${auto.label}, picked for this Mac.` : '';
+  $('#cleanerDesc').textContent = S.advanced ? cur?.warning ?? '' : auto ? `Uses ${auto.label}.` : '';
   $('#cleanerDesc').classList.toggle('warn', S.advanced && !!cur?.warning);
 }
 $('#cleanerPick').addEventListener('change', e => { S.cleanup.model = e.target.value; save(); renderCleaner(); });
@@ -1259,6 +1261,7 @@ function renderStartup() {
   $('#talkRow').hidden = $('#obTalkRow').hidden = !isMac; // talk keys are macOS-only; sounds play everywhere
   $('#pillTitle').hidden = $('#pillGroup').hidden = !isMac; // so is the idle pill
   $('#meetingsTitle').hidden = $('#meetingsGroup').hidden = !isMac; // and call detection (calls.rs)
+  $('#callAppsTitle').hidden = $('#callAppsGroup').hidden = $('#autoStopRow').hidden = !isMac || !S.detect_meetings;
   $('#preferBuiltinRow').hidden = $('#pauseMusicRow').hidden = !isMac; // and both (audio.rs pick_input, music.rs)
 }
 

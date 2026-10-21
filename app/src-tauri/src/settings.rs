@@ -57,6 +57,9 @@ pub struct Settings {
     pub voice_commands: bool,
     /// Count words and speaking speed on this computer (stats.rs). Counts only; on for upgraders too.
     pub usage_stats: bool,
+    /// Opt-in anonymous usage counts and crash reports for the beta (telemetry.rs). Off unless
+    /// switched on; the only thing that ever sends them.
+    pub share_telemetry: bool,
     /// Shown on the Stats page ("Aditya's stats"). Stays on this computer.
     pub display_name: String,
     pub onboarded: bool,
@@ -72,6 +75,9 @@ pub struct Settings {
     /// are offered these instead of having keys taken; onboarding binds them for new installs.
     pub paste_last_hotkey: String,
     pub copy_last_hotkey: String,
+    /// Command Mode: held like the dictation shortcut, it applies the spoken instruction to the
+    /// selected text (or writes what it asks for). "" is unbound.
+    pub command_hotkey: String,
     /// Launch at login. Off for upgraders; onboarding offers it pre-checked.
     pub autostart: bool,
     /// Start, stop and lock sounds.
@@ -127,10 +133,40 @@ pub struct Settings {
     pub cloud_moved: bool,
     /// A short hello at the top of Home, by time of day (Settings → Advanced). On for upgraders too.
     pub greetings: bool,
-    /// Offer meeting notes when a call app starts using the microphone (calls.rs). It only offers.
+    /// Watch for calls (calls.rs); off, nothing below applies.
     pub detect_meetings: bool,
-    /// When a call whose notes are running ends: "ask" | "auto" (stop them).
+    /// What a detected call does, per app.
+    pub call_start: CallStart,
+    /// Stop notes started for a call (automatically or from its offer) when that call ends.
+    /// Off: ask. Notes started by hand are never stopped.
+    pub meeting_auto_stop: bool,
+    /// Builds before 2026-10-19: "ask" | "auto" here; migrate() moves it into `meeting_auto_stop`.
+    #[serde(skip_serializing)]
     pub meeting_end: String,
+    /// Meeting audio is deleted this many days after the meeting ends (7 or 30); 0 keeps it.
+    /// The transcript, speakers and summary stay either way (meeting.rs prune_audio).
+    pub meeting_audio_days: u32,
+}
+
+/// Per calling app: "ask" (offer notes) | "start" (start them) | "never". calls::choice maps a call to its field.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct CallStart {
+    pub meet: String,
+    pub teams: String,
+    pub zoom: String,
+    pub slack: String,
+    pub facetime: String,
+    pub webex: String,
+    pub discord: String,
+    pub other: String,
+}
+
+impl Default for CallStart {
+    fn default() -> Self {
+        let ask = || "ask".to_string();
+        Self { meet: ask(), teams: ask(), zoom: ask(), slack: ask(), facetime: ask(), webex: ask(), discord: ask(), other: ask() }
+    }
 }
 
 /// The orb's styles: the thinking-orbs states (app/src/vendor/thinking-orbs.js STATE_TO_MODE).
@@ -255,12 +291,15 @@ impl Default for Settings {
             history_enabled: true,
             voice_commands: true,
             usage_stats: true,
+            share_telemetry: false,
             display_name: String::new(),
             onboarded: false,
             onboard_step: 0,
             talk_key: "accelerator".into(),
             paste_last_hotkey: String::new(),
             copy_last_hotkey: String::new(),
+            // macOS only: elsewhere ⌥⇧ switches keyboard layouts, and no modifier wait guards the ⌘C.
+            command_hotkey: if cfg!(target_os = "macos") { "Alt+Shift+Space" } else { "" }.into(),
             autostart: false,
             sounds: true,
             dismissed: vec![],
@@ -288,7 +327,10 @@ impl Default for Settings {
             cloud_moved: false,
             greetings: true,
             detect_meetings: true,
-            meeting_end: "ask".into(),
+            call_start: CallStart::default(),
+            meeting_auto_stop: true,
+            meeting_end: String::new(),
+            meeting_audio_days: 30,
         }
     }
 }
@@ -350,6 +392,12 @@ impl Settings {
 
     /// Fixes values older builds wrote, and keeps settings off providers this build hides.
     pub(crate) fn migrate(&mut self) {
+        // Upgraders keep what they had: "ask" stays asking, "auto" stops.
+        match std::mem::take(&mut self.meeting_end).as_str() {
+            "ask" => self.meeting_auto_stop = false,
+            "auto" => self.meeting_auto_stop = true,
+            _ => {}
+        }
         let old = std::mem::take(&mut self.language);
         if self.languages.is_empty() && !matches!(old.as_str(), "" | "auto") {
             self.languages = vec![old];
@@ -386,6 +434,9 @@ impl Settings {
         }
         if !matches!(self.cleaner_memory.as_str(), "save" | "ready") {
             self.cleaner_memory = "ready".into();
+        }
+        if !matches!(self.meeting_audio_days, 0 | 7 | 30) {
+            self.meeting_audio_days = 30;
         }
         // No Echotype Cloud in this build: its users land on this Mac's own models, on Automatic.
         if !CLOUD && self.stt.provider == "cloud" {
@@ -736,7 +787,9 @@ mod tests {
         assert_eq!(s.cleanup.style, "default");
         assert_eq!(s.local_api, LocalApi { enabled: false, port: 7811 });
         assert!(!s.onboarded);
-        assert!(s.detect_meetings && s.meeting_end == "ask", "calls are offered, never recorded unasked");
+        assert!(s.detect_meetings && s.call_start == CallStart::default() && s.call_start.zoom == "ask", "calls are offered, never recorded unasked");
+        assert!(s.meeting_auto_stop);
+        assert_eq!(s.meeting_audio_days, 30);
     }
 
     #[test]
@@ -779,6 +832,22 @@ mod tests {
         assert!(!s.cleanup.match_app && s.cleanup.app_styles.is_empty(), "upgraders keep one style everywhere");
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn the_old_call_end_choice_carries_over() {
+        let load = |j: &str| {
+            let mut s: Settings = serde_json::from_str(j).unwrap();
+            s.migrate();
+            s
+        };
+        assert!(!load(r#"{"meeting_end":"ask"}"#).meeting_auto_stop, "upgraders who were asked are still asked");
+        assert!(load(r#"{"meeting_end":"auto","meeting_auto_stop":false}"#).meeting_auto_stop);
+        let fresh = load("{}");
+        assert!(fresh.meeting_auto_stop && fresh.call_start == CallStart::default(), "new installs stop with the call, ask per app");
+        assert!(!serde_json::to_string(&fresh).unwrap().contains("meeting_end"), "the old field is not written back");
+        let saved = load(r#"{"meeting_auto_stop":false,"call_start":{"zoom":"start"}}"#);
+        assert!(!saved.meeting_auto_stop && saved.call_start.zoom == "start" && saved.call_start.teams == "ask", "a saved choice survives the next load");
     }
 
     #[test]

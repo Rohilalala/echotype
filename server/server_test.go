@@ -968,3 +968,65 @@ func TestPages(t *testing.T) {
 		t.Error("free tier missing from landing page")
 	}
 }
+
+// ---------- telemetry ----------
+
+const batch = `{"install_id":"0123456789abcdef0123456789abcdef","version":"0.1.0","os":"macos","arch":"aarch64",
+	"days":[{"date":"2026-10-11","dictations":3,"words":42,"failures":{"no_speech":1},"speech_ms_median":600,"cleanup_ms_median":null,
+		"speech_provider":"local","speech_model":"tiny.en","cleanup_provider":"off","cleanup_model":"","meetings_started":1,"meetings_finished":1}],
+	"crashes":[{"version":"0.1.0","os":"macos","arch":"aarch64","message":"boom at src/lib.rs:1","backtrace":"0: echotype::run"}]}`
+
+func TestTelemetryStoresABatch(t *testing.T) {
+	x := newHarness(t, nil)
+	for range 2 { // a resend after a lost response replaces the day
+		if w := x.json("POST", "/v1/telemetry", batch); w.Code != 204 {
+			t.Fatalf("%d %s", w.Code, w.Body)
+		}
+	}
+	var days, crashes int
+	var data string
+	x.s.db.QueryRow(`SELECT COUNT(*), MAX(data) FROM telemetry_days WHERE install_id = '0123456789abcdef0123456789abcdef' AND date = '2026-10-11'`).Scan(&days, &data)
+	x.s.db.QueryRow(`SELECT COUNT(*) FROM telemetry_crashes`).Scan(&crashes)
+	if days != 1 || crashes != 2 || !strings.Contains(data, `"words":42`) {
+		t.Fatalf("days %d crashes %d data %s", days, crashes, data)
+	}
+}
+
+func TestTelemetryRejectsBadBatches(t *testing.T) {
+	x := newHarness(t, nil)
+	for name, body := range map[string]string{
+		"not json":      `{"install_id":`,
+		"unknown field": strings.Replace(batch, `"words":42`, `"words":42,"transcript":"hello"`, 1),
+		"bad id":        strings.Replace(batch, "0123456789abcdef0123456789abcdef", "someone@example.com", 1),
+		"bad date":      strings.Replace(batch, "2026-10-11", "yesterday", 1),
+	} {
+		if w := x.json("POST", "/v1/telemetry", body); w.Code != 400 {
+			t.Errorf("%s: %d %s", name, w.Code, w.Body)
+		}
+	}
+	big := strings.Replace(batch, "echotype::run", strings.Repeat("x", telemetryLimit), 1)
+	if w := x.json("POST", "/v1/telemetry", big); w.Code != 413 {
+		t.Errorf("oversized: %d", w.Code)
+	}
+	var n int
+	x.s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM telemetry_days) + (SELECT COUNT(*) FROM telemetry_crashes)`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("%d rows stored from bad batches", n)
+	}
+}
+
+func TestTelemetryRateLimitPerIP(t *testing.T) {
+	x := newHarness(t, nil)
+	for i := range 30 {
+		if w := x.json("POST", "/v1/telemetry", batch); w.Code != 204 {
+			t.Fatalf("request %d: %d", i, w.Code)
+		}
+	}
+	if w := x.json("POST", "/v1/telemetry", batch); w.Code != 429 {
+		t.Fatalf("31st: %d", w.Code)
+	}
+	x.now = x.now.Add(time.Hour + time.Second)
+	if w := x.json("POST", "/v1/telemetry", batch); w.Code != 204 {
+		t.Fatalf("after an hour: %d", w.Code)
+	}
+}
