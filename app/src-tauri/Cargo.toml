@@ -41,6 +41,9 @@ dirs = "6"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-updater = "2"
+# DOCX export (meeting.rs docx): already in Cargo.lock through tauri-plugin-updater; stored
+# entries only, so none of its compression features.
+zip = { version = "4", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # ponytail: whisper-rs 0.16 bundles whisper.cpp 1.8.3, whose Metal tensor-API probe fails on M5 GPUs

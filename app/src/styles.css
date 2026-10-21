@@ -459,6 +459,8 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .result.err p:not(.hint) { color: var(--bad); }
 .result .hint { color: var(--fg-2); font-size: 12px; margin-top: 2px; }
 .result .seg span { padding: 2px 9px; font-size: 12px; }
+.result-head select { width: auto; min-width: 0; flex: none; } /* Save as… beside Copy */
+.batch-head { padding: 0 4px 2px 0; } /* "Transcribing 4 files" above the queue */
 .working { color: var(--fg-2); }
 .working::after { content: ""; display: inline-block; width: 10px; height: 10px; margin-left: 8px; border: 1.5px solid var(--line-strong); border-top-color: var(--fg-2); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -1px; }
 @keyframes spin { to { transform: rotate(360deg); } }

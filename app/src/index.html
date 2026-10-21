@@ -49,8 +49,9 @@
         <div class="composer-body">
           <div class="drop-idle">
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5v8M4.75 7.25 8 10.5l3.25-3.25"/><path d="M2.75 10.5v1.25a1.75 1.75 0 0 0 1.75 1.75h7a1.75 1.75 0 0 0 1.75-1.75V10.5"/></svg>
-            <span><strong>Drop a voice note here</strong>
-              <span>.opus, .m4a, .mp3 or .wav. You get a clean transcript to copy.</span></span>
+            <span><strong>Drop voice notes or recordings here</strong>
+              <span>Audio or video, one file or many. You get a clean transcript to copy or save.</span></span>
+            <button class="btn quiet" id="pickFiles" type="button">Choose files…</button>
           </div>
           <div class="drop-live"><span class="meter" id="heroMeter" aria-hidden="true"></span></div>
         </div>
@@ -449,6 +450,16 @@
           <select data-bind="call_start.discord"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
         <label class="row"><span class="row-text"><span class="row-title">Other calls</span><span class="row-desc">WhatsApp, Skype, Signal, Telegram and the like, and any other browser tab using the microphone.</span></span>
           <select data-bind="call_start.other"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+      </div>
+
+      <h2 class="group-title">Files</h2>
+      <div class="group">
+        <div class="row"><span class="row-text"><span class="row-title">Watched folder</span><span class="row-desc" id="watchDesc"></span><span class="row-desc error" id="watchError" role="alert" hidden></span></span>
+          <span class="actions"><button class="btn" id="watchPick" type="button">Choose…</button><button class="btn quiet" id="watchOff" type="button">Stop watching</button></span></div>
+        <label class="row" id="watchFormatRow"><span class="row-text"><span class="row-title">Transcript format</span></span>
+          <select data-bind="watch_format"><option value="txt">Text (.txt)</option><option value="md">Markdown (.md)</option><option value="docx">Word (.docx)</option><option value="html">Web page (.html)</option><option value="srt">Subtitles (.srt)</option><option value="vtt">WebVTT (.vtt)</option></select></label>
+        <label class="row" id="watchSubRow"><span class="row-text"><span class="row-title">Save in a Transcripts folder</span><span class="row-desc">Inside the watched folder. Off, each transcript goes next to its recording.</span></span>
+          <input type="checkbox" class="switch" data-bind="watch_subfolder" /></label>
       </div>
 
       <h2 class="group-title">Appearance</h2>

@@ -276,7 +276,7 @@ function hintChips(m) {
   } }, dot(id), `${name(m, id)} is ${nm}?`));
 }
 
-const FORMATS = [['md', 'Markdown (.md)'], ['txt', 'Text (.txt)'], ['json', 'JSON (.json)'], ['srt', 'Subtitles (.srt)'], ['vtt', 'WebVTT (.vtt)']];
+const FORMATS = [['md', 'Markdown (.md)'], ['txt', 'Text (.txt)'], ['docx', 'Word (.docx)'], ['html', 'Web page (.html)'], ['json', 'JSON (.json)'], ['srt', 'Subtitles (.srt)'], ['vtt', 'WebVTT (.vtt)']];
 
 // Consecutive lines by one speaker form a turn: their name once, then each line as a bubble.
 function turns(segments) {

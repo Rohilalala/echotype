@@ -5,6 +5,7 @@ mod capture;
 mod cleanup;
 mod cloud;
 mod context;
+mod files;
 mod hotkey;
 mod learn;
 mod llm;
@@ -1666,24 +1667,12 @@ async fn clear_history(app: AppHandle) -> R<()> {
     settings::clear_history()
 }
 
-#[tauri::command]
-async fn transcribe_file(app: AppHandle, path: String) -> R<cleanup::Output> {
-    let s = current_settings(&app);
-    tauri::async_runtime::spawn_blocking(move || {
-        let out = transcribe_path(&s, &path)?;
-        record_stats(&app, &s, stats::Source::File, &out.text, 0);
-        record_history(&s, &out, None);
-        Ok(out)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-fn transcribe_path(s: &Settings, path: &str) -> R<cleanup::Output> {
+/// A file's transcript and its length in seconds (files.rs queue and watched folder, CLI).
+fn transcribe_path(s: &Settings, path: &str) -> R<(cleanup::Output, f32)> {
     let bytes = std::fs::read(path).map_err(|e| format!("Could not read {path}: {e}"))?;
     let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str());
     let pcm = audio::decode(bytes, ext)?;
-    cleanup::run(s, &pcm, false, || {})
+    Ok((cleanup::run(s, &pcm, false, || {})?, pcm.len() as f32 / audio::RATE as f32))
 }
 
 /// The Stats page: totals, speeds, streaks and a grid of `range` weeks (default a year).
@@ -2488,6 +2477,7 @@ pub fn run() {
                     Err(e) => eprintln!("echotype: could not import history into stats: {e}"),
                 });
             }
+            files::start(app.handle()); // dropped files' queue and the watched folder
             if !s.onboarded {
                 show_main(app.handle());
             }
@@ -2587,7 +2577,10 @@ pub fn run() {
             clear_history,
             get_stats,
             clear_stats,
-            transcribe_file,
+            files::transcribe_files,
+            files::cancel_files,
+            files::file_save,
+            files::pick_files,
             get_system_info,
             local_api_status,
             toggle_dictation,
@@ -2709,7 +2702,7 @@ pub fn cli(args: &[String]) -> i32 {
         eprintln!("echotype: cleanup model {} ({}, {} tokens)", llm::cleaner(&s).id, llm::memory(&s), llm::context(&s));
     }
     let t = std::time::Instant::now();
-    let result = transcribe_path(&s, &file);
+    let result = transcribe_path(&s, &file).map(|(out, _)| out);
     stt::unload();
     llm::stop();
     let (out, err, code) = cli_report(result, t.elapsed().as_millis());

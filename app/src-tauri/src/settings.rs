@@ -189,6 +189,12 @@ pub struct Settings {
     /// A dictation's audio (play and Re-run in History) is deleted this many days after it was
     /// recorded (7, 14 or 30); 0 keeps none. Only while history is on (prune_clips).
     pub clip_days: u32,
+    /// Settings → Files: new recordings in this folder are transcribed (files.rs); empty is off.
+    pub watch_folder: String,
+    /// The watched folder's transcripts: "txt" | "md" | "srt" | "vtt" | "docx".
+    pub watch_format: String,
+    /// Into a "Transcripts" folder inside the watched one rather than beside each recording.
+    pub watch_subfolder: bool,
 }
 
 /// Per calling app: "ask" (offer notes) | "start" (start them) | "never". calls::choice maps a call to its field.
@@ -439,6 +445,9 @@ impl Default for Settings {
             meeting_end: String::new(),
             meeting_audio_days: 30,
             clip_days: 14,
+            watch_folder: String::new(),
+            watch_format: "txt".into(),
+            watch_subfolder: false,
         }
     }
 }
