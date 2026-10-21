@@ -280,3 +280,4 @@ section { padding: 140px 0; }
   background: radial-gradient(circle, rgba(242, 244, 255, 0.55) 1.1px, transparent 1.4px) 0 0 / 9px 9px;
   -webkit-background-clip: text; background-clip: text;
 }
+@media (hover: none) { .try { display: none; } }
