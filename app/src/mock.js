@@ -348,7 +348,32 @@ Object.assign(commands, {
   preview_sounds: () => null,
   show_pill_demo: () => null,
   meeting_save: () => '/Users/you/Downloads/launch-review.md',
+  // Notes (notes.rs), in memory: ?notes=empty starts with none. Versions as notes.rs keeps them,
+  // simplified: every save with keep, or one that cuts more than half, keeps the text before.
+  notes_list: () => structuredClone(noteList.sort((a, b) => b.updated_ms - a.updated_ms)),
+  notes_save: ({ id, text, keep }) => {
+    let n = noteList.find(x => x.id === id);
+    if (!n) noteList.push(n = { id: Math.max(Date.now(), ...noteList.map(x => x.id + 1)), text: '', updated_ms: 0, versions: [] });
+    if (n.text.trim() && (keep || text.length * 2 < n.text.length)) n.versions = [...n.versions, { ms: Date.now(), text: n.text }].slice(-20);
+    Object.assign(n, { text, updated_ms: Date.now() });
+    return structuredClone(n);
+  },
+  notes_delete: ({ id }) => { noteList = noteList.filter(n => n.id !== id); return null; },
+  notes_export: () => '/Users/you/Downloads/launch-plan.md',
+  notes_target: ({ selection }) => { noteTarget = selection; return null; },
 });
+
+// Notes: sample data, and __mock.dictate(text) for what lib.rs does with a finished dictation:
+// into the focused note editor (note-insert), otherwise copied as from Echotype's own window.
+let noteTarget = null;
+let noteList = q.get('notes') === 'empty' ? [] : [
+  { id: now - 86_400_000, text: 'Launch plan\n\n- Record the demo video\n- Write the release notes\n- Ask Midhun for the App Store screenshots', updated_ms: now - 3_600_000,
+    versions: [{ ms: now - 7_200_000, text: 'Launch plan\n\n- Record the demo video' }, { ms: now - 5_400_000, text: 'Launch plan\n\n- Record the demo video\n- Write the release notes' }] },
+  { id: now - 172_800_000, text: 'Ideas for the onboarding film\nThe dots fall into the pill.', updated_ms: now - 90_000_000, versions: [] },
+  { id: now - 259_200_000, text: 'Groceries: oat milk, eggs, coffee', updated_ms: now - 200_000_000, versions: [] },
+];
+const dictate = text => noteTarget != null ? (emit('note-insert', text), emit('dictation-state', { state: 'done', text }))
+  : emit('dictation-state', { state: 'done', text, copied: true });
 
 const api = {
   core: {
@@ -366,7 +391,7 @@ const api = {
   },
 };
 window.__TAURI__ = api;
-window.__mock = { emit, commands };
+window.__mock = { emit, commands, dictate };
 
 // Say so on screen: everything in this preview is sample data.
 const sidebar = document.querySelector('.sidebar');

@@ -11,6 +11,7 @@ mod llm;
 mod mcp;
 mod meeting;
 mod music;
+mod notes;
 mod notices;
 mod pill;
 mod platform;
@@ -107,6 +108,8 @@ struct AppState {
     downloads: Mutex<HashMap<String, f64>>,
     /// The mic is open, so paste-last must not replace the recording pill with its notice.
     recording: AtomicBool,
+    /// The note editor has focus, with its selection ("" for none); notes.js sends it (notes_target).
+    note: Mutex<Option<String>>,
 }
 
 enum Cmd {
@@ -755,6 +758,12 @@ fn main_window_focused(app: &AppHandle) -> bool {
     app.get_webview_window("main").is_some_and(|w| w.is_focused().unwrap_or(false))
 }
 
+/// The note editor's selection when it has focus in Echotype's own focused window: dictation and
+/// Command Mode go into the note (deliver), not to the clipboard.
+fn note_target(app: &AppHandle) -> Option<String> {
+    lock(&state(app).note).clone().filter(|_| main_window_focused(app))
+}
+
 /// Whether a finished dictation is pasted into the app in front rather than copied: never into
 /// Echotype's own window, and during onboarding only from its real-app step (4) on, so practice
 /// runs land in the practice field.
@@ -811,18 +820,19 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
                 *lock(&state(&app).last_output) = Some(out.text.clone());
                 *lock(&state(&app).last_cleaned) = out.cleaned.clone();
                 *lock(&state(&app).last_raw) = Some(out.raw.clone());
-                let paste = paste && pastes(&s, main_window_focused(&app));
+                let note = paste && note_target(&app).is_some();
+                let paste = note || paste && pastes(&s, main_window_focused(&app));
                 let warning = out.warning.clone().or(clip.warning);
                 let chip = chip(clip.quality, out.no_cleanup && out.warning.is_none());
                 // Nothing focused takes text (the desktop, a list, Accessibility off): no ⌘V into nowhere.
-                let nowhere = paste && platform::paste_target() == platform::Target::Card;
+                let nowhere = paste && !note && platform::paste_target() == platform::Target::Card;
                 let res = deliver(&app, &s, &out.text, paste, nowhere);
                 // "Send it": Return only once the text is in the app.
-                if res.is_ok() && paste && out.send && rerun.is_none() && let Err(e) = platform::press_return(&app) {
+                if res.is_ok() && paste && !note && out.send && rerun.is_none() && let Err(e) = platform::press_return(&app) {
                     eprintln!("echotype: send it: {e}");
                 }
                 // A sent message has nothing left to correct.
-                if res.is_ok() && paste && !nowhere && !out.send && rerun.is_none() && s.learn_words {
+                if res.is_ok() && paste && !nowhere && !note && !out.send && rerun.is_none() && s.learn_words {
                     learn::watch(&app, out.text.clone());
                 }
                 // After the paste, not before: the disk writes took 15-20 ms off the time to text.
@@ -895,7 +905,11 @@ fn offer_language(app: &AppHandle, s: &Settings) {
 /// Pastes `text`, or copies it when `paste` is off. `nowhere`: nothing focused takes text.
 /// The error says whether the text is on the clipboard, as platform::paste does.
 fn deliver(app: &AppHandle, s: &Settings, text: &str, paste: bool, nowhere: bool) -> Result<(), (String, bool)> {
-    if nowhere && !platform::accessibility_granted() {
+    if paste && main_window_focused(app) {
+        // Only the note editor pastes into Echotype's own window (note_target): notes.js puts the
+        // text in at the cursor, with no ⌘V and the clipboard left alone.
+        app.emit_to("main", "note-insert", text).map_err(|e| (e.to_string(), false))
+    } else if nowhere && !platform::accessibility_granted() {
         // As before: on the clipboard, since there is no way to paste it.
         platform::copy(text).map_err(|e| (e, false)).and(Err(("Accessibility is off, so Echotype copied instead of pasting".into(), true)))
     } else if nowhere {
@@ -959,6 +973,10 @@ fn edit_error(e: String) -> DictationState {
 // ponytail: on the desktop ⌘C copies a selected file's name, which then reads as the selection;
 // the result only goes to the card. Skip the read when nothing has focus if that confuses anyone.
 fn edit_target(app: &AppHandle, s: &Settings) -> Result<(bool, bool, Option<String>), DictationState> {
+    // The note editor says what is selected; ⌘C into Echotype's own webview is not needed.
+    if let Some(sel) = note_target(app) {
+        return Ok((true, false, Some(sel).filter(|t| !t.trim().is_empty())));
+    }
     let paste = pastes(s, main_window_focused(app));
     let nowhere = paste && platform::paste_target() == platform::Target::Card;
     if !paste {
@@ -1314,6 +1332,22 @@ pub(crate) fn apply_theme(app: &AppHandle, s: &Settings) {
             let _ = w.set_theme(theme);
         }
     }
+}
+
+/// Tray → New note by voice: Notes on a new note (notes.js), and a hands-free dictation into it.
+fn new_note(app: &AppHandle) {
+    open_page(app, "notes");
+    let _ = app.emit_to("main", "note-new", ());
+    if !state(app).recording.load(Ordering::SeqCst) {
+        send(app, Cmd::Key(Ev::Toggle));
+    }
+}
+
+/// notes.js: the note editor got or lost focus, or its selection changed.
+#[tauri::command]
+async fn notes_target(app: AppHandle, selection: Option<String>) -> R<()> {
+    *lock(&state(&app).note) = selection;
+    Ok(())
 }
 
 /// Opens the settings window on `page` (pill menu, notice actions).
@@ -2225,8 +2259,9 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Echotype", true, None::<&str>)?;
     let toggle = MenuItem::with_id(app, "toggle", "Start/Stop dictation", true, None::<&str>)?;
     let meeting = MenuItem::with_id(app, "meeting", meeting::menu_label(), true, None::<&str>)?;
+    let note = MenuItem::with_id(app, "note", "New note by voice", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &toggle, &meeting, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &toggle, &meeting, &note, &quit])?;
     meeting::set_tray_item(meeting);
     // The idle pill is macOS-only, and so is its hide/show item; the pill loop sets its label.
     if cfg!(target_os = "macos") {
@@ -2240,6 +2275,7 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
         "toggle" => send(app, Cmd::Key(Ev::Toggle)),
         "pill" => pill::on_tray(app),
         "meeting" => meeting::toggle(app),
+        "note" => new_note(app),
         "quit" => app.exit(0),
         _ => {}
     });
@@ -2346,6 +2382,7 @@ pub fn run() {
                 last_app: Mutex::new(None),
                 downloads: Mutex::new(HashMap::new()),
                 recording: AtomicBool::new(false),
+                note: Mutex::new(None),
             });
             create_tray(app)?;
             apply_theme(app.handle(), &s);
@@ -2536,6 +2573,11 @@ pub fn run() {
             meeting::meeting_summarize,
             meeting::meeting_ask,
             meeting::meeting_window,
+            notes_target,
+            notes::notes_list,
+            notes::notes_save,
+            notes::notes_delete,
+            notes::notes_export,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Echotype");

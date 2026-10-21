@@ -80,6 +80,11 @@ const COMMANDS: &[&str] = &[
     "meeting_summarize",
     "meeting_ask",
     "meeting_window",
+    "notes_target",
+    "notes_list",
+    "notes_save",
+    "notes_delete",
+    "notes_export",
 ];
 
 fn main() {

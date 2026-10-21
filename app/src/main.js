@@ -2,6 +2,7 @@
 const preview = !window.__TAURI__;
 if (preview) await import('./mock.js'); // browser preview for design QA
 const meetingsPage = await import('./meetings.js');
+const notesPage = await import('./notes.js');
 const { h, copyText } = await import('./dom.js');
 const { createOrb } = await import('./orb.js'); // onboarding's orb
 
@@ -145,6 +146,7 @@ function go(page) {
   if (page === 'home') renderGreeting();
   if (page === 'history') renderHistory();
   if (page === 'meetings') meetingsPage.show();
+  if (page === 'notes') notesPage.show();
   if (page === 'settings') { refreshPerms(); refreshApi(); refreshStatus(); }
   if (page === 'account' || page === 'cleanup') refreshCloud(); // the account box moved to Account
   if (page === 'cleanup') { refreshLastApp(); refreshInstalled(); }
@@ -2386,6 +2388,7 @@ function renderObModel() {
 
 // ---------- events ----------
 meetingsPage.init({ $, h, invoke, listen, copyText });
+notesPage.init({ $, h, invoke, listen, copyText });
 listen('dictation-state', ({ payload }) => {
   dictation = payload;
   renderHero();

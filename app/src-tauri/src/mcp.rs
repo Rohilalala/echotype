@@ -1,9 +1,10 @@
 //! `echotype --mcp`: a read-only MCP server on stdin/stdout (JSON-RPC 2.0, one message a line), so
 //! Claude Desktop, Cursor and other AI apps can look through what Echotype keeps on this computer:
-//! dictation history, meeting notes, the Dictionary and usage stats. It reads the files itself, so
+//! dictation history, meeting notes, Notes, the Dictionary and usage stats. It reads the files itself, so
 //! the app need not be running, and it never writes them.
 
 use crate::meeting::{self, Meeting};
+use crate::notes;
 use crate::settings::{self, HistoryEntry, Settings};
 use crate::stats;
 use serde_json::{Value, json};
@@ -60,7 +61,7 @@ fn handle(dirs: &Dirs, line: &str) -> Option<Value> {
                 "protocolVersion": version,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "echotype", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Read-only access to Echotype, the user's voice dictation app: what they dictated (history), their meeting notes, their Dictionary and their usage stats.",
+                "instructions": "Read-only access to Echotype, the user's voice dictation app: what they dictated (history), their meeting notes, their Notes (a scratchpad), their Dictionary and their usage stats.",
             }))
         }
         "ping" => Ok(json!({})),
@@ -90,6 +91,7 @@ fn tools() -> Value {
         tool("recent_dictations", "The user's latest dictations with Echotype, newest first.", json!({ "limit": limit(10) }), &[]),
         tool("search_meetings", "Search the user's Echotype meeting notes (title, transcript and summary). Every word must appear. Returns meeting ids with the matching lines.", json!({ "query": text("The words to find.") }), &["query"]),
         tool("get_meeting_transcript", "One meeting's notes as Markdown: title, length, summary and the transcript by speaker.", json!({ "id": text("A meeting id from search_meetings.") }), &["id"]),
+        tool("search_notes", "Search the user's Echotype Notes (their scratchpad), newest edit first. Every word must appear (any case); an empty query lists them all.", json!({ "query": text("The words to find."), "limit": limit(20) }), &["query"]),
         tool("dictionary_words", "The user's Echotype Dictionary (names and terms they taught it) and their replacement rules.", json!({}), &[]),
         tool("stats", "The user's dictation stats: words today, this week and in total, dictations, speaking speed and streaks.", json!({}), &[]),
     ])
@@ -106,6 +108,7 @@ fn call(dirs: &Dirs, params: &Value) -> Result<Value, (i64, String)> {
         "recent_dictations" => Ok(json!(search_history(&dirs.data, "", limit(10)))),
         "search_meetings" => Ok(json!(search_meetings(&dirs.data, query()))),
         "get_meeting_transcript" => meeting_markdown(&dirs.data, args.get("id").and_then(Value::as_str).unwrap_or_default()).map(Value::String),
+        "search_notes" => search_notes(&dirs.data, query(), limit(20)),
         "dictionary_words" => Ok(dictionary(&dirs.config)),
         "stats" => Ok(usage(&dirs.data)),
         _ => return Err((-32602, format!("Unknown tool: {name}"))),
@@ -167,6 +170,12 @@ fn meeting_markdown(data: &Path, id: &str) -> Result<String, String> {
     let bytes = std::fs::read(data.join("meetings").join(id).join("meeting.json")).ok().filter(|_| ok).ok_or_else(|| format!("No meeting with id {id:?}. Use search_meetings to find one."))?;
     let m: Meeting = serde_json::from_slice(&bytes).map_err(|e| format!("That meeting's file is damaged: {e}"))?;
     Ok(format!("{}\nStarted {}\n", meeting::markdown(&m).trim_end(), when(m.started_ms)))
+}
+
+fn search_notes(data: &Path, query: &str, limit: usize) -> Result<Value, String> {
+    let all = notes::load(data)?;
+    let hits = notes::search(&all, query).into_iter().take(limit);
+    Ok(json!(hits.map(|n| json!({ "title": notes::title(&n.text), "edited": when(n.updated_ms), "text": n.text })).collect::<Vec<_>>()))
 }
 
 fn dictionary(config: &Path) -> Value {
@@ -239,7 +248,7 @@ mod tests {
         assert!(init["result"]["capabilities"]["tools"].is_object());
         assert_eq!(rpc(&d, "initialize", json!({ "protocolVersion": "1999-01-01" }))["result"]["protocolVersion"], PROTOCOLS[0], "otherwise ours");
         let names: Vec<String> = rpc(&d, "tools/list", json!({}))["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-        assert_eq!(names, ["search_history", "recent_dictations", "search_meetings", "get_meeting_transcript", "dictionary_words", "stats"]);
+        assert_eq!(names, ["search_history", "recent_dictations", "search_meetings", "get_meeting_transcript", "search_notes", "dictionary_words", "stats"]);
         assert_eq!(rpc(&d, "ping", json!({}))["result"], json!({}));
         assert_eq!(rpc(&d, "resources/list", json!({}))["error"]["code"], -32601);
         assert_eq!(rpc(&d, "tools/call", json!({ "name": "delete_history" }))["error"]["code"], -32602);
@@ -280,6 +289,20 @@ mod tests {
         for bad in ["nope", "../meetings/2026-10-20-090000-standup", ""] {
             assert!(tool(&d, "get_meeting_transcript", json!({ "id": bad })).1, "{bad:?} is a tool error");
         }
+    }
+
+    #[test]
+    fn notes_tool_searches_without_writing() {
+        let d = scratch("notes");
+        assert_eq!(tool(&d, "search_notes", json!({ "query": "" })), (json!([]), false), "no notes.json: none");
+        notes::save(&d.data, None, "Launch plan\nShip Friday", false, 1000).unwrap();
+        notes::save(&d.data, None, "Groceries", false, 2000).unwrap();
+        let before = std::fs::read(d.data.join("notes.json")).unwrap();
+        let (hits, err) = tool(&d, "search_notes", json!({ "query": "FRIDAY" }));
+        assert!(!err);
+        assert_eq!((hits[0]["title"].as_str(), hits[0]["text"].as_str(), hits.as_array().unwrap().len()), (Some("Launch plan"), Some("Launch plan\nShip Friday"), 1));
+        assert_eq!(tool(&d, "search_notes", json!({ "query": "", "limit": 1 })).0[0]["title"], "Groceries", "newest edit first");
+        assert_eq!(std::fs::read(d.data.join("notes.json")).unwrap(), before);
     }
 
     #[test]

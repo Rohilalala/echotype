@@ -1100,6 +1100,7 @@ pub fn menu(app: &AppHandle, mics: &[String], bar: Option<Bar>) -> tauri::Result
         // Only after the guard pasted the words as spoken.
         &MenuItem::with_id(app, "pill-cleaned", "Copy cleaned version", lock(&state(app).last_cleaned).is_some(), None::<&str>)?,
         &MenuItem::with_id(app, "pill-meeting", crate::meeting::menu_label(), true, None::<&str>)?,
+        &MenuItem::with_id(app, "pill-note", "New note by voice", true, None::<&str>)?,
         &PredefinedMenuItem::separator(app)?,
     ])?;
     if bar.is_none() {
@@ -1135,6 +1136,7 @@ pub fn on_menu(app: &AppHandle, id: &str) {
                 Err(e) => crate::hint(e, None),
             }),
             "pill-meeting" => crate::meeting::toggle(app),
+            "pill-note" => crate::new_note(app),
             "pill-settings" => crate::open_page(app, "settings"),
             "pill-hide" => hide_for_hour(app),
             _ => {}

@@ -83,6 +83,11 @@
     "allow-meeting-save",
     "allow-meeting-summarize",
     "allow-meeting-ask",
-    "allow-meeting-window"
+    "allow-meeting-window",
+    "allow-notes-target",
+    "allow-notes-list",
+    "allow-notes-save",
+    "allow-notes-delete",
+    "allow-notes-export"
   ]
 }
