@@ -1,10 +1,13 @@
 <!DOCTYPE html>
 <!-- Supabase Auth email ("Magic Link" and "Confirm signup" templates), sent through Resend.
-     {{ .Token }} is the 6-digit code. Push changes with the management API (PATCH
+     {{ .Token }} is the 6-digit code; its last digit picks one of ten lines, so each email reads
+     a little differently. Push changes with the management API (PATCH
      /v1/projects/<ref>/config/auth: mailer_templates_magic_link_content and _confirmation_content).
-     Tables, bgcolor and inline styles because email apps ignore <style> blocks and modern layout.
-     orb.gif is the app's own onboarding orb (app/src/orb.js) recorded frame by frame: sphere,
-     globe, ring, morph, thinking, check, ball. Frame one is the sphere, which Outlook shows still. -->
+     Tables, bgcolor and inline styles because email apps ignore modern layout. The Gmail app in
+     dark mode inverts colours: it leaves background-image alone (the black stays black), and the
+     .gm-screen/.gm-diff blend pair turns the white text it darkened back to white. `u + .body`
+     only matches inside Gmail, which wraps <body> after an empty <u>.
+     orb.gif is the app's own onboarding orb (app/src/orb.js) recorded by record-orb.html. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -12,48 +15,80 @@
 <meta name="color-scheme" content="dark">
 <meta name="supported-color-schemes" content="dark">
 <title>Your Echotype sign-in code</title>
+<style>
+  u + .body .gm-screen { background:#000000; mix-blend-mode:screen; }
+  u + .body .gm-diff { background:#000000; mix-blend-mode:difference; }
+</style>
 </head>
-<body bgcolor="#000000" style="margin:0;padding:0;background-color:#000000;-webkit-text-size-adjust:100%;">
+<body class="body" bgcolor="#000000" style="margin:0;padding:0;background-color:#000000;background-image:linear-gradient(#000000,#000000);-webkit-text-size-adjust:100%;">
 <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:#000000;">{{ .Token }} is your Echotype sign-in code.&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;</div>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#000000" style="background-color:#000000;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#000000" style="background-color:#000000;background-image:linear-gradient(#000000,#000000);">
   <tr>
-    <td align="center" bgcolor="#000000" style="background-color:#000000;padding:40px 24px 56px 24px;">
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:420px;">
+    <td align="center" bgcolor="#000000" style="background-color:#000000;background-image:linear-gradient(#000000,#000000);padding:44px 24px 56px 24px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:440px;">
+
+        <!-- Logo and name -->
         <tr>
-          <td align="center" style="padding:0;">
-            <img src="https://pub-da62fbe34de644598313554b0a5ccc51.r2.dev/email/orb.gif" width="240" height="240" alt="" style="display:block;width:240px;height:240px;border:0;outline:none;">
+          <td align="left" style="padding:0;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td style="padding:0 12px 0 0;vertical-align:middle;">
+                  <img src="https://pub-da62fbe34de644598313554b0a5ccc51.r2.dev/email/logo.png" width="36" height="36" alt="" style="display:block;width:36px;height:36px;border:0;border-radius:9px;">
+                </td>
+                <td style="vertical-align:middle;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:20px;line-height:24px;font-weight:600;letter-spacing:-0.3px;color:#ffffff;">
+                  <div class="gm-screen"><div class="gm-diff">Echotype</div></div>
+                </td>
+              </tr>
+            </table>
           </td>
         </tr>
+
+        <!-- Headline -->
         <tr>
-          <td align="center" style="padding:28px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:16px;line-height:24px;color:#a1a1aa;">
-            Here's your code to sign in to Echotype.
+          <td align="left" style="padding:48px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:32px;line-height:38px;font-weight:600;letter-spacing:-0.6px;color:#ffffff;">
+            <div class="gm-screen"><div class="gm-diff">Here's your code to sign in to Echotype.</div></div>
           </td>
         </tr>
+
+        <!-- The code -->
         <tr>
-          <td align="center" style="padding:24px 0 0 0;">
+          <td style="padding:28px 0 0 0;">
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
               <tr>
-                <td align="center" bgcolor="#141416" style="background-color:#141416;border:1px solid #26262b;border-radius:16px;padding:22px 12px 22px 28px;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:44px;line-height:52px;font-weight:300;letter-spacing:16px;color:#ffffff;font-variant-numeric:tabular-nums;">
-                  <span style="color:#ffffff;text-decoration:none;">{{ .Token }}</span>
+                <td align="center" bgcolor="#161618" style="background-color:#161618;background-image:linear-gradient(#161618,#161618);border:1px solid #2a2a2f;border-radius:16px;padding:24px 12px 24px 28px;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:44px;line-height:52px;font-weight:300;letter-spacing:16px;color:#ffffff;font-variant-numeric:tabular-nums;">
+                  <div class="gm-screen"><div class="gm-diff">{{ .Token }}</div></div>
                 </td>
               </tr>
             </table>
           </td>
         </tr>
         <tr>
-          <td align="center" style="padding:20px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:14px;line-height:22px;color:#71717a;">
-            It works for the next 10 minutes.
+          <td align="left" style="padding:14px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:14px;line-height:22px;color:#8e8e96;">
+            It works for the next 10 minutes. If you didn't ask for it, ignore this email: nobody can sign in without the code.
           </td>
         </tr>
+
+        <!-- The orb and today's line -->
         <tr>
-          <td align="center" style="padding:52px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:13px;line-height:20px;color:#71717a;">
-            Didn't ask for this? You can ignore it.<br>Nobody can sign in without the code.
+          <td style="padding:48px 0 0 0;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #1f1f23;">
+              <tr>
+                <td width="96" style="padding:28px 20px 0 0;vertical-align:middle;">
+                  <img src="https://pub-da62fbe34de644598313554b0a5ccc51.r2.dev/email/orb.gif" width="96" height="96" alt="" style="display:block;width:96px;height:96px;border:0;">
+                </td>
+                <td style="padding:28px 0 0 0;vertical-align:middle;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:20px;line-height:27px;font-weight:500;letter-spacing:-0.2px;color:#ffffff;">
+                  <div class="gm-screen"><div class="gm-diff">{{ $d := slice .Token 5 6 }}{{ if eq $d "0" }}Speak your thoughts out. Let Echotype do the rest.{{ else if eq $d "1" }}Talk the way you think. Echotype types it clean.{{ else if eq $d "2" }}Your voice, typed. Nothing leaves your Mac.{{ else if eq $d "3" }}Say it once. Echotype gets it down.{{ else if eq $d "4" }}Think out loud. Echotype keeps up.{{ else if eq $d "5" }}Less typing, more thinking.{{ else if eq $d "6" }}Ramble freely. Echotype tidies up.{{ else if eq $d "7" }}Every word you say stays on your Mac.{{ else if eq $d "8" }}Your ideas move faster than your fingers. Now your writing does too.{{ else }}Hold a key, say it, done.{{ end }}</div></div>
+                </td>
+              </tr>
+            </table>
           </td>
         </tr>
+
+        <!-- Footer -->
         <tr>
-          <td align="center" style="padding:28px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:13px;line-height:20px;color:#52525b;">
-            Echotype, dictation that stays on your Mac.<br>
-            <a href="https://tryechotype.tech" style="color:#71717a;text-decoration:underline;">tryechotype.tech</a>
+          <td align="left" style="padding:48px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:12px;line-height:18px;color:#5c5c66;">
+            Echotype is dictation that stays on your Mac.<br>
+            <a href="https://tryechotype.tech" style="color:#8e8e96;text-decoration:underline;">tryechotype.tech</a>
           </td>
         </tr>
       </table>
