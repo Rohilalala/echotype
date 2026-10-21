@@ -69,6 +69,7 @@ const COMMANDS: &[&str] = &[
     "meeting_status",
     "meeting_list",
     "meeting_get",
+    "meeting_search",
     "meeting_rename_speaker",
     "meeting_delete",
     "meeting_export",

@@ -98,7 +98,7 @@ function bindAll() {
     const text = el.tagName === 'TEXTAREA' || ['text', 'url', 'password', 'number'].includes(el.type);
     el.addEventListener(text ? 'input' : 'change', () => {
       if (el.type === 'number' && !el.checkValidity()) return;
-      let v = el.type === 'checkbox' ? el.checked : ['number', 'range'].includes(el.type) ? Number(el.value) : el.value;
+      let v = el.type === 'checkbox' ? el.checked : ['number', 'range'].includes(el.type) || 'num' in el.dataset ? Number(el.value) : el.value;
       if ('null' in el.dataset && v === '') v = null;
       set(p, v);
       text ? saveSoon() : save();

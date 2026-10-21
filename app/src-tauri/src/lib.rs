@@ -1897,6 +1897,13 @@ pub fn run() {
                 });
             }
             calls::run(app.handle().clone());
+            // Old meeting audio goes at start, then daily (Settings → Keep meeting audio).
+            // ponytail: thread::sleep stops while the Mac sleeps, so "daily" can stretch; launches catch up.
+            let h = app.handle().clone();
+            std::thread::spawn(move || loop {
+                meeting::prune_audio(current_settings(&h).meeting_audio_days);
+                std::thread::sleep(Duration::from_secs(86_400));
+            });
             std::thread::spawn(move || {
                 if s.stt.provider == "local" {
                     let _ = speakers::ensure_vad(); // for installs from before dictation used it
@@ -1988,6 +1995,7 @@ pub fn run() {
             meeting::meeting_status,
             meeting::meeting_list,
             meeting::meeting_get,
+            meeting::meeting_search,
             meeting::meeting_rename_speaker,
             meeting::meeting_delete,
             meeting::meeting_export,
