@@ -177,6 +177,9 @@ pub struct Settings {
     /// Meeting audio is deleted this many days after the meeting ends (7 or 30); 0 keeps it.
     /// The transcript, speakers and summary stay either way (meeting.rs prune_audio).
     pub meeting_audio_days: u32,
+    /// A dictation's audio (play and Re-run in History) is deleted this many days after it was
+    /// recorded (7, 14 or 30); 0 keeps none. Only while history is on (prune_clips).
+    pub clip_days: u32,
 }
 
 /// Per calling app: "ask" (offer notes) | "start" (start them) | "never". calls::choice maps a call to its field.
@@ -404,6 +407,7 @@ impl Default for Settings {
             meeting_auto_stop: true,
             meeting_end: String::new(),
             meeting_audio_days: 30,
+            clip_days: 14,
         }
     }
 }
@@ -534,6 +538,9 @@ impl Settings {
         }
         if !matches!(self.meeting_audio_days, 0 | 7 | 30) {
             self.meeting_audio_days = 30;
+        }
+        if !matches!(self.clip_days, 0 | 7 | 14 | 30) {
+            self.clip_days = 14;
         }
         // No Echotype Cloud in this build: its users land on this Mac's own models, on Automatic.
         if !CLOUD && self.stt.provider == "cloud" {
@@ -746,6 +753,9 @@ pub struct HistoryEntry {
     /// The text before the first Re-run from History, so the user can go back to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original: Option<String>,
+    /// Audio from a dictation the app quit or crashed during (recover): no text until it is transcribed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recovered: bool,
 }
 
 fn history_path() -> PathBuf {
@@ -793,7 +803,8 @@ pub fn rerun_history(new: &HistoryEntry) -> Result<(), String> {
 }
 
 fn rerun_history_in(path: &Path, new: &HistoryEntry) -> Result<(), String> {
-    edit_history_in(path, new.ts, |e| *e = HistoryEntry { original: e.original.take().or_else(|| Some(e.text.clone())), ..new.clone() }).map(drop)
+    // A recovered dictation had no text to go back to.
+    edit_history_in(path, new.ts, |e| *e = HistoryEntry { original: e.original.take().or_else(|| Some(e.text.clone()).filter(|t| !t.is_empty())), ..new.clone() }).map(drop)
 }
 
 /// Changes the entry recorded at `ts` and returns it as it was.
@@ -828,10 +839,12 @@ pub fn clear_history() -> Result<(), String> {
     }
 }
 
-// ---------- the audio of recent dictations, for Re-run in History ----------
+// ---------- the audio of recent dictations, for play and Re-run in History ----------
 
-/// How many dictations keep their audio (16 kHz 16-bit WAV, about 1 MB a 30 s dictation).
-const CLIPS_KEPT: usize = 20;
+/// At most this many dictations keep their audio (16 kHz 16-bit WAV, about 320 KB a 10 s
+/// dictation), however recent: the History page lists 200.
+const CLIPS_KEPT: usize = 200;
+const DAY_MS: u64 = 86_400_000;
 
 fn clips_dir() -> PathBuf {
     data_dir().join("clips")
@@ -847,14 +860,15 @@ pub fn save_clip(ts: u64, wav: &[u8]) -> Result<(), String> {
     save_clip_in(&clips_dir(), ts, wav)
 }
 
+/// Every kept clip in `dir` as (ts, path); a recording in progress (`<ts>.part.wav`) is not one.
+fn clips_in(dir: &Path) -> Vec<(u64, PathBuf)> {
+    std::fs::read_dir(dir).map(|rd| rd.filter_map(|f| f.ok().map(|f| f.path())).filter_map(|p| Some((p.file_stem()?.to_str()?.parse().ok()?, p))).collect()).unwrap_or_default()
+}
+
 fn save_clip_in(dir: &Path, ts: u64, wav: &[u8]) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     std::fs::write(dir.join(format!("{ts}.wav")), wav).map_err(|e| e.to_string())?;
-    let mut kept: Vec<(u64, PathBuf)> = std::fs::read_dir(dir)
-        .map_err(|e| e.to_string())?
-        .filter_map(|f| f.ok().map(|f| f.path()))
-        .filter_map(|p| Some((p.file_stem()?.to_str()?.parse().ok()?, p)))
-        .collect();
+    let mut kept = clips_in(dir);
     kept.sort_unstable_by_key(|(ts, _)| std::cmp::Reverse(*ts));
     for (_, p) in kept.iter().skip(CLIPS_KEPT) {
         let _ = std::fs::remove_file(p);
@@ -862,9 +876,64 @@ fn save_clip_in(dir: &Path, ts: u64, wav: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// The ts of every entry whose audio is kept (History shows a play button for them).
+pub fn kept_clips() -> Vec<u64> {
+    clips_in(&clips_dir()).into_iter().map(|(ts, _)| ts).collect()
+}
+
+/// Deletes the audio of dictations recorded more than `days` ago (Settings → Keep dictation
+/// audio); 0 deletes all of it. The entries and their text stay.
+pub fn prune_clips(days: u32) {
+    prune_clips_in(&clips_dir(), days, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64));
+}
+
+fn prune_clips_in(dir: &Path, days: u32, now_ms: u64) {
+    for (ts, p) in clips_in(dir) {
+        if now_ms.saturating_sub(ts) > u64::from(days) * DAY_MS {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
 /// Every kept clip: history was cleared or switched off.
 pub fn clear_clips() {
     let _ = std::fs::remove_dir_all(clips_dir());
+}
+
+// ---------- recovery: a dictation the app quit or crashed during ----------
+
+/// Where recording `ts` is written while it goes (lib.rs Spool); deleted once it is transcribed.
+pub fn recording_path(ts: u64) -> PathBuf {
+    clips_dir().join(format!("{ts}.part.wav"))
+}
+
+/// Under 0.3 s of audio (WAV header + 16-bit samples) is nothing to transcribe.
+const MIN_RECOVERED_BYTES: u64 = 44 + 2 * 16_000 * 3 / 10;
+
+/// At launch: each recording left behind becomes that entry's audio and a "Recovered dictation"
+/// in History, to transcribe from there. With `keep` off (history off, or no audio kept) they are
+/// deleted. Returns the entries added.
+pub fn recover(keep: bool) -> Vec<u64> {
+    recover_in(&clips_dir(), &history_path(), keep)
+}
+
+fn recover_in(dir: &Path, history: &Path, keep: bool) -> Vec<u64> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return vec![] };
+    let parts: Vec<(u64, PathBuf)> = rd.filter_map(|f| f.ok().map(|f| f.path())).filter_map(|p| Some((p.file_name()?.to_str()?.strip_suffix(".part.wav")?.parse().ok()?, p))).collect();
+    let mut out = vec![];
+    for (ts, part) in parts {
+        let big = std::fs::metadata(&part).is_ok_and(|m| m.len() >= MIN_RECOVERED_BYTES);
+        if !keep || !big || std::fs::rename(&part, dir.join(format!("{ts}.wav"))).is_err() {
+            let _ = std::fs::remove_file(&part);
+            continue;
+        }
+        let entry = HistoryEntry { ts, raw: String::new(), text: String::new(), stt_ms: 0, cleanup_ms: 0, stt_provider: String::new(), cleanup_provider: None, no_cleanup: false, cleaned: None, original: None, recovered: true };
+        match append_history_to(history, &entry) {
+            Ok(()) => out.push(ts),
+            Err(e) => eprintln!("echotype: could not add a recovered dictation to history: {e}"),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1121,7 +1190,7 @@ mod tests {
                 let path = path.clone();
                 std::thread::spawn(move || {
                     for i in 0..25u64 {
-                        let e = HistoryEntry { ts: t * 1000 + i, raw: "r".into(), text: "t".into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false, cleaned: None, original: None };
+                        let e = HistoryEntry { ts: t * 1000 + i, raw: "r".into(), text: "t".into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false, cleaned: None, original: None, recovered: false };
                         append_history_to(&path, &e).unwrap();
                     }
                 })
@@ -1142,7 +1211,7 @@ mod tests {
     fn update_history_changes_only_that_entry() {
         let path = scratch("history-update").join("history.jsonl");
         for ts in 1..=3u64 {
-            let e = HistoryEntry { ts, cleaned: None, raw: format!("r{ts}"), text: format!("t{ts}"), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false, original: None };
+            let e = HistoryEntry { ts, cleaned: None, raw: format!("r{ts}"), text: format!("t{ts}"), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false, original: None, recovered: false };
             append_history_to(&path, &e).unwrap();
         }
         let before: Vec<String> = std::fs::read_to_string(&path).unwrap().lines().map(String::from).collect();
@@ -1158,7 +1227,7 @@ mod tests {
     #[test]
     fn a_rerun_replaces_the_entry_and_keeps_its_first_text() {
         let path = scratch("history-rerun").join("history.jsonl");
-        let e = |ts, text: &str| HistoryEntry { ts, raw: "r".into(), text: text.into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "local:tiny.en".into(), cleanup_provider: None, no_cleanup: false, cleaned: None, original: None };
+        let e = |ts, text: &str| HistoryEntry { ts, raw: "r".into(), text: text.into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "local:tiny.en".into(), cleanup_provider: None, no_cleanup: false, cleaned: None, original: None, recovered: false };
         for ts in 1..=2 {
             append_history_to(&path, &e(ts, "first")).unwrap();
         }
@@ -1175,14 +1244,62 @@ mod tests {
     #[test]
     fn only_the_newest_clips_are_kept() {
         let dir = scratch("clips");
-        for ts in (1..=25u64).rev().chain([30]) {
+        let n = CLIPS_KEPT as u64;
+        for ts in (1..=n + 5).rev().chain([n + 10]) {
             save_clip_in(&dir, ts * 1000, b"RIFF").unwrap();
         }
         std::fs::write(dir.join("notes.txt"), "").unwrap(); // not a clip: never counted or removed
-        let mut kept: Vec<u64> = std::fs::read_dir(&dir).unwrap().filter_map(|f| f.unwrap().path().file_stem()?.to_str()?.parse().ok()).collect();
+        std::fs::write(dir.join("1.part.wav"), "").unwrap(); // a recording in progress, likewise
+        let mut kept: Vec<u64> = clips_in(&dir).into_iter().map(|(ts, _)| ts).collect();
         kept.sort();
-        assert_eq!(kept, (7..=25).chain([30]).map(|t| t * 1000).collect::<Vec<_>>(), "the 20 newest by time, whatever order they were written in");
-        assert!(dir.join("notes.txt").exists());
+        assert_eq!(kept, (7..=n + 5).chain([n + 10]).map(|t| t * 1000).collect::<Vec<_>>(), "the newest by time, whatever order they were written in");
+        assert!(dir.join("notes.txt").exists() && dir.join("1.part.wav").exists());
+    }
+
+    #[test]
+    fn old_clips_go_after_their_days_and_zero_keeps_none() {
+        let dir = scratch("clips-prune");
+        let now = 100 * DAY_MS;
+        for days_ago in [1, 6, 8, 13, 15, 29, 31] {
+            save_clip_in(&dir, now - days_ago * DAY_MS, b"RIFF").unwrap();
+        }
+        std::fs::write(dir.join(format!("{}.part.wav", now - 40 * DAY_MS)), "").unwrap();
+        let left = |days| {
+            prune_clips_in(&dir, days, now);
+            let mut v: Vec<u64> = clips_in(&dir).into_iter().map(|(ts, _)| (now - ts) / DAY_MS).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(left(30), [1, 6, 8, 13, 15, 29]);
+        assert_eq!(left(14), [1, 6, 8, 13]);
+        assert_eq!(left(7), [1, 6]);
+        assert_eq!(left(0), Vec::<u64>::new(), "0: no audio kept");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "the recording in progress is not pruned");
+    }
+
+    #[test]
+    fn a_recording_left_behind_comes_back_as_a_recovered_entry() {
+        let dir = scratch("recover");
+        let history = dir.join("history.jsonl");
+        let clips = dir.join("clips");
+        std::fs::create_dir_all(&clips).unwrap();
+        let wav = crate::audio::wav_bytes(&vec![0.1; 16_000]);
+        std::fs::write(clips.join("5000.part.wav"), &wav).unwrap();
+        std::fs::write(clips.join("6000.part.wav"), crate::audio::wav_bytes(&[0.1; 100])).unwrap(); // under 0.3 s
+        std::fs::write(clips.join("7000.wav"), &wav).unwrap(); // an ordinary kept clip
+        assert_eq!(recover_in(&clips, &history, true), [5000]);
+        assert_eq!(std::fs::read(clips.join("5000.wav")).unwrap(), wav, "the audio becomes the entry's clip");
+        assert!(!clips.join("5000.part.wav").exists() && !clips.join("6000.part.wav").exists());
+        let e: HistoryEntry = serde_json::from_str(std::fs::read_to_string(&history).unwrap().trim()).unwrap();
+        assert!(e.recovered && e.ts == 5000 && e.text.is_empty());
+        assert!(recover_in(&clips, &history, true).is_empty(), "only once");
+        // Transcribing it replaces the entry; there was no text to keep as the original.
+        rerun_history_in(&history, &HistoryEntry { text: "Hello".into(), raw: "hello".into(), recovered: false, ..e }).unwrap();
+        let e: HistoryEntry = serde_json::from_str(std::fs::read_to_string(&history).unwrap().trim()).unwrap();
+        assert!(!e.recovered && e.text == "Hello" && e.original.is_none());
+        std::fs::write(clips.join("8000.part.wav"), &wav).unwrap();
+        assert!(recover_in(&clips, &history, false).is_empty() && !clips.join("8000.part.wav").exists(), "history off: deleted, not kept");
+        assert!(clips.join("7000.wav").exists());
     }
 
     #[test]

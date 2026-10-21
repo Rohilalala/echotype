@@ -375,6 +375,13 @@ pub fn view(weeks: u32) -> View {
     load(&path()).unwrap_or_default().view(day_of(now_ms(), &Local), weeks)
 }
 
+/// `view` of the stats.json at `path` that never writes: a damaged or missing file reads as empty
+/// (the MCP server, a process of its own).
+pub fn peek(path: &Path, weeks: u32) -> View {
+    let store = std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).map(without_impossible_bests).unwrap_or_default();
+    store.view(day_of(now_ms(), &Local), weeks)
+}
+
 /// Starts over from zero, without importing history again.
 pub fn clear() -> Result<(), String> {
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -544,7 +551,7 @@ mod tests {
     }
 
     fn entry(ts: u64, text: &str) -> HistoryEntry {
-        HistoryEntry { ts, raw: "secret raw words".into(), text: text.into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "local".into(), cleanup_provider: None, no_cleanup: false, cleaned: None, original: None }
+        HistoryEntry { ts, raw: "secret raw words".into(), text: text.into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "local".into(), cleanup_provider: None, no_cleanup: false, cleaned: None, original: None, recovered: false }
     }
 
     #[test]

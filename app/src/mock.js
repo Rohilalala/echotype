@@ -33,7 +33,7 @@ const settings = {
   ],
   auto_transform: q.has('translate') ? 'Translate to English' : '',
   autostart: !q.has('upgrade'), sounds: true, sound_pack: 'classic', pill_fade: true, orb_listen: 'listening', orb_think: 'working', orb_detail: 1, orb_color: '#eef1ff', pill_size: 1.5, ball_size: 1,
-  advanced: q.has('advanced'), cleaner_memory: 'ready', cleaner_idle_unload: false, cleaner_idle_minutes: 10, cleaner_context: 1024, greetings: true, detect_meetings: true, prefer_builtin_mic: true, pause_music: false, meeting_auto_stop: true, meeting_audio_days: 30,
+  advanced: q.has('advanced'), cleaner_memory: 'ready', cleaner_idle_unload: false, cleaner_idle_minutes: 10, cleaner_context: 1024, greetings: true, detect_meetings: true, prefer_builtin_mic: true, pause_music: false, meeting_auto_stop: true, meeting_audio_days: 30, clip_days: 14,
   call_start: { meet: 'ask', teams: 'ask', zoom: 'ask', slack: 'ask', facetime: 'ask', webex: 'ask', discord: 'ask', other: 'ask' }, cloud_moved: q.has('moved'),
   look: 'system',
   pill_idle: !q.has('pilloff'), pill_hidden_until: q.has('pillhidden') ? now + 42 * 60000 : 0, pill_in_recordings: false, live_text: true,
@@ -85,7 +85,18 @@ let history = [
   // noclip: recorded before Echotype kept audio, so it has no Re-run (only the newest 20 do).
   { ts: ago(60 * 26), raw: 'ship it after the tauri build passes on ci', text: 'ship it after the tauri build passes on ci', stt_ms: 350, cleanup_ms: 0, stt_provider: 'local', cleanup_provider: null, no_cleanup: true, noclip: true },
 ];
+// ?recovered: a dictation the app quit during (settings.rs recover), not transcribed yet.
+if (q.has('recovered')) history.unshift({ ts: ago(0.5), raw: '', text: '', stt_ms: 0, cleanup_ms: 0, stt_provider: '', cleanup_provider: null, recovered: true });
 const secrets = new Set(['llm:groq']);
+// A second of silence as a 16 kHz 16-bit WAV: the preview's stand-in for every kept recording.
+const silentWav = () => {
+  const n = 16000, b = new DataView(new ArrayBuffer(44 + n * 2));
+  [...'RIFF'].forEach((c, i) => b.setUint8(i, c.charCodeAt(0))); b.setUint32(4, 36 + n * 2, true);
+  [...'WAVEfmt '].forEach((c, i) => b.setUint8(8 + i, c.charCodeAt(0)));
+  b.setUint32(16, 16, true); b.setUint16(20, 1, true); b.setUint16(22, 1, true); b.setUint32(24, 16000, true); b.setUint32(28, 32000, true); b.setUint16(32, 2, true); b.setUint16(34, 16, true);
+  [...'data'].forEach((c, i) => b.setUint8(36 + i, c.charCodeAt(0))); b.setUint32(40, n * 2, true);
+  return b.buffer;
+};
 
 // Echotype Cloud: ?cloud=free or ?cloud=pro starts signed in; any 6 digits except 000000 sign in.
 // Sample numbers only (the preview says so in the sidebar).
@@ -184,7 +195,7 @@ const commands = {
     emit('dictation-state', { state: 'recording' });
     for (let i = 0; i < 60; i++) {
       await wait(50);
-      emit('audio-level', { meter: Math.abs(Math.sin(i / 4)) * 0.6 + Math.random() * 0.2, muted: false });
+      emit('audio-level', q.has('muted') ? { meter: 0, muted: i >= 40 } : { meter: Math.abs(Math.sin(i / 4)) * 0.6 + Math.random() * 0.2, muted: false });
       if (i >= 30 && i % 10 === 0) partialOf('Let’s move the standup to 10:30 tomorrow.', (i - 20) / 40);
     }
     emit('dictation-state', { state: 'transcribing' }); await wait(700);
@@ -204,6 +215,9 @@ const commands = {
   pill_copy: () => null,
   pill_copy_cleaned: () => null,
   // Re-run last or History entry `ts` (lib.rs rerun_options / rerun): ?norerun = no clip kept.
+  // Kept audio (lib.rs history_clips / history_audio): ?norerun = none kept.
+  history_clips: () => (q.has('norerun') ? [] : history.filter((e, i) => !e.noclip && i < 20).map(e => e.ts)),
+  history_audio: () => silentWav(),
   rerun_options: ({ ts }) => {
     const e = ts == null ? history[0] : history.find(x => x.ts === ts);
     if (q.has('norerun') || !e || e.noclip || history.indexOf(e) >= 20) return [];
@@ -213,8 +227,9 @@ const commands = {
     const e = ts == null ? history[0] : history.find(x => x.ts === ts);
     if (!e) throw 'There is no recording to re-run';
     emit('dictation-state', { state: 'transcribing' }); await wait(500);
+    if (e.recovered) e.raw = 'so the plan is we ship the beta on friday and send the invite list monday';
     const text = id === 'raw' ? e.raw : e.raw[0].toUpperCase() + e.raw.slice(1) + '.';
-    Object.assign(e, { original: e.original ?? e.text, text, stt_ms: 610, cleanup_ms: id === 'raw' ? 0 : 450, stt_provider: id.startsWith('model:') ? `local:${id.slice(6)}` : e.stt_provider, cleanup_provider: id === 'raw' ? null : e.cleanup_provider, no_cleanup: id === 'raw', cleaned: undefined });
+    Object.assign(e, { recovered: false, original: e.original ?? e.text, text, stt_ms: 610, cleanup_ms: id === 'raw' ? 0 : 450, stt_provider: id.startsWith('model:') ? `local:${id.slice(6)}` : e.stt_provider, cleanup_provider: id === 'raw' ? null : e.cleanup_provider, no_cleanup: id === 'raw', cleaned: undefined });
     emit('dictation-state', { state: 'done', text, copied: true, card: true, warning: 'Re-run copied, ⌘V to paste' });
     return null;
   },

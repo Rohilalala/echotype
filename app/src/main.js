@@ -124,7 +124,8 @@ function changed(p) {
   if (p === 'cleanup.match_app') refreshLastApp();
   if (p === 'cleanup.level') renderLevel();
   if (p.startsWith('local_api')) refreshApi();
-  if (p === 'history_enabled') renderHistory();
+  if (p === 'history_enabled') { renderHistory(); $('#clipDaysRow').hidden = !S.history_enabled; }
+  if (p === 'clip_days') renderHistory();
   if (p === 'pill_idle' || p === 'show_in') renderPill();
   if (p === 'pill_size' || p === 'ball_size') sizePreview();
   if (p === 'sounds') $('#soundPackRow').hidden = !S.sounds;
@@ -407,8 +408,8 @@ function renderHero() {
   mic.ariaDisabled = st === 'transcribing' || st === 'cleaning'; // not `disabled`: focus stays on it
   renderChips();
   if (st === 'recording') {
-    line.replaceChildren(muted ? 'Is your mic muted?' : 'Listening');
-    fill(sub, muted ? 'Echotype hears nothing from the microphone. It keeps recording.'
+    line.replaceChildren(muted ? 'No sound from your microphone' : 'Listening');
+    fill(sub, muted ? [h('span', {}, 'Echotype hears nothing from it. It keeps recording.'), h('button', { className: 'btn', type: 'button', onclick: () => { go('settings'); $('#mic').focus(); } }, 'Choose microphone')]
       : dictation.locked || S.mode === 'toggle' ? 'Press the key again to finish. Esc cancels.' : 'Let go to paste. Esc cancels.');
   } else if (st === 'transcribing' || st === 'cleaning') {
     line.replaceChildren(st === 'cleaning' ? 'Cleaning up…' : 'Transcribing…');
@@ -495,6 +496,8 @@ function renderRecent() {
   const box = $('#recent');
   if (!recent.length) return box.replaceChildren(h('p', { className: 'empty' }, 'Your dictations show up here.'));
   box.replaceChildren(...recent.slice(0, 3).map(r => {
+    // A recovered dictation has no text yet: History transcribes it.
+    if (r.recovered) return h('div', { className: 'row entry' }, h('span', { className: 'text' }, 'Recovered dictation'), h('button', { className: 'btn quiet', type: 'button', onclick: () => go('history') }, 'Open History'));
     const copy = h('button', { className: 'btn quiet', type: 'button' }, 'Copy');
     copy.onclick = () => copyText(r.text, copy);
     return h('div', { className: 'row entry' }, h('span', { className: 'text' }, r.text.replace(/\s*\n\s*[-*•]?\s*/g, ' · ')), h('time', { className: 'when', title: fmtTime(r.ts).replace('\n', ' ') }, fmtAgo(r.ts)), copy);
@@ -1192,6 +1195,7 @@ async function renderHistory() {
   }
   $('#clearHistory').disabled = !items.length;
   renderRerun();
+  const clips = new Set(await invoke('history_clips').catch(() => []));
   if (!items.length) {
     list.replaceChildren(S.history_enabled
       ? h('p', { className: 'empty' }, 'Your dictations show up here. ', verb(), ' ', hotkeyText(S.hotkey), ' in any text field to start.')
@@ -1199,6 +1203,7 @@ async function renderHistory() {
     return;
   }
   list.replaceChildren(...items.map(it => {
+    if (it.recovered) return recoveredEntry(it, clips.has(it.ts));
     const copy = h('button', { className: 'btn quiet', type: 'button' }, 'Copy');
     copy.onclick = e => { e.preventDefault(); copyText(it.text, copy); };
     const text = h('span', { className: 'text' }, it.text);
@@ -1209,7 +1214,7 @@ async function renderHistory() {
     } }, 'Restore');
     return h('details', { ontoggle: e => e.target.open && addRerun(it, fix) },
       h('summary', {}, text, it.no_cleanup && h('span', { className: 'tag' }, 'No cleanup'), h('time', { className: 'when', title: fmtTime(it.ts).replace('\n', ' ') }, fmtAgo(it.ts)), copy),
-      h('div', { className: 'detail' }, fix,
+      h('div', { className: 'detail' }, fix, clips.has(it.ts) && playButton(it.ts),
         it.original && it.original !== it.text && h('p', { className: 'raw text' }, h('b', {}, 'Before re-run: '), it.original, ' ', restore),
         it.raw !== it.text && h('p', { className: 'raw text' }, h('b', {}, 'Heard: '), it.raw, ' ', cleanedCopy(it.raw, 'Copy original')),
         it.cleaned && h('p', { className: 'raw text' }, h('b', {}, 'Cleanup had (not pasted): '), it.cleaned, ' ', cleanedCopy(it.cleaned)),
@@ -1218,6 +1223,32 @@ async function renderHistory() {
           it.cleanup_provider && h('span', {}, `Cleanup ${it.cleanup_ms} ms (${it.cleanup_provider})`)),
         it.no_cleanup && noCleanup() && h('p', { className: 'hint' }, 'Kept as you said it because cleanup is off. ', h('button', { className: 'btn quiet', type: 'button', onclick: () => go('cleanup') }, 'Set up cleanup'))));
   }));
+}
+// Play: the entry's kept audio (settings.rs clips, Settings → Keep dictation audio), fetched as
+// bytes and played inline. ponytail: each play's blob URL lives until the window reloads.
+function playButton(ts) {
+  const b = h('button', { className: 'btn', type: 'button', onclick: async () => {
+    let buf;
+    try { buf = await invoke('history_audio', { ts }); }
+    catch (e) { b.textContent = String(e); b.disabled = true; return; }
+    const player = h('audio', { controls: true, src: URL.createObjectURL(new Blob([buf], { type: 'audio/wav' })), 'aria-label': 'Recording' });
+    b.replaceWith(player);
+    player.play().catch(() => {});
+  } }, 'Play');
+  return b;
+}
+// A dictation the app quit or crashed during (settings.rs recover): its audio, to transcribe now.
+function recoveredEntry(it, audio) {
+  const run = h('button', { className: 'btn primary', type: 'button', onclick: () => {
+    rerunPending = true;
+    run.disabled = true;
+    invoke('rerun', { id: 'same', ts: it.ts }).catch(err => { rerunPending = false; run.disabled = false; dictation = { state: 'error', error: String(err) }; renderHero(); });
+  } }, 'Transcribe');
+  return h('details', { open: true },
+    h('summary', {}, h('span', { className: 'text' }, 'Recovered dictation'), h('span', { className: 'tag' }, 'Not transcribed'), h('time', { className: 'when', title: fmtTime(it.ts).replace('\n', ' ') }, fmtAgo(it.ts))),
+    h('div', { className: 'detail' },
+      h('p', { className: 'hint' }, audio ? 'Echotype closed while you were dictating. It kept what it recorded.' : 'Echotype closed while you were dictating. The recording is no longer kept.'),
+      audio && h('span', { className: 'actions' }, run, playButton(it.ts))));
 }
 // Fix: edit an entry's text in place, save it, then offer to learn the names it corrected.
 function startFix(it, textEl, fixBtn) {
@@ -1462,6 +1493,11 @@ const curl = (port, tok) => `curl http://127.0.0.1:${port}/v1/audio/transcriptio
 $('#showToken').addEventListener('click', () => { tokenShown = !tokenShown; refreshApi(); });
 $('#copyToken').addEventListener('click', e => copyText(apiStatus?.token || '', e.currentTarget));
 $('#copyCurl').addEventListener('click', e => copyText(curl(apiStatus?.port || S.local_api.port, apiStatus?.token || ''), e.currentTarget));
+
+// Settings → Use with AI apps: `echotype --mcp` (mcp.rs), as Claude Desktop and Cursor configure a server.
+const MCP_CONFIG = JSON.stringify({ mcpServers: { echotype: { command: '/Applications/Echotype.app/Contents/MacOS/echotype', args: ['--mcp'] } } }, null, 2);
+$('#mcpConfig').textContent = MCP_CONFIG;
+$('#copyMcp').addEventListener('click', e => copyText(MCP_CONFIG, e.currentTarget));
 
 // [badge, badge style, show the Open Settings button]
 const MIC = { granted: ['Allowed', '', false], denied: ['Blocked', 'bad', true], unknown: ['Asked on first use', 'muted', false] };
@@ -2386,7 +2422,14 @@ listen('model-download', ({ payload: p }) => {
 });
 
 // The pill's menu (History, Settings) and its notices open a page here.
-listen('navigate', ({ payload }) => { if ($('#onboard').hidden) go(payload); });
+listen('navigate', ({ payload }) => {
+  if (!$('#onboard').hidden) return;
+  // "No sound from your microphone" on the pill: Settings, on the microphone picker.
+  if (payload !== 'mic') return go(payload);
+  go('settings');
+  $('#mic').scrollIntoView({ block: 'center' });
+  $('#mic').focus();
+});
 
 listen('tauri://drag-enter', () => $('#drop').classList.add('over'));
 listen('tauri://drag-leave', () => $('#drop').classList.remove('over'));
@@ -2475,6 +2518,7 @@ function renderAll() {
   renderTransforms();
   renderAdvanced();
   renderNotice();
+  $('#clipDaysRow').hidden = !S.history_enabled; // no history, no audio kept
 }
 
 bindAll();

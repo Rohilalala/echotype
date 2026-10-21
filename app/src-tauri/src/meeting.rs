@@ -270,17 +270,17 @@ pub fn relabel(clusters: &[i32], live: &[String], names: &BTreeMap<String, Strin
 pub type Transcribe = Box<dyn FnMut(&[f32]) -> Result<Vec<Word>, String> + Send>;
 
 /// A WAV that is valid after every append, so a crash loses nothing already written.
-struct Wav(std::fs::File, u32);
+pub(crate) struct Wav(std::fs::File, u32);
 
 impl Wav {
-    fn create(path: &Path) -> std::io::Result<Self> {
+    pub(crate) fn create(path: &Path) -> std::io::Result<Self> {
         use std::io::Write;
         let mut f = std::fs::File::create(path)?;
         f.write_all(&audio::wav_bytes(&[]))?;
         Ok(Self(f, 0))
     }
 
-    fn append(&mut self, pcm: &[f32]) -> std::io::Result<()> {
+    pub(crate) fn append(&mut self, pcm: &[f32]) -> std::io::Result<()> {
         use std::io::{Seek, SeekFrom, Write};
         self.0.write_all(&audio::wav_bytes(pcm)[44..])?;
         self.1 += pcm.len() as u32 * 2;

@@ -7,6 +7,7 @@ mod cloud;
 mod hotkey;
 mod learn;
 mod llm;
+mod mcp;
 mod meeting;
 mod music;
 mod notices;
@@ -276,6 +277,64 @@ struct Live {
     command: bool,
     /// Set as the recording ends: the partials loop stops and a partial in flight aborts.
     partials: Arc<AtomicBool>,
+    /// The recording on disk as it goes, for recovery after a quit or crash.
+    spool: Option<Spool>,
+}
+
+/// How often a recording's new audio is written to its recovery file.
+const SPOOL_EVERY: Duration = Duration::from_secs(1);
+
+/// A recording written to `settings::recording_path` as it goes, so a quit or crash mid-dictation
+/// loses at most SPOOL_EVERY of it: the next launch puts it in History (settings::recover).
+/// Dropped once the dictation is done with (transcribed, discarded, silent), it deletes the file.
+struct Spool {
+    stop: mpsc::Sender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    path: std::path::PathBuf,
+}
+
+impl Spool {
+    fn start(tap: audio::Tap, path: std::path::PathBuf) -> Self {
+        let (stop, stopped) = mpsc::channel::<()>();
+        let p = path.clone();
+        let thread = std::thread::spawn(move || {
+            let (mut wav, mut at, mut rate) = (None::<meeting::Wav>, 0, 0);
+            let mut rs = audio::StreamResampler::new(audio::RATE, audio::RATE);
+            while let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(SPOOL_EVERY) {
+                let (mut new, r) = tap.since(at);
+                if r != rate {
+                    // The first write, or a reopen resampled the recording: (re)write it whole.
+                    (rate, at, rs, wav) = (r, 0, audio::StreamResampler::new(r, audio::RATE), None);
+                    new = tap.since(0).0;
+                }
+                at += new.len();
+                let res = match wav.as_mut() {
+                    Some(w) => w.append(&rs.push(&new)),
+                    None => meeting::Wav::create(&p).and_then(|mut w| w.append(&rs.push(&new)).map(|()| wav = Some(w))),
+                };
+                if let Err(e) = res {
+                    eprintln!("echotype: could not write the recording for recovery: {e}");
+                    return;
+                }
+            }
+        });
+        Self { stop, thread: Some(thread), path }
+    }
+
+    /// The mic is closed: no more to write. Non-blocking, so it adds nothing to the time to text.
+    fn halt(&self) {
+        let _ = self.stop.send(());
+    }
+}
+
+impl Drop for Spool {
+    fn drop(&mut self) {
+        self.halt();
+        if let Some(t) = self.thread.take() {
+            let _ = t.join(); // so the file cannot be written again after it is gone
+        }
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 /// One thread owns the recorder and the talk-key state machine, so every key, click, Esc and
@@ -354,6 +413,10 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                 Act::Start { id, locked } => match command_ready(&s, command).and_then(|()| start_recording(&app, &s, id)) {
                     Ok(mut l) => {
                         l.command = command;
+                        // Command Mode instructions are never kept, so there is nothing to recover.
+                        if !command && s.history_enabled && s.clip_days > 0 {
+                            l.spool = Some(Spool::start(l.rec.tap(), settings::recording_path(now_ms())));
+                        }
                         llm::prewarm(&s); // warm while the user talks, not after
                         // Recording before anything shows, so the pill loop takes Esc for it (pill.rs owns Esc).
                         state(&app).recording.store(true, Ordering::SeqCst);
@@ -423,6 +486,10 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                     let Some(l) = live.take() else { continue };
                     l.partials.store(true, Ordering::SeqCst); // first: a partial in flight lets go of the model
                     state(&app).recording.store(false, Ordering::SeqCst);
+                    if let Some(sp) = &l.spool {
+                        sp.halt();
+                    }
+                    let fallback = l.rec.fallback.clone();
                     let pcm = l.rec.stop();
                     music::set(false); // the mic is closed: the music needn't wait for transcription
                     let _ = state(&app).pill_wake.send(());
@@ -435,8 +502,8 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                         emit_state(&app, hint("No audio. Check your mic", Some("microphone")));
                         continue;
                     }
-                    let warning = l.lost.load(Ordering::SeqCst).then(|| "Microphone disconnected. Transcribed what was captured.".to_string());
-                    let clip = Clip { quality: st.quality(), muted_seen: st.muted_seen(), warning, speaking_ms: st.speaking_ms(), snr_db: st.floor_and_speech().map(|(floor, speech)| speech - floor), front: l.front.clone(), entry: None };
+                    let warning = l.lost.load(Ordering::SeqCst).then(|| "Microphone disconnected. Transcribed what was captured.".to_string()).or_else(|| fallback_once(fallback));
+                    let clip = Clip { quality: st.quality(), muted_seen: st.muted_seen(), warning, speaking_ms: st.speaking_ms(), snr_db: st.floor_and_speech().map(|(floor, speech)| speech - floor), front: l.front.clone(), entry: None, spool: l.spool };
                     drop(st);
                     if l.command {
                         process_command(&app, pcm, busy.clone());
@@ -497,7 +564,7 @@ fn start_recording(app: &AppHandle, s: &Settings, id: u64) -> Result<Live, Dicta
             if s.live_text && s.stt.provider == "local" {
                 spawn_partials(app, s, rec.tap(), partials.clone());
             }
-            Ok(Live { id, shown: false, locked: false, rec, stats, lost, front: None, command: false, partials })
+            Ok(Live { id, shown: false, locked: false, rec, stats, lost, front: None, command: false, partials, spool: None })
         }
         Err(_) if platform::microphone_status() == "denied" => {
             Err(DictationState { state: "error", error: Some("Microphone access is off".into()), action: Some("microphone"), ..Default::default() })
@@ -566,6 +633,22 @@ struct Clip {
     front: Option<platform::FrontApp>,
     /// The history entry this audio was recorded as: a re-run replaces its result.
     entry: Option<u64>,
+    /// Live::spool, kept until the dictation is done with (its drop deletes the recovery file).
+    #[allow(dead_code)] // held for its Drop
+    spool: Option<Spool>,
+}
+
+/// Says that another mic stood in only the first time it happens for that mic, not every dictation.
+fn fallback_once(note: Option<String>) -> Option<String> {
+    static SAID: Mutex<Option<String>> = Mutex::new(None);
+    let mut said = lock(&SAID);
+    let note = note.filter(|n| said.as_ref() != Some(n))?;
+    *said = Some(note.clone());
+    Some(note)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 /// A dictation's audio kept in memory (AppState last_clip).
@@ -594,6 +677,8 @@ pub enum Rerun {
     /// A downloaded local speech model.
     Model(String),
     NoCleanup,
+    /// As set now: a recovered dictation's first transcription (History → Transcribe).
+    Same,
 }
 
 impl Rerun {
@@ -602,6 +687,7 @@ impl Rerun {
             Rerun::Lang(c) => format!("lang:{c}"),
             Rerun::Model(m) => format!("model:{m}"),
             Rerun::NoCleanup => "raw".into(),
+            Rerun::Same => "same".into(),
         }
     }
 
@@ -610,6 +696,7 @@ impl Rerun {
             Some(("lang", c)) => Some(Rerun::Lang(c.into())),
             Some(("model", m)) => Some(Rerun::Model(m.into())),
             None if id == "raw" => Some(Rerun::NoCleanup),
+            None if id == "same" => Some(Rerun::Same),
             _ => None,
         }
     }
@@ -625,6 +712,7 @@ impl Rerun {
                 s.stt.rerun_model = Some(m.clone());
             }
             Rerun::NoCleanup => s.cleanup.enabled = false,
+            Rerun::Same => {}
         }
     }
 }
@@ -712,7 +800,7 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
                     learn::watch(&app, out.text.clone());
                 }
                 // After the paste, not before: the disk writes took 15-20 ms off the time to text.
-                if rerun.is_none() {
+                if rerun.is_none() || rerun == Some(Rerun::Same) {
                     record_stats(&app, &s, stats::Source::Dictation, &out.text, speaking_ms); // a re-run's words were counted once
                     telemetry::dictation(&s, stats::words(&out.text), out.stt_ms, out.cleanup_ms);
                 }
@@ -728,7 +816,7 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
                     let mut kept = lock(&st.last_clip);
                     let k = kept.as_mut()?;
                     k.entry = Some(ts);
-                    clip.entry.is_none().then(|| (ts, audio::wav_bytes(&k.pcm)))
+                    (clip.entry.is_none() && s.clip_days > 0).then(|| (ts, audio::wav_bytes(&k.pcm)))
                 });
                 // A new entry keeps its audio on disk too, for Re-run in History.
                 if let Some(Err(e)) = wav.map(|(ts, wav)| settings::save_clip(ts, &wav)) {
@@ -1031,6 +1119,7 @@ fn record_history(s: &Settings, out: &cleanup::Output, rerun_of: Option<u64>) ->
         no_cleanup: out.no_cleanup,
         cleaned: out.cleaned.clone(),
         original: None,
+        recovered: false,
     };
     let res = if rerun_of.is_some() { settings::rerun_history(&entry) } else { settings::append_history(&entry) };
     res.map(|()| entry.ts).inspect_err(|e| eprintln!("echotype: could not write history: {e}")).ok()
@@ -1310,6 +1399,9 @@ fn commit_settings(app: &AppHandle, change: impl FnOnce(&Settings) -> Settings) 
         *lock(&state(app).last_raw) = None;
         settings::clear_clips();
     }
+    if new.clip_days != old.clip_days {
+        settings::prune_clips(new.clip_days);
+    }
     if new.talk_key != old.talk_key {
         apply_talk_key(app, &new);
     }
@@ -1404,6 +1496,19 @@ async fn get_history(limit: Option<usize>) -> R<Vec<HistoryEntry>> {
 }
 
 /// What Echotype would bring over from Wispr Flow on this machine (None: not installed).
+/// The entries whose audio is still kept (History's play buttons).
+#[tauri::command]
+async fn history_clips() -> R<Vec<u64>> {
+    blocking(|| Ok(settings::kept_clips())).await
+}
+
+/// Entry `ts`'s audio as WAV bytes for History's player. Only Echotype's own clips can be read:
+/// the path is built from the number.
+#[tauri::command]
+async fn history_audio(ts: u64) -> R<tauri::ipc::Response> {
+    blocking(move || std::fs::read(settings::clip_path(ts)).map(tauri::ipc::Response::new).map_err(|_| "That recording is no longer kept".to_string())).await
+}
+
 #[tauri::command]
 async fn wispr_import_preview() -> Option<wispr::Found> {
     tauri::async_runtime::spawn_blocking(wispr::detect).await.ok().flatten().filter(|f| !f.is_empty())
@@ -1584,10 +1689,17 @@ async fn pill_cancel(app: AppHandle) -> R<()> {
 /// A notice with an action: Home shows it with the button that fixes it. Shares the click
 /// debounce, so the second half of a double-click that started dictation and got an error
 /// notice back never opens the settings window.
+/// `page` "mic" is "No sound from your microphone" clicked: that recording is no use, so it is
+/// cancelled and Settings opens on the microphone picker.
 #[tauri::command]
-async fn pill_open(app: AppHandle) -> R<()> {
+async fn pill_open(app: AppHandle, page: Option<String>) -> R<()> {
     if !pill::is_drop(&app, Instant::now()) && lock(&state(&app).clicks).accept(Instant::now()) {
-        open_page(&app, "home");
+        if page.as_deref() == Some("mic") {
+            send(&app, Cmd::Key(Ev::Cancel));
+            open_page(&app, "mic");
+        } else {
+            open_page(&app, "home");
+        }
     }
     Ok(())
 }
@@ -2178,6 +2290,10 @@ pub fn run() {
         )
         .setup(|app| {
             let s = Settings::load();
+            // Before any new recording: one left by a quit or crash becomes a History entry.
+            for ts in settings::recover(s.history_enabled && s.clip_days > 0) {
+                eprintln!("echotype: recovered the recording of {ts}; it is in History");
+            }
             telemetry::install_panic_hook(app.package_info().version.to_string());
             let h = app.handle().clone();
             telemetry::start(app.package_info().version.to_string(), move || current_settings(&h));
@@ -2287,7 +2403,9 @@ pub fn run() {
             // ponytail: thread::sleep stops while the Mac sleeps, so "daily" can stretch; launches catch up.
             let h = app.handle().clone();
             std::thread::spawn(move || loop {
-                meeting::prune_audio(current_settings(&h).meeting_audio_days);
+                let s = current_settings(&h);
+                meeting::prune_audio(s.meeting_audio_days);
+                settings::prune_clips(s.clip_days); // dictation audio too (Settings → Keep dictation audio)
                 std::thread::sleep(Duration::from_secs(86_400));
             });
             std::thread::spawn(move || {
@@ -2326,6 +2444,8 @@ pub fn run() {
             cancel_download,
             list_input_devices,
             get_history,
+            history_clips,
+            history_audio,
             update_history,
             wispr_import_preview,
             wispr_import,
@@ -2412,6 +2532,9 @@ pub fn cli(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--meeting") {
         return meeting::cli(args);
     }
+    if args.iter().any(|a| a == "--mcp") {
+        return mcp::serve(std::io::stdin().lock(), std::io::stdout().lock());
+    }
     let mut s = Settings::load();
     let mut file = None;
     let mut it = args.iter();
@@ -2477,7 +2600,7 @@ fn cli_report(result: R<cleanup::Output>, total_ms: u128) -> (String, String, i3
 
 #[cfg(test)]
 mod tests {
-    use super::{HistoryEntry, KEEP_SAMPLES, Rerun, Settings, accel_label, as_ran, chip, cli_report, commit, keep, last_words, parse_hotkey, partial_due, stt, unregistered_shortcuts};
+    use super::{HistoryEntry, KEEP_SAMPLES, Rerun, SPOOL_EVERY, Settings, Spool, audio, accel_label, as_ran, chip, cli_report, commit, keep, last_words, parse_hotkey, partial_due, stt, unregistered_shortcuts};
     use crate::audio::Quality;
     use std::cell::RefCell;
     use std::time::Duration;
@@ -2503,6 +2626,25 @@ mod tests {
     /// Under the app manifest a command missing from a capability fails only at runtime, in the
     /// window, so check generate_handler!, build.rs COMMANDS and both capability files agree.
     #[test]
+    fn a_recording_is_on_disk_as_it_goes_and_gone_once_done_with() {
+        let dir = std::env::temp_dir().join(format!("echotype-spool-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("1.part.wav");
+        let tap = audio::Tap::fake(48_000);
+        tap.feed(&vec![0.25; 48_000]);
+        let spool = Spool::start(tap.clone(), path.clone());
+        std::thread::sleep(SPOOL_EVERY + Duration::from_millis(300));
+        tap.feed(&vec![0.25; 24_000]);
+        std::thread::sleep(SPOOL_EVERY);
+        // What a crash right now would leave: a valid WAV of the 1.5 s so far, at 16 kHz.
+        let pcm = audio::decode(std::fs::read(&path).unwrap(), Some("wav")).unwrap();
+        assert!(pcm.len().abs_diff(24_000) < 100, "{} samples", pcm.len());
+        assert!(pcm[8_000..20_000].iter().all(|x| (x - 0.25).abs() < 0.01));
+        drop(spool);
+        assert!(!path.exists(), "done with: no recovery file");
+    }
+
+    #[test]
     fn the_last_clip_is_kept_within_its_cap() {
         let five_min = vec![0.0; KEEP_SAMPLES];
         assert!(keep(five_min, false, None).is_some_and(|k| !k.failed), "a success is kept for Re-run");
@@ -2526,13 +2668,14 @@ mod tests {
         let m = run(Rerun::Model("small".into()));
         assert_eq!((m.stt.provider.as_str(), stt::local_model(&m).as_str(), m.advanced), ("local", "small", false), "the model, without switching on advanced settings");
         assert_eq!(serde_json::to_value(&m).unwrap()["stt"].get("rerun_model"), None, "never saved");
+        assert_eq!((run(Rerun::Same), Rerun::parse("same")), (base.clone(), Some(Rerun::Same)), "a recovered dictation: as set now");
     }
 
     #[test]
     fn a_history_entry_offers_the_pill_choices_that_would_change_it() {
         let mut s = Settings { advanced: true, ..Settings::default() }; // the settings say Large v3 Turbo
         s.cleanup.enabled = true;
-        let entry = |stt: &str, cleanup: Option<&str>| HistoryEntry { ts: 1, raw: "r".into(), text: "t".into(), stt_ms: 1, cleanup_ms: 0, stt_provider: stt.into(), cleanup_provider: cleanup.map(String::from), no_cleanup: false, cleaned: None, original: None };
+        let entry = |stt: &str, cleanup: Option<&str>| HistoryEntry { ts: 1, raw: "r".into(), text: "t".into(), stt_ms: 1, cleanup_ms: 0, stt_provider: stt.into(), cleanup_provider: cleanup.map(String::from), no_cleanup: false, cleaned: None, original: None, recovered: false };
         let ids = |s: &Settings, e: HistoryEntry| crate::pill::rerun_options(&as_ran(s.clone(), &e), |id| ["large-v3-turbo-q5_0", "tiny.en"].contains(&id)).into_iter().map(|(r, _)| r.id()).collect::<Vec<_>>();
         assert_eq!(ids(&s, entry("local:tiny.en", Some("ollama"))), ["model:large-v3-turbo-q5_0", "raw"], "recorded on Tiny: Turbo is the other model");
         assert_eq!(ids(&s, entry("local:large-v3-turbo-q5_0", None)), ["model:tiny.en"], "no cleanup ran, so none to skip");
