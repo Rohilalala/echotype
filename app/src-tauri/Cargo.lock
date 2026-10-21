@@ -1287,6 +1287,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tokio",
  "whisper-rs",
+ "zip",
 ]
 
 [[package]]

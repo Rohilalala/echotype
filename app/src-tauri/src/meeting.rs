@@ -536,13 +536,24 @@ pub fn markdown(m: &Meeting) -> String {
     }
     out.push_str("\n## Transcript\n\n");
     for s in &m.segments {
-        out.push_str(&format!("**{}** ({}): {}\n\n", name(m, &s.speaker), clock(s.start), s.text));
+        match name(m, &s.speaker) {
+            "" => out.push_str(&format!("{}\n\n", s.text)),
+            who => out.push_str(&format!("**{who}** ({}): {}\n\n", clock(s.start), s.text)),
+        }
     }
     out.trim_end().to_string() + "\n"
 }
 
+/// "Name: " before a line, or nothing for a transcribed file (from_text), which has no speakers.
+fn said(m: &Meeting, s: &Segment) -> String {
+    match name(m, &s.speaker) {
+        "" => s.text.clone(),
+        who => format!("{who}: {}", s.text),
+    }
+}
+
 pub fn plain(m: &Meeting) -> String {
-    let lines: Vec<String> = m.segments.iter().map(|s| format!("[{}] {}: {}", clock(s.start), name(m, &s.speaker), s.text)).collect();
+    let lines: Vec<String> = m.segments.iter().map(|s| if s.speaker.is_empty() { s.text.clone() } else { format!("[{}] {}", clock(s.start), said(m, s)) }).collect();
     format!("{}\n\n{}\n", m.title, lines.join("\n"))
 }
 
@@ -554,13 +565,17 @@ fn timecode(secs: f32, sep: char) -> String {
 
 /// The transcript as subtitles, one cue a line, "Name: text".
 pub fn srt(m: &Meeting) -> String {
-    let cues: Vec<String> = m.segments.iter().enumerate().map(|(i, s)| format!("{}\n{} --> {}\n{}: {}\n", i + 1, timecode(s.start, ','), timecode(s.end, ','), name(m, &s.speaker), s.text)).collect();
+    let cues: Vec<String> = m.segments.iter().enumerate().map(|(i, s)| format!("{}\n{} --> {}\n{}\n", i + 1, timecode(s.start, ','), timecode(s.end, ','), said(m, s))).collect();
     cues.join("\n")
 }
 
 /// WebVTT with voice tags, which players and agents read as speakers.
 pub fn vtt(m: &Meeting) -> String {
-    let cues: Vec<String> = m.segments.iter().map(|s| format!("{} --> {}\n<v {}>{}\n", timecode(s.start, '.'), timecode(s.end, '.'), name(m, &s.speaker), s.text)).collect();
+    let cue = |s: &Segment| match name(m, &s.speaker) {
+        "" => s.text.clone(),
+        who => format!("<v {who}>{}", s.text),
+    };
+    let cues: Vec<String> = m.segments.iter().map(|s| format!("{} --> {}\n{}\n", timecode(s.start, '.'), timecode(s.end, '.'), cue(s))).collect();
     format!("WEBVTT\n\n{}", cues.join("\n"))
 }
 
@@ -571,16 +586,98 @@ pub fn json(m: &Meeting) -> String {
     serde_json::to_string_pretty(&v).unwrap_or_default() + "\n"
 }
 
-/// The meeting in `format` (md, txt, json, srt, vtt) and its file extension. Exports are free.
-pub fn export(m: &Meeting, format: &str) -> Result<(String, &'static str), String> {
+/// Text made safe inside XML and HTML, attributes included.
+fn esc(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
+}
+
+/// The summary's lines without their Markdown marks, and whether each is a heading.
+// ponytail: headings and list marks only; bold, links and tables stay as typed.
+fn summary_lines(m: &Meeting) -> Vec<(bool, String)> {
+    let lines = m.summary.as_deref().unwrap_or_default().lines().map(str::trim).filter(|l| !l.is_empty());
+    lines.map(|l| if l.starts_with('#') { (true, l.trim_start_matches('#').trim().to_string()) } else { (false, l.to_string()) }).collect()
+}
+
+/// A page that opens in any browser and pastes into Docs or Notion with its headings.
+pub fn html(m: &Meeting) -> String {
+    let mut out = format!(
+        "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>{t}</title>\n<style>body{{font:16px/1.55 -apple-system,system-ui,sans-serif;max-width:46rem;margin:2rem auto;padding:0 1rem}}time{{color:#777;font-size:.85em;margin-left:.4em}}</style></head>\n<body>\n<h1>{t}</h1>\n<p>{}</p>\n",
+        clock(m.duration_s),
+        t = esc(&m.title)
+    );
+    for (heading, l) in summary_lines(m) {
+        out.push_str(&if heading { format!("<h2>{}</h2>\n", esc(&l)) } else { format!("<p>{}</p>\n", esc(&l)) });
+    }
+    out.push_str("<h2>Transcript</h2>\n");
+    for s in &m.segments {
+        match name(m, &s.speaker) {
+            "" => out.push_str(&format!("<p>{}</p>\n", esc(&s.text))),
+            who => out.push_str(&format!("<p><b>{}</b><time>{}</time><br>{}</p>\n", esc(who), clock(s.start), esc(&s.text))),
+        }
+    }
+    out + "</body></html>\n"
+}
+
+/// A Word document: the three parts Word needs, no styles part (runs carry bold and size).
+pub fn docx(m: &Meeting) -> Result<Vec<u8>, String> {
+    use std::io::Write;
+    // (text, bold, half-points or 0 for the default size)
+    let p = |runs: &[(&str, bool, u32)]| {
+        let runs: String = runs
+            .iter()
+            .map(|(t, b, sz)| {
+                let props = format!("{}{}", if *b { "<w:b/>" } else { "" }, if *sz > 0 { format!("<w:sz w:val=\"{sz}\"/>") } else { String::new() });
+                format!("<w:r><w:rPr>{props}</w:rPr><w:t xml:space=\"preserve\">{}</w:t></w:r>", esc(t))
+            })
+            .collect();
+        format!("<w:p>{runs}</w:p>")
+    };
+    let mut body = p(&[(&m.title, true, 36)]) + &p(&[(&clock(m.duration_s), false, 0)]);
+    for (heading, l) in summary_lines(m) {
+        body += &p(&[(&l, heading, if heading { 28 } else { 0 })]);
+    }
+    body += &p(&[("Transcript", true, 28)]);
+    for s in &m.segments {
+        body += &match name(m, &s.speaker) {
+            "" => p(&[(&s.text, false, 0)]),
+            who => p(&[(who, true, 0), (&format!("  {}  ", clock(s.start)), false, 18), (&s.text, false, 0)]),
+        };
+    }
+    let parts = [
+        ("[Content_Types].xml", r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_string()),
+        ("_rels/.rels", r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_string()),
+        ("word/document.xml", format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#)),
+    ];
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (path, xml) in parts {
+        zip.start_file(path, opts).map_err(|e| e.to_string())?;
+        zip.write_all(xml.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    Ok(zip.finish().map_err(|e| e.to_string())?.into_inner())
+}
+
+/// The meeting in `format` (md, txt, json, srt, vtt, html, docx) and its file extension. Exports are free.
+pub fn export(m: &Meeting, format: &str) -> Result<(Vec<u8>, &'static str), String> {
     Ok(match format {
-        "md" => (markdown(m), "md"),
-        "txt" => (plain(m), "txt"),
-        "json" => (json(m), "json"),
-        "srt" => (srt(m), "srt"),
-        "vtt" => (vtt(m), "vtt"),
+        "md" => (markdown(m).into_bytes(), "md"),
+        "txt" => (plain(m).into_bytes(), "txt"),
+        "json" => (json(m).into_bytes(), "json"),
+        "srt" => (srt(m).into_bytes(), "srt"),
+        "vtt" => (vtt(m).into_bytes(), "vtt"),
+        "html" => (html(m).into_bytes(), "html"),
+        "docx" => (docx(m)?, "docx"),
         other => return Err(format!("Unknown export format '{other}'")),
     })
+}
+
+/// A transcribed file (`text`, `secs` long) as a meeting with no speakers, one line a sentence,
+/// so it exports in every meeting format.
+// ponytail: cue times spread evenly by word over the file; whisper's word times
+// (stt::transcribe_words) would make subtitles exact through long pauses.
+pub fn from_text(title: &str, text: &str, secs: f32) -> Meeting {
+    let words: Vec<(Word, String)> = spread(text, secs).into_iter().map(|w| (w, String::new())).collect();
+    Meeting { title: title.into(), duration_s: secs, state: "done".into(), segments: sentences(&words), ..Default::default() }
 }
 
 // ---------- names ----------
@@ -1196,7 +1293,7 @@ pub async fn meeting_delete(id: String) -> R<()> {
 /// The meeting as Markdown ("md") or plain text ("txt"), for Copy.
 #[tauri::command]
 pub async fn meeting_export(id: String, format: String) -> R<String> {
-    blocking(move || export(&load(&id)?, &format).map(|(body, _)| body)).await
+    blocking(move || export(&load(&id)?, &format).and_then(|(body, _)| String::from_utf8(body).map_err(|_| format!("{format} is not text")))).await
 }
 
 /// Echotype Pro: an answer about the meeting so far (or all of it), from Echotype Cloud.
@@ -1625,7 +1722,47 @@ mod tests {
         for f in ["md", "txt", "json", "srt", "vtt"] {
             assert!(export(&m, f).is_ok(), "{f}");
         }
-        assert!(export(&m, "docx").is_err());
+        assert!(export(&m, "pdf").is_err());
+    }
+
+    #[test]
+    fn docx_is_a_zip_with_the_parts_word_needs_and_escapes_text() {
+        let mut m = sample();
+        m.title = "Q&A <draft> \"v2\" it's".into();
+        m.summary = Some("## Decisions\n- Ship <Friday> & tell Priya".into());
+        let (bytes, ext) = export(&m, "docx").unwrap();
+        assert_eq!(ext, "docx");
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut names: Vec<&str> = z.file_names().collect();
+        names.sort();
+        assert_eq!(names, ["[Content_Types].xml", "_rels/.rels", "word/document.xml"]);
+        let mut doc = String::new();
+        std::io::Read::read_to_string(&mut z.by_name("word/document.xml").unwrap(), &mut doc).unwrap();
+        assert!(doc.contains("Q&amp;A &lt;draft&gt; &quot;v2&quot; it&apos;s"), "{doc}");
+        assert!(doc.contains(">Decisions<") && doc.contains("- Ship &lt;Friday&gt; &amp; tell Priya"));
+        assert!(doc.contains(">Priya<") && doc.contains("Yes, I&apos;ll send the deck."));
+        assert!(!doc.contains("<draft>") && !doc.contains("<Friday>"));
+    }
+
+    #[test]
+    fn html_escapes_and_keeps_speakers() {
+        let mut m = sample();
+        m.segments[0].text = "<script>alert(1)</script>".into();
+        let page = html(&m);
+        assert!(page.starts_with("<!doctype html>") && page.contains("<h1>Launch sync</h1>"));
+        assert!(page.contains("&lt;script&gt;alert(1)&lt;/script&gt;") && !page.contains("<script>"));
+        assert!(page.contains("<b>Priya</b><time>01:05</time><br>Yes, I&apos;ll send the deck."));
+    }
+
+    #[test]
+    fn a_transcribed_file_exports_as_sentences_without_speakers() {
+        let m = from_text("voice note", "Send the deck. Call Priya? Done", 6.0);
+        assert_eq!(m.segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(), ["Send the deck.", "Call Priya?", "Done"]);
+        assert_eq!(srt(&m), "1\n00:00:00,000 --> 00:00:03,000\nSend the deck.\n\n2\n00:00:03,000 --> 00:00:05,000\nCall Priya?\n\n3\n00:00:05,000 --> 00:00:06,000\nDone\n");
+        assert!(vtt(&m).contains("00:00:00.000 --> 00:00:03.000\nSend the deck.\n"), "no voice tag without a speaker");
+        assert_eq!(plain(&m), "voice note\n\nSend the deck.\nCall Priya?\nDone\n");
+        assert!(markdown(&m).ends_with("## Transcript\n\nSend the deck.\n\nCall Priya?\n\nDone\n"));
+        assert!(from_text("silence", "", 3.0).segments.is_empty());
     }
 
     #[test]

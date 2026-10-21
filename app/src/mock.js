@@ -34,6 +34,7 @@ const settings = {
   auto_transform: q.has('translate') ? 'Translate to English' : '',
   autostart: !q.has('upgrade'), sounds: true, sound_pack: 'classic', pill_fade: true, orb_listen: 'listening', orb_think: 'working', orb_detail: 1, orb_color: '#eef1ff', pill_size: 1.5, ball_size: 1,
   advanced: q.has('advanced'), cleaner_memory: 'ready', cleaner_idle_unload: false, cleaner_idle_minutes: 10, cleaner_context: 1024, greetings: true, detect_meetings: true, prefer_builtin_mic: true, pause_music: false, meeting_auto_stop: true, meeting_audio_days: 30, clip_days: 14,
+  watch_folder: q.has('watch') ? '/Users/you/Recordings' : '', watch_format: 'txt', watch_subfolder: false,
   call_start: { meet: 'ask', teams: 'ask', zoom: 'ask', slack: 'ask', facetime: 'ask', webex: 'ask', discord: 'ask', other: 'ask' }, cloud_moved: q.has('moved'),
   look: 'system',
   pill_idle: !q.has('pilloff'), pill_hidden_until: q.has('pillhidden') ? now + 42 * 60000 : 0, pill_in_recordings: false, live_text: true,
@@ -178,15 +179,16 @@ const commands = {
     return null;
   },
   clear_history: () => { history = []; return null; },
-  transcribe_file: async ({ path }) => {
-    await wait(1400);
-    if (/\.(txt|pdf|png)$/i.test(path)) throw `Not an audio file: ${path.split('/').pop()}`;
-    return {
-      raw: 'bhai woh client wala deck um kal subah tak bhej dena aur haan pricing slide pe naya number daal dena fifteen ki jagah twelve',
-      text: 'Please send the client deck by tomorrow morning, and update the pricing slide to 12 instead of 15.',
-      stt_ms: 1180, cleanup_ms: 640,
-    };
+  // files.rs: one file at a time, each reported on file-job; ?files queues a batch on load.
+  transcribe_files: ({ paths }) => {
+    const jobs = paths.filter(p => !fileQueue.some(j => j.path === p)).map(path => ({ id: nextFile++, path }));
+    fileQueue.push(...jobs);
+    runFiles();
+    return jobs;
   },
+  cancel_files: () => { const ids = fileQueue.filter(j => !j.watched).map(j => j.id); fileQueue = fileQueue.filter(j => j.watched); return ids; },
+  file_save: ({ path, format }) => `/Users/you/Downloads/${path.split('/').pop().replace(/\.[^.]+$/, '')}.${format}`,
+  pick_files: ({ folder }) => folder ? ['/Users/you/Recordings'] : ['/Users/you/Desktop/interview.m4a', '/Users/you/Desktop/lecture.mp4'],
   get_system_info: () => sys,
   local_api_status: () => ({ enabled: settings.local_api.enabled, port: settings.local_api.port, token: 'et_7f3c9a2e5b1d4f86a0c2e91b' }),
   toggle_dictation: async () => {
@@ -349,6 +351,30 @@ Object.assign(commands, {
   show_pill_demo: () => null,
   meeting_save: () => '/Users/you/Downloads/launch-review.md',
 });
+
+let fileQueue = [], nextFile = 1, filesBusy = false;
+async function runFiles() {
+  if (filesBusy) return;
+  filesBusy = true;
+  await wait(50); // as in Rust, the queued reply reaches the page before the worker's first event
+  while (fileQueue.length) {
+    const { id, path, watched } = fileQueue.shift();
+    emit('file-job', { id, path, watched: !!watched, state: 'working' });
+    await wait(1400);
+    if (/\.(txt|pdf|png)$/i.test(path)) { emit('file-job', { id, path, state: 'error', error: `Not an audio file: ${path.split('/').pop()}` }); continue; }
+    emit('file-job', {
+      id, path, watched: !!watched, state: 'done', secs: 9.5,
+      raw: 'bhai woh client wala deck um kal subah tak bhej dena aur haan pricing slide pe naya number daal dena fifteen ki jagah twelve',
+      text: 'Please send the client deck by tomorrow morning, and update the pricing slide to 12 instead of 15.',
+      stt_ms: 1180, cleanup_ms: 640, saved: watched ? path.replace(/\.[^.]+$/, `.${settings.watch_format}`) : null,
+    });
+  }
+  filesBusy = false;
+}
+if (q.has('files')) setTimeout(() => {
+  commands.transcribe_files({ paths: ['/Users/you/Desktop/standup.m4a', '/Users/you/Desktop/notes.txt', '/Users/you/Desktop/interview.mp3', '/Users/you/Desktop/lecture.mp4'] }).forEach(j => emit('file-job', { ...j, state: 'queued' }));
+  fileQueue.push({ id: nextFile++, path: '/Users/you/Recordings/call.wav', watched: true });
+}, 300);
 
 const api = {
   core: {

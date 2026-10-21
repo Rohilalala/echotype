@@ -504,38 +504,71 @@ function renderRecent() {
   }));
 }
 
+// Transcribed files: the queue in files.rs reports each on "file-job" (queued, working, done,
+// error) and runs them one at a time; Save as writes any export format to Downloads.
+const FILE_FORMATS = [['txt', 'Text (.txt)'], ['md', 'Markdown (.md)'], ['docx', 'Word (.docx)'], ['html', 'Web page (.html)'], ['srt', 'Subtitles (.srt)'], ['vtt', 'WebVTT (.vtt)'], ['json', 'JSON (.json)']];
+const fileName = path => path.split(/[\\/]/).pop();
 function renderDrops() {
   const dismiss = r => h('button', { className: 'icon-btn', type: 'button', 'aria-label': `Dismiss ${r.name}`, onclick: () => { dropResults = dropResults.filter(x => x !== r); renderDrops(); } }, svg(CROSS));
-  $('#dropResults').replaceChildren(...dropResults.map((r, i) => {
-    if (r.pending) return h('div', { className: 'result' }, h('div', { className: 'result-head' }, h('span', { className: 'result-name working' }, `Transcribing ${r.name}`)));
+  const waiting = dropResults.filter(r => r.state === 'queued' && !r.watched).length;
+  const left = dropResults.filter(r => r.state === 'queued' || r.state === 'working').length;
+  const head = left > 1 && h('div', { className: 'result-head batch-head' },
+    h('span', { className: 'result-name working' }, `Transcribing ${left} files, one at a time`),
+    waiting > 0 && h('button', { className: 'btn quiet', type: 'button', onclick: cancelFiles }, waiting === 1 ? 'Cancel the next file' : `Cancel the next ${waiting}`));
+  $('#dropResults').replaceChildren(head || '', ...dropResults.map((r, i) => {
+    if (r.state === 'queued') return h('div', { className: 'result' }, h('div', { className: 'result-head' }, h('span', { className: 'result-name', title: r.path }, r.name), h('span', { className: 'result-meta' }, 'Waiting')));
+    if (r.state === 'working') return h('div', { className: 'result' }, h('div', { className: 'result-head' }, h('span', { className: 'result-name working', title: r.path }, `Transcribing ${r.name}`)));
+    if (r.state === 'cancelled') return h('div', { className: 'result' }, h('div', { className: 'result-head' }, h('span', { className: 'result-name', title: r.path }, r.name), h('span', { className: 'result-meta' }, 'Cancelled'), dismiss(r)));
     if (r.error) return h('div', { className: 'result err', role: 'alert' },
       h('div', { className: 'result-head' }, h('span', { className: 'result-name' }, `Couldn't transcribe ${r.name}`), dismiss(r)),
       h('p', {}, r.error),
-      h('p', { className: 'hint' }, 'Echotype reads .opus, .ogg, .m4a, .mp3, .wav and .flac files.'));
+      h('p', { className: 'hint' }, 'Echotype reads .opus, .ogg, .m4a, .mp3, .wav and .flac files, and the sound of .mp4 and .mov videos.'));
     const copy = h('button', { className: 'btn', type: 'button' }, 'Copy');
     copy.onclick = () => copyText(r.showRaw ? r.raw : r.text, copy);
+    const saveAs = h('select', { 'aria-label': `Save ${r.name} as`, onchange: e => {
+      const format = e.target.value;
+      e.target.value = '';
+      if (format) invoke('file_save', { path: r.path, text: r.showRaw ? r.raw : r.text, secs: r.secs || 0, format }).then(p => { r.savedTo = p; r.saveError = ''; renderDrops(); }, err => { r.saveError = String(err); renderDrops(); });
+    } }, h('option', { value: '' }, 'Save as…'), FILE_FORMATS.map(([v, l]) => h('option', { value: v }, l)));
     const differs = r.raw.trim() !== r.text.trim();
     const seg = differs && h('span', { className: 'seg', role: 'radiogroup', 'aria-label': 'Version' },
       ['Clean', 'Raw'].map(v => h('label', {}, h('input', { type: 'radio', name: 'v' + i, checked: (v === 'Raw') === !!r.showRaw, onchange: () => { r.showRaw = v === 'Raw'; renderDrops(); } }), h('span', {}, v))));
     const secs = ((r.stt_ms || 0) + (r.cleanup_ms || 0)) / 1000;
+    const saved = r.savedTo || r.saved;
     return h('div', { className: 'result' },
-      h('div', { className: 'result-head' }, h('span', { className: 'result-name', title: r.path }, r.name), h('span', { className: 'result-meta', title: timingTitle(r) }, `${secs.toFixed(1)} s`), seg, copy, dismiss(r)),
+      h('div', { className: 'result-head' }, h('span', { className: 'result-name', title: r.path }, r.name), h('span', { className: 'result-meta', title: timingTitle(r) }, `${secs.toFixed(1)} s`), seg, copy, saveAs, dismiss(r)),
       h('p', { className: 'text' }, r.showRaw ? r.raw : r.text),
-      r.warning && h('p', { className: 'hint' }, r.warning));
+      r.warning && h('p', { className: 'hint' }, r.warning),
+      saved && h('p', { className: 'hint' }, `${r.watched && !r.savedTo ? 'From the watched folder. Transcript saved' : 'Saved'} to ${saved}`),
+      r.saveError && h('p', { className: 'hint error', role: 'alert' }, r.saveError));
   }));
 }
 const timingTitle = r => `Speech ${r.stt_ms} ms` + (r.cleanup_ms ? `, cleanup ${r.cleanup_ms} ms` : '');
 
-async function transcribe(path) {
-  const r = { path, name: path.split(/[\\/]/).pop(), pending: true };
-  dropResults.unshift(r);
-  dropResults = dropResults.slice(0, 5);
-  renderDrops();
-  try { Object.assign(r, await invoke('transcribe_file', { path })); }
-  catch (e) { r.error = String(e); }
-  r.pending = false;
+// A file the queue reports on: new ones go on top; finished ones beyond the latest 20 drop off.
+function fileJob(job) {
+  let r = dropResults.find(x => x.id === job.id);
+  if (!r) dropResults.unshift(r = { name: fileName(job.path), state: 'queued' });
+  Object.assign(r, job);
+  const busy = x => x.state === 'queued' || x.state === 'working';
+  let kept = 0;
+  dropResults = dropResults.filter(x => busy(x) || kept++ < 20);
   renderDrops();
 }
+async function transcribe(paths) {
+  try { (await invoke('transcribe_files', { paths })).reverse().forEach(j => dropResults.some(x => x.id === j.id) || fileJob({ ...j, state: 'queued' })); }
+  catch (e) { fileJob({ id: `e${Date.now()}`, path: paths[0], state: 'error', error: String(e) }); }
+}
+async function cancelFiles() {
+  const ids = await invoke('cancel_files').catch(() => []);
+  for (const r of dropResults) if (ids.includes(r.id)) r.state = 'cancelled';
+  renderDrops();
+}
+listen('file-job', ({ payload }) => fileJob(payload));
+$('#pickFiles').onclick = async () => {
+  const paths = await invoke('pick_files', { folder: false }).catch(e => { fileJob({ id: `e${Date.now()}`, path: 'Files', state: 'error', error: String(e) }); return []; });
+  if (paths.length) transcribe(paths);
+};
 
 // ---------- providers & keys ----------
 const preset = id => presets.find(p => p.id === id);
@@ -1433,6 +1466,23 @@ $('#upgradeYes').addEventListener('click', () => {
   renderHotkey();
 });
 $('#upgradeNo').addEventListener('click', () => dismiss('upgrade_offer'));
+
+// Settings → Files: new recordings in the watched folder get a transcript (files.rs).
+function renderWatch() {
+  const on = !!S.watch_folder;
+  $('#watchDesc').textContent = on
+    ? `${S.watch_folder}. New recordings that appear here get a transcript; what was already there is left alone, and your recordings are never changed.`
+    : 'Off. Pick a folder and every new audio or video file that appears in it is transcribed. Echotype only reads your recordings.';
+  $('#watchOff').hidden = $('#watchFormatRow').hidden = $('#watchSubRow').hidden = !on;
+}
+$('#watchPick').onclick = async () => {
+  $('#watchError').hidden = true;
+  try {
+    const [dir] = await invoke('pick_files', { folder: true });
+    if (dir) { S.watch_folder = dir; save(); renderWatch(); }
+  } catch (e) { $('#watchError').textContent = String(e); $('#watchError').hidden = false; }
+};
+$('#watchOff').onclick = () => { S.watch_folder = ''; save(); renderWatch(); };
 
 function renderStartup() {
   const ok = sys.can_autostart;
@@ -2453,7 +2503,7 @@ listen('tauri://drag-drop', ({ payload }) => {
   $('#drop').classList.remove('over');
   if (!payload?.paths?.length) return;
   if ($('#onboard').hidden) go('home');
-  payload.paths.forEach(transcribe);
+  transcribe(payload.paths);
 });
 
 // ---------- boot ----------
@@ -2523,6 +2573,7 @@ function renderAll() {
   renderRaw();
   renderUpgrade();
   renderStartup();
+  renderWatch();
   renderMicNote();
   renderTalk();
   renderStt();
