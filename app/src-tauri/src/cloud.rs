@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 /// The Supabase project that signs people in. The anon key is public by design: it only lets
 /// people sign in, and the project exposes no tables. ECHOTYPE_SUPABASE_URL/_ANON_KEY override both (tests).
-const SUPABASE_URL: &str = "https://PROJECT.supabase.co";
-const SUPABASE_ANON_KEY: &str = "ANON_KEY";
+const SUPABASE_URL: &str = "https://njozixvvvygsbawbyets.supabase.co";
+const SUPABASE_ANON_KEY: &str = "sb_publishable_12buu7IYCStk5rVbl_RCFA_8TBKafr7";
 
 const SECRET: &str = "cloud";
 /// The error every command returns when there is no usable key. The UI matches on it.
