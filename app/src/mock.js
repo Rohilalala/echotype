@@ -64,7 +64,9 @@ const low = q.get('ram') === '8';
 const sys = { total_ram_gb: low ? 8 : 24, available_ram_gb: low ? 3.2 : 5.1, os: 'macos', arch: 'aarch64', can_autostart: q.get('appdir') !== '0', low_ram: low, cloud: q.has('cloud'),
   echotype_model_installed: true, echotype_model_mb: 401,
   cleaners: [{ id: 'echotype-tiny', label: 'Echotype Tiny', note: '0.5B. Light and quick; best for English.', downloadable: q.has('dl-cleaners'), size_mb: 401, ram_mb: 552, installed: true, automatic: true, recommended: true, warning: null },
-    { id: 'echotype-medium', label: 'Echotype Medium', note: '1.5B. Catches more; uses about twice the memory.', downloadable: q.has('dl-cleaners'), size_mb: 940, ram_mb: 1099, installed: false, automatic: false, recommended: false, warning: low ? 'Uses about 1.1 GB while dictating. On an 8 GB Mac this can slow other apps.' : null }] };
+    { id: 'echotype-medium', label: 'Echotype Medium', note: '1.5B. Catches more; uses about twice the memory.', downloadable: q.has('dl-cleaners'), size_mb: 940, ram_mb: 1099, installed: false, automatic: false, recommended: false, warning: low ? 'Uses about 1.1 GB while dictating. On an 8 GB Mac this can slow other apps.' : null }],
+  // ?writer: Echotype Writer installed (lib.rs SystemInfo.writer).
+  writer: { id: 'echotype-writer', label: 'Echotype Writer', note: '1.5B. Edits selected text when you ask: Command Mode and Transforms.', downloadable: true, size_mb: 860, ram_mb: 1012, installed: q.has('writer'), automatic: false, recommended: false, warning: null } };
 for (const m of models) Object.assign(m, { english_only: m.id.endsWith('.en'), fits: m.ram_mb + 2048 <= sys.available_ram_gb * 1024 });
 const rec = models.find(m => m.id === 'large-v3-turbo-q5_0');
 rec.recommended = true;
@@ -128,7 +130,7 @@ const commands = {
   list_models: () => { automatic(); return structuredClone(models); },
   // ?dl=slow takes five times as long; ?dl=stuck never finishes (onboarding's "getting ready").
   download_model: async ({ id }) => {
-    const m = models.find(x => x.id === id), total = m.size_mb * 1048576;
+    const m = [...models, ...sys.cleaners, sys.writer].find(x => x.id === id), total = m.size_mb * 1048576; // cleaners and the Writer too
     const steps = id === 'tiny.en' ? 16 : 40, ms = (id === 'tiny.en' ? 60 : 110) * (q.get('dl') === 'slow' ? 5 : 1);
     for (let i = 1; i <= steps; i++) {
       await wait(ms);
@@ -136,18 +138,17 @@ const commands = {
       if (cancelled.delete(id)) { emit('model-download', { id, downloaded: 0, total, done: true, error: 'Download cancelled' }); throw 'Download cancelled'; }
       emit('model-download', { id, downloaded: (total * i) / steps, total, done: false });
     }
-    m.downloaded = true;
+    m.downloaded = m.installed = true;
     emit('model-download', { id, downloaded: total, total, done: true });
     return null;
   },
   cancel_download: ({ id }) => { cancelled.add(id); return null; },
-  delete_model: ({ id }) => { models.find(x => x.id === id).downloaded = false; return null; },
+  delete_model: ({ id }) => { const m = [...models, ...sys.cleaners, sys.writer].find(x => x.id === id); m.downloaded = m.installed = false; return null; },
   list_input_devices: () => [
     { name: 'MacBook Pro Microphone', bluetooth: false, default: true, builtin: true },
     { name: 'AirPods Pro', bluetooth: true, default: false, builtin: false },
     { name: 'Shure MV7', bluetooth: false, default: false, builtin: false },
   ],
-  writer: { id: 'echotype-writer', label: 'Echotype Writer', note: '1.5B. Edits selected text when you ask: Command Mode and Transforms.', downloadable: true, size_mb: 940, ram_mb: 1150, installed: q.has('writer'), automatic: false, recommended: false, warning: null },
   // ?talk=fn&globe=0|1&im=0|1&relaunch=1 shows each talk-key state.
   shortcut_status: () => {
     const talk = settings.talk_key !== 'accelerator', globe = q.get('globe') !== '0', im = q.get('im') !== '0', relaunch = q.has('relaunch');
