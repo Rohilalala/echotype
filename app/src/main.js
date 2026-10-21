@@ -120,7 +120,7 @@ function changed(p) {
   if (p === 'input_device' || p === 'prefer_builtin_mic') renderMicNote();
   if (p === 'cleanup.enabled') renderRaw();
   if (p === 'translate_to_english') renderLangNote();
-  if (p === 'languages') { renderLanguages(); if (obStep === 4 && !$('#onboard').hidden) obLangRender(); }
+  if (p === 'languages' || p === 'script') { renderLanguages(); if (obStep === 2 && !$('#onboard').hidden) obLangsRender(); }
   if (p === 'cleanup.enabled') { setCleanupInert(); renderCloud(); refreshCloud(); }
   if (p === 'cleanup.match_app') refreshLastApp();
   if (p.startsWith('local_api')) refreshApi();
@@ -983,10 +983,8 @@ function langToggle(code) {
   if (!langFull) save();
   changed('languages');
 }
-// Onboarding's card fits the most spoken ones (plus any already picked); Settings lists them all.
-const OB_LANGS = ['en', 'hi', 'es', 'fr', 'de', 'pt', 'zh', 'ja', 'ar', 'bn', 'ta', 'te'];
-function langChips(box, only) {
-  const list = LANGS.filter(([v]) => v !== 'auto' && (!only || only.includes(v) || S.languages.includes(v)));
+function langChips(box) {
+  const list = LANGS.filter(([v]) => v !== 'auto');
   box.replaceChildren(...list.map(([v, l]) => h('button', { type: 'button', 'aria-pressed': String(S.languages.includes(v)), 'data-v': v }, l)));
 }
 function langDesc() {
@@ -994,11 +992,24 @@ function langDesc() {
     : S.languages.length ? 'Each dictation is typed in whichever of these you spoke.'
     : `Up to ${LANG_MAX}. Picking yours stops short clips coming out in another language.`;
 }
+// How should your words look: a line in each script for the languages stt.rs ROMANISED can type
+// in English letters. The others are always typed in their own script.
+const SCRIPT_SAMPLE = {
+  hi: ['Namaste, aap kaise hain?', 'नमस्ते, आप कैसे हैं?'],
+  mr: ['Namaskar, tumhi kase aahat?', 'नमस्कार, तुम्ही कसे आहात?'],
+  ur: ['Assalam alaikum, aap kaise hain?', 'السلام علیکم، آپ کیسے ہیں؟'],
+  bn: ['Nomoskar, apni kemon achhen?', 'নমস্কার, আপনি কেমন আছেন?'],
+};
+const scriptLang = () => S.languages.find(c => SCRIPT_SAMPLE[c]);
 function renderLanguages() {
   $('#langAuto').checked = !S.languages.length;
   langChips($('#langChips'));
   $('#langPickDesc').textContent = langDesc();
   $('#langPickDesc').classList.toggle('warn', langFull);
+  const c = scriptLang();
+  $('#scriptRow').hidden = !c;
+  if (c) $('#scriptDesc').textContent = SCRIPT_SAMPLE[c][S.script === 'latin' ? 0 : 1]
+    + (S.script === 'latin' && S.cleanup.provider === 'echotype' ? ' The built-in cleanup model is skipped: it was trained on English.' : '');
 }
 $('#langChips').addEventListener('click', e => { const b = e.target.closest('button'); if (b) langToggle(b.dataset.v); });
 $('#langAuto').addEventListener('change', e => {
@@ -1393,8 +1404,8 @@ window.addEventListener('focus', () => S && refreshStatus()); // Input Monitorin
 for (const b of $$('[data-perm]')) b.addEventListener('click', () => invoke('open_permission_settings', { kind: b.dataset.perm }));
 
 // ---------- onboarding ----------
-// Five steps in one card (.notes/ONBOARDING.md): the microphone with a sound check, a practice
-// dictation into a field here, Accessibility and a real paste in another app, a few personal
+// Six steps in one card (.notes/ONBOARDING.md): the microphone with a sound check, the user's
+// languages, a practice dictation into a field here, Accessibility and a real paste in another app, a few personal
 // touches, then the recap. The orb (orb.js) moves between the steps' .ob-orb slots. The speech
 // model downloads from the first frame, tiny.en first when nothing is on this Mac yet, so the
 // practice run needn't wait for the big one (Automatic uses whatever is downloaded).
@@ -1406,7 +1417,7 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
 const local = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { return null; } };
 let obStep = 1, orb = null, obPoll = 0, obSeq = 0;
 const obT = {}; // timers by name
-const ob = { cleanHow: 'off', mic: null, heard: 0, checked: false, quiet: false, paused: false, ax: null, axSince: 0, asked: false, pressed: false, offerClick: false, watched: false, recAt: 0, secs: 0, hinglish: false, mine: false, wispr: '' };
+const ob = { cleanHow: 'off', mic: null, heard: 0, checked: false, quiet: false, paused: false, ax: null, axSince: 0, asked: false, pressed: false, offerClick: false, watched: false, recAt: 0, secs: 0, wispr: '' };
 const later = (name, ms, fn) => { clearTimeout(obT[name]); obT[name] = setTimeout(fn, ms); };
 // Show something that appears within a step with a short rise.
 function pop(el, on = true) {
@@ -1564,9 +1575,9 @@ async function obFilmEnd(show) {
 // one's children come in, staggered, live. Without them the same in two beats; reduced motion
 // swaps at once and fades. The orb is outside the steps and follows its slot either way.
 function obShow(n, first = false) {
-  n = Math.max(1, Math.min(5, n));
-  // Step 3 is macOS's Accessibility switch; elsewhere pasting needs nothing, so the flow steps over it.
-  if (n === 3 && !isMac) n = n > obStep ? 4 : 2;
+  n = Math.max(1, Math.min(6, n));
+  // Step 4 is macOS's Accessibility switch; elsewhere pasting needs nothing, so the flow steps over it.
+  if (n === 4 && !isMac) n = n > obStep ? 5 : 3;
   const from = $(`.ob-step[data-step="${obStep}"]`), to = $(`.ob-step[data-step="${n}"]`);
   document.documentElement.classList.toggle('ob-back', n < obStep);
   obStep = n;
@@ -1588,26 +1599,27 @@ function obShow(n, first = false) {
 function obEnter(n) {
   const to = $(`.ob-step[data-step="${n}"]`);
   if (S.onboard_step !== n) { S.onboard_step = n; save(true); } // a relaunch resumes here
-  if (filming()) invoke('film_float', { on: n !== 3 }).catch(() => {}); // step 3 brings System Settings in front
+  if (filming()) invoke('film_float', { on: n !== 4 }).catch(() => {}); // step 4 brings System Settings in front
   $$('#obDots li').forEach((li, i) => { li.className = i + 1 === n ? 'on' : i + 1 < n ? 'done' : ''; });
-  $('#obDots').ariaLabel = `Setup, step ${n} of 5`;
+  $('#obDots').ariaLabel = `Setup, step ${n} of 6`;
   orb.slot(to.querySelector('.ob-orb'));
   orb.progress(null);
   for (const k of ['adv', 'click', 'quiet', 'pause']) clearTimeout(obT[k]);
   if (n !== 1) obListen(false);
   // Permissions are polled while their step shows, so a grant in System Settings carries on by itself.
   clearInterval(obPoll);
-  if (n === 1 || n === 3) { obPoll = setInterval(obTick, n === 1 ? 700 : 500); obTick(); }
+  if (n === 1 || n === 4) { obPoll = setInterval(obTick, n === 1 ? 700 : 500); obTick(); }
   if (n === 1) { if (ob.mic === 'granted' && !ob.checked && !ob.listening) obListen(true); obMicRender(); } // back here before the check finished
-  if (n === 2) {
+  if (n === 2) obLangsRender();
+  if (n === 3) {
     renderObKeys();
     obTryRender();
     if (!ob.pressed) later('click', 8000, () => { ob.offerClick = true; obFoot(); }); // the hotkey never fired
   }
-  if (n === 3) { ob.axSince = Date.now(); $('#obStale').hidden = true; renderObKeys(); obAxRender(); }
-  if (n === 4) obPrefsRender();
-  else orb.style(null); // step 4 wears the user's orb; the other steps the default, in ink
-  if (n === 5) obDoneRender();
+  if (n === 4) { ob.axSince = Date.now(); $('#obStale').hidden = true; renderObKeys(); obAxRender(); }
+  if (n === 5) obPrefsRender();
+  else orb.style(null); // step 5 wears the user's orb; the other steps the default, in ink
+  if (n === 6) obDoneRender();
   if (n !== 1 && !BUSY.includes(dictation.state)) orb.set('orb');
   obFoot();
   renderObModel();
@@ -1619,7 +1631,7 @@ function obFoot() {
   if ($('#onboard').hidden) return;
   const next = $('#obNext'), alt = $('#obAlt');
   $('#obBack').textContent = obStep === 1 ? 'Quit' : 'Back';
-  $('#obSkip').hidden = obStep === 1 || obStep === 5;
+  $('#obSkip').hidden = obStep === 1 || obStep === 6;
   let label = 'Continue', extra = '';
   next.hidden = next.disabled = false;
   if (obStep === 1) {
@@ -1628,12 +1640,14 @@ function obFoot() {
     next.disabled = ob.mic === 'asking' || ob.mic == null;
     if (ob.mic === 'granted' && !ob.checked) extra = ob.paused ? 'Listen again' : $('#obMicPickRow').hidden ? 'Wrong microphone?' : '';
   } else if (obStep === 2) {
-    if (ob.offerClick) extra = dictation.state === 'recording' ? 'Click to finish' : 'Click to start instead';
+    extra = 'Skip for now';
   } else if (obStep === 3) {
-    if (!ob.ax) { label = 'Open System Settings'; extra = 'Not now: keep text on the clipboard'; }
+    if (ob.offerClick) extra = dictation.state === 'recording' ? 'Click to finish' : 'Click to start instead';
   } else if (obStep === 4) {
+    if (!ob.ax) { label = 'Open System Settings'; extra = 'Not now: keep text on the clipboard'; }
+  } else if (obStep === 5) {
     if (obQ < obQs().length - 1) extra = 'Skip the rest';
-  } else if (obStep === 5) label = obRelaunch() ? 'Finish and relaunch' : 'Finish';
+  } else if (obStep === 6) label = obRelaunch() ? 'Finish and relaunch' : 'Finish';
   next.textContent = label;
   alt.textContent = extra;
   alt.hidden = !extra;
@@ -1651,24 +1665,23 @@ $('#obNext').addEventListener('click', async () => {
       return obTick();
     }
   }
-  if (obStep === 3 && !ob.ax) {
+  if (obStep === 4 && !ob.ax) {
     ob.asked = true;
     obAxRender();
     return invoke('open_permission_settings', { kind: 'accessibility' }).catch(() => {});
   }
-  if (obStep === 5) return obFinish();
-  if (obStep === 4 && obQ < obQs().length - 1) return obQShow(obQ + 1);
+  if (obStep === 6) return obFinish();
+  if (obStep === 5 && obQ < obQs().length - 1) return obQShow(obQ + 1);
   obShow(obStep + 1);
 });
 $('#obAlt').addEventListener('click', () => {
   if (obStep === 1 && ob.paused) { obListen(true); return obMicRender(); }
   if (obStep === 1) { pop($('#obMicPickRow')); $('#obMicPick').focus(); return obFoot(); }
-  if (obStep === 2) return invoke('toggle_dictation').catch(() => {});
-  if (obStep === 3) obShow(4);
-  else if (obStep === 4) obShow(5);
+  if (obStep === 3) return invoke('toggle_dictation').catch(() => {});
+  if (obStep === 2 || obStep === 4 || obStep === 5) obShow(obStep + 1); // skip for now, not now, skip the rest
 });
-// Back (and Esc) walk back through step 4's questions before leaving it.
-const obBackOne = () => (obStep === 4 && obQ > 0 ? obQShow(obQ - 1) : obShow(obStep - 1));
+// Back (and Esc) walk back through step 5's questions before leaving it.
+const obBackOne = () => (obStep === 5 && obQ > 0 ? obQShow(obQ - 1) : obShow(obStep - 1));
 $('#obBack').addEventListener('click', () => (obStep === 1 ? invoke('quit_app').catch(() => {}) : obBackOne()));
 $('#obSkip').addEventListener('click', () => finishOnboarding('home'));
 // Enter is the primary action; Esc and ⌘[ go back. Esc never closes onboarding, and does
@@ -1690,7 +1703,7 @@ async function obTick() {
   let p;
   try { p = await invoke('check_permissions'); } catch { return; }
   if (obStep === 1) obMicStatus(p);
-  if (obStep === 3) obAxStatus(!!p.accessibility);
+  if (obStep === 4) obAxStatus(!!p.accessibility);
 }
 
 // ----- 1: the microphone -----
@@ -1754,7 +1767,28 @@ function obMicRender() {
   obFoot();
 }
 
-// ----- 2: try it -----
+// ----- 2: languages -----
+// Two menus over `languages` (Auto-detect is the empty list; a third picked in Settings stays) and,
+// for a language stt.rs can type in English letters, the script choice with a line in it.
+function obLangsRender() {
+  const [a = 'auto', b = ''] = S.languages, opt = ([v, l]) => h('option', { value: v }, l);
+  $('#obLang1').replaceChildren(...LANGS.map(opt));
+  $('#obLang2').replaceChildren(opt(['', 'None']), ...LANGS.filter(([v]) => v !== 'auto' && v !== a).map(opt));
+  $('#obLang1').value = a;
+  $('#obLang2').value = b;
+  $('#obLang2').disabled = a === 'auto';
+  const c = scriptLang();
+  pop($('#obScriptRow'), !!c); // rises in when a language with English letters is picked
+  if (c) $('#obScriptSample').textContent = SCRIPT_SAMPLE[c][S.script === 'latin' ? 0 : 1];
+}
+for (const el of [$('#obLang1'), $('#obLang2')]) el.addEventListener('change', () => {
+  const a = $('#obLang1').value;
+  S.languages = a === 'auto' ? [] : [...new Set([a, $('#obLang2').value, ...S.languages.slice(2)].filter(Boolean))].slice(0, LANG_MAX);
+  save();
+  changed('languages');
+});
+
+// ----- 3: try it -----
 function renderObKeys() {
   $('#obSay').replaceChildren(`${verb()} `, h('span', { className: 'keys' }, talkCaps()), ' and say: ', h('q', {}, SAY));
   $('#obKeys').replaceChildren(...talkCaps().map(k => { k.classList.toggle('wide', k.textContent.length > 2); return k; }));
@@ -1770,12 +1804,12 @@ function obTryRender() {
 }
 listen('hotkey-state', ({ payload: down }) => {
   $('#obKeys').classList.toggle('down', !!down);
-  if (down && obStep === 2) { ob.pressed = true; clearTimeout(obT.click); }
+  if (down && obStep === 3) { ob.pressed = true; clearTimeout(obT.click); }
 });
 
 function obDictation(p) {
   if ($('#onboard').hidden) return;
-  if (obStep === 2) obPractice(p);
+  if (obStep === 3) obPractice(p);
   else return;
   if (p.state !== 'recording') orb.level(0);
   obFoot();
@@ -1807,7 +1841,7 @@ function obPractice(p) {
     ob.tried = true;
     obReveal(p.text);
     orb.set('check');
-    later('orb', 1600, () => obStep === 2 && !BUSY.includes(dictation.state) && orb.set('orb'));
+    later('orb', 1600, () => obStep === 3 && !BUSY.includes(dictation.state) && orb.set('orb'));
     const n = p.text.split(/\s+/).filter(Boolean).length;
     say(`That’s it. ${n} ${n === 1 ? 'word' : 'words'}${ob.secs >= 0.3 ? ` in ${ob.secs.toFixed(1)} s` : ''}.`);
     $('#obTryState').dataset.tone = 'ok';
@@ -1826,7 +1860,7 @@ function obReveal(text) {
   $('#obResult').replaceChildren(...words.flatMap((w, i) => [i ? ' ' : '', h('span', { className: 'w', style: `--d:${Math.round(i * step)}ms` }, w)]));
 }
 
-// ----- 3: Accessibility -----
+// ----- 4: Accessibility -----
 // Once it's on, the step says so and moves on by itself; no trial paste in another app.
 function obAxStatus(on) {
   const was = ob.ax;
@@ -1837,8 +1871,8 @@ function obAxStatus(on) {
     invoke('focus_main').catch(() => {});
     invoke('play_sound', { name: 'lock' }).catch(() => {});
     orb.set('check');
-    later('orb', 1400, () => obStep === 3 && !BUSY.includes(dictation.state) && orb.set('orb'));
-    later('adv', 1600, () => obStep === 3 && obShow(4));
+    later('orb', 1400, () => obStep === 4 && !BUSY.includes(dictation.state) && orb.set('orb'));
+    later('adv', 1600, () => obStep === 4 && obShow(5));
   }
   obAxRender();
 }
@@ -1856,7 +1890,7 @@ $('#obReset').addEventListener('click', async () => {
   catch (e) { $('#obAxState').textContent = String(e); }
 });
 
-// ----- 4: make it yours -----
+// ----- 5: make it yours -----
 // One question at a time (.ob-q). A tile saves as it's picked and stays on screen, so every
 // choice can be tried; Continue moves on. The pill's questions are macOS-only (data-only).
 let obQ = 0;
@@ -1864,21 +1898,13 @@ const obQs = () => $$('.ob-q').filter(q => (q.dataset.q !== 'wispr' || !!wispr) 
 function obPrefsRender() {
   $('#obName').value = S.display_name || '';
   obHello();
-  // Hindi among the Mac's languages: Hinglish is likely, so it starts selected (once).
-  if (local('ob-lang') == null && !(S.languages.includes('hi') && S.translate_to_english) && navigator.languages?.some(l => /^hi\b/i.test(l))) {
-    if (!S.languages.includes('hi')) S.languages = ['en', 'hi'];
-    ob.mine = true;
-    save();
-    obLang('hinglish');
-  }
-  obLangRender();
   if (wispr) $('#obWisprList').replaceChildren(...wisprLines(wispr).map(([k, v]) => h('li', {}, h('b', {}, `${k}: `), v)));
   renderObSpeed();
   obCleanRender();
   // Back from the recap lands on the last question.
   obQShow(document.documentElement.classList.contains('ob-back') ? obQs().length - 1 : 0, true);
   // The name is typed straight onto the card, so the caret is there waiting (labelled by the heading).
-  if (obQ === 0) setTimeout(() => obStep === 4 && obQ === 0 && $('#obName').focus({ preventScroll: true }));
+  if (obQ === 0) setTimeout(() => obStep === 5 && obQ === 0 && $('#obName').focus({ preventScroll: true }));
 }
 // Under the name, the greeting Home will give, fading in once there's a name (and out, as it was).
 function obHello() {
@@ -1908,15 +1934,12 @@ function obQShow(i, first = false) {
   if (!first) q.querySelector('.ob-tile[tabindex="0"], input').focus({ preventScroll: true });
 }
 
-const obHinglishOn = () => ob.hinglish || (S.languages.includes('hi') && S.translate_to_english);
-const obMine = () => ob.mine || S.languages.length > 0;
 const obVal = (t, key) => ({ true: true, false: false })[t.dataset.v] ?? (key === 'ball_size' ? Number(t.dataset.v) : t.dataset.v);
 function obTilesRender() {
   for (const g of $$('.ob-q .ob-tiles')) {
     const key = g.dataset.key, q = g.closest('.ob-q').dataset.q, v = t => t.dataset.v;
     const on = t => key === 'ball_size' ? Math.abs(S.ball_size - obVal(t, key)) < 0.1
       : key ? S[key] === obVal(t, key)
-      : q === 'lang' ? v(t) === (obMine() ? 'mine' : 'auto')
       : q === 'wispr' ? v(t) === ob.wispr
       : q === 'clean' ? (v(t) === 'yes' ? obCleanOn() : !obCleanOn() && !S.cleanup.enabled)
       : v(t) === (S.sounds ? S.sound_pack : 'off'); // sound
@@ -1930,7 +1953,6 @@ function obTilesRender() {
 function obPick(g, t) {
   const key = g.dataset.key, q = g.closest('.ob-q').dataset.q, v = obVal(t, key);
   if (key) { S[key] = v; save(); syncBound(); changed(key); }
-  else if (q === 'lang') obLangPick(v);
   else if (q === 'wispr') obWisprPick(v);
   else if (q === 'clean') obCleanPick(v === 'yes');
   else { // sound: tapping one plays it, again if it's already the one
@@ -1967,60 +1989,12 @@ for (const g of $$('.ob-q .ob-tiles')) {
 // The card's orb is the user's: their style in their colour on the pill's dark disc and, on the
 // ball question, the resting ball at the pill's real size. `key`/`v`: a tile being looked at.
 function obOrbPreview(key, v) {
-  if (!orb || obStep !== 4 || $('#onboard').hidden) return;
+  if (!orb || obStep !== 5 || $('#onboard').hidden) return;
   const pill = isMac && S.show_in !== 'menubar', o = { orb_listen: S.orb_listen, orb_color: S.orb_color, ball_size: S.ball_size };
   if (key) o[key] = v;
   const ball = pill && obQs()[obQ]?.dataset.q === 'ball';
   orb.style(pill ? { listen: o.orb_listen, think: S.orb_think, detail: S.orb_detail, color: o.orb_color, pill: ball ? { size: o.ball_size, zoom: S.pill_size } : null } : null);
   if (!BUSY.includes(dictation.state)) orb.set(ball ? 'ball' : 'orb');
-}
-
-// Hinglish: Hindi + English, typed as English. It needs a model that translates (Medium, or Small
-// if Medium doesn't fit), so it switches on once that model is on this Mac.
-const obHinglishModel = () => ['medium', 'small'].map(id => models.find(m => m.id === id)).find(m => m && (m.fits || m.downloaded));
-function obLang(v) {
-  local('ob-lang', v);
-  ob.hinglish = v === 'hinglish';
-  const m = obHinglishModel();
-  if (ob.hinglish && m) { if (m.downloaded) obModelLanded(m.id); else obFetch(m.id); }
-  if (!ob.hinglish && S.translate_to_english) { S.translate_to_english = false; syncBound(); save(); renderLangNote(); }
-  obLangRender();
-}
-// "Any language" clears the list; "My languages" opens the chips, starting from this Mac's
-// languages (up to 3, else English).
-function obLangPick(v) {
-  ob.mine = v === 'mine';
-  langFull = false;
-  if (!ob.mine) {
-    S.languages = [];
-    if (obHinglishOn()) obLang('en');
-  } else if (!S.languages.length) {
-    const mac = (navigator.languages ?? []).map(l => LANGS.find(([c]) => c !== 'auto' && l.toLowerCase().startsWith(c))?.[0]).filter(Boolean);
-    S.languages = [...new Set(mac)].slice(0, LANG_MAX);
-    if (!S.languages.length) S.languages = ['en'];
-  }
-  save();
-  changed('languages');
-}
-$('#obLangChips').addEventListener('click', e => {
-  const b = e.target.closest('button');
-  if (!b) return;
-  langToggle(b.dataset.v);
-  if (!S.languages.includes('hi') && obHinglishOn()) obLang('en'); // Hinglish needs Hindi
-});
-$('#obHinglish').addEventListener('change', e => obLang(e.target.checked ? 'hinglish' : 'en'));
-function obLangRender() {
-  obTilesRender();
-  $('#obLangChips').hidden = !obMine();
-  if (obMine()) langChips($('#obLangChips'), OB_LANGS);
-  $('#obHinglishRow').hidden = !S.languages.includes('hi') || !obHinglishModel();
-  $('#obHinglish').checked = obHinglishOn();
-  const m = obHinglishModel();
-  $('#obLangDesc').classList.toggle('warn', langFull);
-  $('#obLangDesc').textContent = !obHinglishOn() ? (obMine() ? `${langDesc()} More in Settings → Language.` : '')
-    : !m ? 'Hinglish needs the Medium model, and this Mac is short of memory for it right now.'
-    : m.downloaded ? `Typed in English, with ${m.label}.`
-    : `Typed in English, once ${m.label} (${fmtMB(m.size_mb)}) has downloaded.`;
 }
 
 // The built-in cleanup model, when it's installed and fits. Otherwise "Yes" means setting up a
@@ -2047,12 +2021,12 @@ function obCleanRender() {
 }
 $('#obCleanHow').addEventListener('click', () => { ob.cleanHow = ob.cleanHow === 'key' ? 'local' : 'key'; obCleanRender(); obTilesRender(); });
 
-// ----- 5: you're set -----
+// ----- 6: you're set -----
 function obDoneRender() {
   $('#obT5').textContent = firstName() ? `You're set, ${firstName()}.` : "You're set.";
   const toggle = S.mode === 'toggle', [pasteKey] = DEFAULT_LAST();
   const item = (keys, text) => h('li', {}, h('span', { className: 'keys' }, keys), h('span', {}, text));
-  fill($('#obRecap'), // the hands-free line is `false` in toggle mode, which step 4 offers
+  fill($('#obRecap'), // the hands-free line is `false` in toggle mode, which step 5 offers
     item(talkCaps(), toggle ? 'Press to talk, again to type' : 'Hold to talk, let go to type'),
     !toggle && item([...talkCaps(), h('span', { className: 'times' }, '×2')], 'Keep talking hands-free'),
     item([h('kbd', {}, 'esc')], 'Cancel while you talk'),
@@ -2063,7 +2037,7 @@ function obDoneRender() {
 }
 
 async function obFinish() {
-  const how = ob.cleanHow; // a local server or a key, picked in step 4 when there's no built-in model
+  const how = ob.cleanHow; // a local server or a key, picked in step 5 when there's no built-in model
   if (how !== 'off') { setupCleanup(how); return finishOnboarding('cleanup'); } // a key or a server to set up
   const relaunch = obRelaunch();
   // The orb folds back into the ball and drops out of the card, towards the real pill.
@@ -2199,19 +2173,8 @@ function obStartModel() {
   if (tiny && !models.some(m => m.downloaded)) { local('ob-tiny', '1'); obFetch(tiny.id, want.id); }
   else obFetch(want.id);
 }
-function obModelLanded(id) {
-  const m = obHinglishModel();
-  if (ob.hinglish && m?.id === id && m.downloaded) {
-    if (!S.languages.includes('hi')) S.languages = [...S.languages.slice(0, LANG_MAX - 1), 'hi'];
-    S.translate_to_english = true;
-    syncBound();
-    save();
-    renderLangNote();
-  }
-  if (obStep === 4 && !$('#onboard').hidden) {
-    obLangRender();
-    if (document.activeElement !== $('#obSpeed')) renderObSpeed(); // "already on this Mac", not mid-drag
-  }
+function obModelLanded() {
+  if (obStep === 5 && !$('#onboard').hidden && document.activeElement !== $('#obSpeed')) renderObSpeed(); // "already on this Mac", not mid-drag
   obDropTiny();
 }
 // tiny.en was only for the first practice run: once the real model is here and onboarding is
@@ -2236,7 +2199,7 @@ function renderObModel() {
   else if (modelErr[want.id]) fill(el, `Couldn't download ${want.label}: ${modelErr[want.id]} `, h('button', { className: 'link', type: 'button', onclick: () => obFetch(want.id) }, 'Try again'));
   else if (obReady() && dl) fill(el, `Ready to practise. Getting the full model · `, h('span', { className: 'pct' }, pct(dl)));
   else fill(el, 'Getting your speech model ready · ', h('span', { className: 'pct' }, dl ? pct(dl) : '0%'), ' ', api);
-  if (obStep === 2) obTryRender();
+  if (obStep === 3) obTryRender();
 }
 
 // ---------- clipboard ----------
@@ -2280,7 +2243,7 @@ listen('model-download', ({ payload: p }) => {
   if (p.error) { delete progress[p.id]; modelErr[p.id] = p.error; renderModels(); renderObModel(); return; }
   if (p.done) {
     delete progress[p.id];
-    refreshModels().then(() => { renderObModel(); obModelLanded(p.id); });
+    refreshModels().then(() => { renderObModel(); obModelLanded(); });
     return;
   }
   const frac = p.total ? p.downloaded / p.total : 0;

@@ -7,7 +7,7 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
 const now = Date.now();
 
 const settings = {
-  hotkey: 'Alt+Space', mode: 'hold', input_device: null, languages: [], translate_to_english: false,
+  hotkey: 'Alt+Space', mode: 'hold', input_device: null, languages: q.get('langs')?.split(',') ?? [], script: q.get('script') || 'native', translate_to_english: false,
   local_api: { enabled: false, port: 7811 },
   stt: { provider: 'local', local_model: q.has('onboarding') ? '' : 'large-v3-turbo-q5_0', model: '', base_url: '' },
   cleanup: { enabled: !q.has('nocleanup'), provider: 'ollama', model: 'gemma3:4b', base_url: '', style: 'default', custom_instructions: '',
@@ -396,7 +396,7 @@ if (q.has('state')) {
 
 // The dictation shortcut in the preview: hold ⌥ Space (or call __mock.hold(ms)) for what hotkey.rs
 // and lib.rs send: hotkey-state with the keys, then a dictation of "Echotype, meet my Mac." A tap is
-// a hint. From onboarding's step 3 on it counts as pasted into another app.
+// a hint. From onboarding's step 4 on it counts as pasted into another app.
 let held = 0, live = false;
 async function release() {
   const ms = performance.now() - held;
@@ -407,7 +407,7 @@ async function release() {
   live = false;
   if (ms < 300) { emit('dictation-state', { state: 'hint', message: 'Hold ⌥ Space to dictate' }); return; }
   emit('dictation-state', { state: 'transcribing' }); await wait(650);
-  emit('dictation-state', { state: 'done', text: 'Echotype, meet my Mac.', copied: settings.onboard_step < 3 && !settings.onboarded });
+  emit('dictation-state', { state: 'done', text: 'Echotype, meet my Mac.', copied: settings.onboard_step < 4 && !settings.onboarded });
   await wait(400);
   emit('dictation-state', { state: 'idle' });
 }
