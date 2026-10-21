@@ -72,6 +72,9 @@ pub struct Settings {
     /// are offered these instead of having keys taken; onboarding binds them for new installs.
     pub paste_last_hotkey: String,
     pub copy_last_hotkey: String,
+    /// Command Mode: held like the dictation shortcut, it applies the spoken instruction to the
+    /// selected text (or writes what it asks for). "" is unbound.
+    pub command_hotkey: String,
     /// Launch at login. Off for upgraders; onboarding offers it pre-checked.
     pub autostart: bool,
     /// Start, stop and lock sounds.
@@ -264,6 +267,8 @@ impl Default for Settings {
             talk_key: "accelerator".into(),
             paste_last_hotkey: String::new(),
             copy_last_hotkey: String::new(),
+            // macOS only: elsewhere ⌥⇧ switches keyboard layouts, and no modifier wait guards the ⌘C.
+            command_hotkey: if cfg!(target_os = "macos") { "Alt+Shift+Space" } else { "" }.into(),
             autostart: false,
             sounds: true,
             dismissed: vec![],

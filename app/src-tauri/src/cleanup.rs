@@ -327,6 +327,35 @@ pub fn restyle(text: &str, style: &str) -> String {
     out
 }
 
+// ---------- Command Mode: edit the selection by voice ----------
+
+/// System prompt for Command Mode. chat() wraps the message in <transcript>, so the prompt names
+/// the two parts inside it.
+pub const COMMAND_PROMPT: &str = "You edit text on the user's instruction. Inside <transcript> you get the user's selected text in <text> and their spoken instruction in <instruction>. Apply the instruction to the text. If there is no <text>, write what the instruction asks for. Output only the resulting text, ready to paste: no preamble, no explanation, no quotes around it, no code fences.";
+
+/// The message for Command Mode: the selection (if any, and not blank) and the instruction.
+pub fn command_input(selection: Option<&str>, instruction: &str) -> String {
+    let instruction = format!("<instruction>{}</instruction>", instruction.trim());
+    match selection.filter(|t| !t.trim().is_empty()) {
+        Some(t) => format!("<text>{t}</text>\n{instruction}"),
+        None => instruction,
+    }
+}
+
+/// Why Command Mode can't run with this cleanup provider, if it can't. The built-in Echotype
+/// models are trained only to clean dictation and would garble an instruction.
+pub fn command_blocked(s: &Settings, keyless: bool) -> Option<String> {
+    let label = settings::preset(&s.cleanup.provider).map_or(s.cleanup.provider.clone(), |p| p.label.to_string());
+    if s.cleanup.provider == "echotype" {
+        // Cloud is named only in builds that offer it.
+        Some(format!("Command Mode needs a general model: Ollama, LM Studio{}", if settings::CLOUD { ", an API key or Echotype Cloud" } else { " or an API key" }))
+    } else if keyless {
+        Some(format!("Command Mode needs your {label} API key"))
+    } else {
+        None
+    }
+}
+
 // ---------- the pipeline (shared by dictation, file drop, CLI and local API) ----------
 
 #[derive(Serialize, Debug, Clone)]
@@ -970,6 +999,51 @@ mod tests {
         let failed = after_stt(&s, "hello".into(), 1, None, false, true, || {}, |_, _| Err("401 Unauthorized: bad key\nmore".into()));
         assert!(!failed.no_cleanup && failed.text == "hello");
         assert_eq!(failed.warning.unwrap(), "Cleanup failed: Groq: 401 Unauthorized: bad key. Pasted the raw transcript instead.");
+    }
+
+    #[test]
+    fn command_input_holds_the_selection_and_the_instruction() {
+        assert_eq!(command_input(Some("hey can u send it"), " make this more formal "), "<text>hey can u send it</text>\n<instruction>make this more formal</instruction>");
+        // Nothing selected (or only whitespace): the instruction is the text to write.
+        assert_eq!(command_input(None, "write a polite decline"), "<instruction>write a polite decline</instruction>");
+        assert_eq!(command_input(Some(" \n"), "write a polite decline"), "<instruction>write a polite decline</instruction>");
+        assert!(COMMAND_PROMPT.contains("<text>") && COMMAND_PROMPT.contains("<instruction>") && COMMAND_PROMPT.contains("Output only"));
+    }
+
+    #[test]
+    fn command_mode_needs_a_general_model_with_its_key() {
+        let mut s = Settings::default();
+        s.cleanup.provider = "echotype".into();
+        assert!(command_blocked(&s, false).unwrap().contains("general model"));
+        for p in ["ollama", "lmstudio", "custom", "groq"] {
+            s.cleanup.provider = p.into();
+            assert_eq!(command_blocked(&s, false), None, "{p}");
+        }
+        assert_eq!(command_blocked(&s, true).unwrap(), "Command Mode needs your Groq API key");
+    }
+
+    /// The real instruction prompt through chat() against a local Ollama:
+    /// `ECHOTYPE_TEST_OLLAMA=gemma4:e4b cargo test -- --ignored --nocapture command_mode_with_ollama`.
+    #[test]
+    #[ignore]
+    fn command_mode_with_ollama() {
+        let Ok(model) = std::env::var("ECHOTYPE_TEST_OLLAMA") else { return eprintln!("skipped: no ECHOTYPE_TEST_OLLAMA") };
+        let mut s = Settings::default();
+        s.cleanup.provider = "ollama".into();
+        s.cleanup.model = model;
+        let cases = [
+            (Some("hey can u send me the report by friday thx"), "make this more formal"),
+            (Some("We should probably think about maybe moving the launch to next week because the build is not ready yet and QA has not signed off."), "shorter"),
+            (Some("Where is the train station?"), "translate to Spanish"),
+            (Some("We need milk, eggs, bread and coffee."), "turn into bullet points"),
+            (None, "write a polite decline to a meeting invite"),
+        ];
+        for (sel, instr) in cases {
+            let t = Instant::now();
+            let out = chat(&s, COMMAND_PROMPT, &command_input(sel, instr), Duration::from_secs(60)).unwrap();
+            eprintln!("--- {instr:?} ({} ms)\n{sel:?}\n=> {out}\n", t.elapsed().as_millis());
+            assert!(!out.trim().is_empty() && !out.contains("<text>") && !out.contains("<instruction>"), "{out}");
+        }
     }
 
     /// Real local servers through the app's own cleanup path: `ECHOTYPE_TEST_LOCAL` is

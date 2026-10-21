@@ -30,7 +30,7 @@ pub fn paste(app: &AppHandle, text: &str, restore: bool) -> Result<(), (String, 
     let (tx, rx) = std::sync::mpsc::channel();
     // Keyboard-layout lookups (TIS) must run on the macOS main thread.
     app.run_on_main_thread(move || {
-        let _ = tx.send(send_paste_keys());
+        let _ = tx.send(send_command_key('v'));
     })
     .map_err(|e| (e.to_string(), true))?;
     rx.recv().map_err(|e| (e.to_string(), true))?.map_err(|e| (format!("{e}. The text is on your clipboard"), true))?;
@@ -40,6 +40,41 @@ pub fn paste(app: &AppHandle, text: &str, restore: bool) -> Result<(), (String, 
     }
     // ponytail: restores text only; an image on the clipboard is replaced by the transcript. Handy's image path is the upgrade.
     Ok(())
+}
+
+/// The text selected in the app in front, read with ⌘C; the clipboard is put back afterwards.
+/// None when nothing is selected (the app copied nothing). Needs Accessibility, like paste.
+// ponytail: some editors (VS Code, JetBrains) copy the whole line on ⌘C with no selection, so that
+// line is edited; read AXSelectedText first if that surprises people. Text only, like paste().
+pub fn copy_selection(app: &AppHandle) -> Result<Option<String>, String> {
+    let mut slot = clipboard()?;
+    let cb = slot.as_mut().expect("set by clipboard()");
+    let saved = cb.get_text().ok();
+    // Cleared first, so "nothing selected" is an empty clipboard, not what was copied before.
+    cb.clear().map_err(|e| format!("Clipboard write failed: {e}"))?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let _ = tx.send(send_command_key('c'));
+    })
+    .map_err(|e| e.to_string())?;
+    let sent = rx.recv().map_err(|e| e.to_string()).and_then(|r| r);
+    // Apps write the pasteboard in their own time: give the copy up to 300 ms to land.
+    let mut got = None;
+    for _ in 0..15 {
+        if sent.is_err() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        got = cb.get_text().ok().filter(|t| !t.is_empty());
+        if got.is_some() {
+            break;
+        }
+    }
+    let _ = match saved {
+        Some(prev) => set_private(cb, &prev),
+        None => cb.clear(),
+    };
+    sent.map(|()| got)
 }
 
 /// Waits (up to `max`) until Control, Option and Shift are up, so a ⌘V sent now is not ⌘⌃V.
@@ -123,11 +158,13 @@ pub fn paste_tool() -> Option<&'static str> {
     ["wtype", "ydotool"].into_iter().find(|t| wayland() && on_path(t))
 }
 
-/// Ctrl+V through wtype or ydotool. Without either, the text stays on the clipboard and the card says so.
-fn wayland_paste() -> Result<(), String> {
+/// Ctrl+V (or Ctrl+C) through wtype or ydotool. Without either, the text stays on the clipboard and the card says so.
+fn wayland_key(key: char) -> Result<(), String> {
     let tool = paste_tool().ok_or("On Wayland, Echotype needs wtype or ydotool to paste")?;
-    // ydotool takes Linux input event codes: 29 Left Ctrl, 47 V; :1 press, :0 release.
-    let args: &[&str] = if tool == "wtype" { &["-M", "ctrl", "-k", "v", "-m", "ctrl"] } else { &["key", "29:1", "47:1", "47:0", "29:0"] };
+    // ydotool takes Linux input event codes: 29 Left Ctrl, 47 V, 46 C; :1 press, :0 release.
+    let (k, code) = if key == 'c' { ("c", 46) } else { ("v", 47) };
+    let (down, up) = (format!("{code}:1"), format!("{code}:0"));
+    let args: Vec<&str> = if tool == "wtype" { vec!["-M", "ctrl", "-k", k, "-m", "ctrl"] } else { vec!["key", "29:1", &down, &up, "29:0"] };
     match std::process::Command::new(tool).args(args).output() {
         Ok(o) if o.status.success() => Ok(()),
         Ok(o) => Err(format!("{tool} could not paste: {}", String::from_utf8_lossy(&o.stderr).trim())),
@@ -135,19 +172,20 @@ fn wayland_paste() -> Result<(), String> {
     }
 }
 
-fn send_paste_keys() -> Result<(), String> {
+/// ⌘ (Ctrl elsewhere) plus `key` ('v' or 'c'), as the user's keyboard layout types it.
+fn send_command_key(key: char) -> Result<(), String> {
     if wayland() {
-        return wayland_paste();
+        return wayland_key(key);
     }
     use enigo::{Direction, Enigo, Key, Keyboard, Settings};
     let mut e = Enigo::new(&Settings::default()).map_err(|e| format!("Keyboard injection unavailable: {e}"))?;
     #[cfg(target_os = "macos")]
-    let (modifier, v) = (Key::Meta, Key::Other(mac::command_v_keycode() as u32));
+    let (modifier, v) = (Key::Meta, Key::Other(mac::command_keycode(key) as u32));
     #[cfg(target_os = "windows")]
-    let (modifier, v) = (Key::Control, Key::Other(0x56)); // VK_V
+    let (modifier, v) = (Key::Control, Key::Other(key.to_ascii_uppercase() as u32)); // VK_V, VK_C
     #[cfg(target_os = "linux")]
-    let (modifier, v) = (Key::Control, Key::Unicode('v'));
-    let err = |e: enigo::InputError| format!("Paste keystroke failed: {e}");
+    let (modifier, v) = (Key::Control, Key::Unicode(key));
+    let err = |e: enigo::InputError| format!("Keystroke failed: {e}");
     e.key(modifier, Direction::Press).map_err(err)?;
     let clicked = e.key(v, Direction::Click).map_err(err);
     std::thread::sleep(Duration::from_millis(100));
@@ -602,27 +640,26 @@ mod mac {
         }
     }
 
-    const ANSI_V: u16 = 9;
-
-    /// Must run on the main thread.
-    pub fn command_v_keycode() -> u16 {
+    /// The keycode for ⌘`key` ('v' or 'c'). Must run on the main thread.
+    pub fn command_keycode(key: char) -> u16 {
+        let ansi = if key == 'c' { 8 } else { 9 }; // ANSI C and V
         // SAFETY: the input source is retained until CFRelease below; layout bytes live as long as it does;
         // all out-pointers are valid locals of the declared sizes.
         unsafe {
             let src = TISCopyCurrentKeyboardLayoutInputSource();
             if src.is_null() {
-                return ANSI_V;
+                return ansi;
             }
             let data = TISGetInputSourceProperty(src, kTISPropertyUnicodeKeyLayoutData);
             let layout = if data.is_null() { std::ptr::null() } else { CFDataGetBytePtr(data) };
-            let mut found = ANSI_V;
+            let mut found = ansi;
             if !layout.is_null() {
                 let kbd = LMGetKbdType() as u32;
                 for code in 0..128u16 {
                     let (mut dead, mut len, mut out) = (0u32, 0usize, [0u16; 4]);
                     // Modifier state 1 = Command (Carbon cmdKey >> 8): non-Latin layouts map Cmd shortcuts to ANSI keys.
                     let st = UCKeyTranslate(layout, code, 3, 1, kbd, 1, &mut dead, out.len(), &mut len, out.as_mut_ptr());
-                    if st == 0 && len == 1 && out[0] == b'v' as u16 {
+                    if st == 0 && len == 1 && out[0] == key as u16 {
                         found = code;
                         break;
                     }

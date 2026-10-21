@@ -194,6 +194,7 @@ function renderHotkey() {
     btn.replaceChildren(...(v ? keycaps(v) : [h('span', { className: 'none' }, 'None')]));
   }
   for (const b of $$('[data-clear]')) { b.hidden = !S[b.dataset.clear]; b.replaceChildren(svg(CROSS)); }
+  $('#commandNote').hidden = !S.command_hotkey || S.cleanup.provider !== 'echotype'; // cleanup.rs command_blocked
   $('#modeDesc').textContent = S.mode === 'toggle'
     ? 'Press once to start, again to stop. Esc cancels.'
     : 'Hold while you speak, let go to paste. Tap twice to go hands-free.';
