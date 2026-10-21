@@ -33,7 +33,7 @@
 - **See how much you talk.** The Stats page shows your words, words per minute and a year grid of the days you dictated. They are counts only, never your text, and stay on your computer; switch them off or clear them on the same page.
 - **Two looks.** Classic, or Ink, deep blue ink on warm paper, one click away in Settings. Both follow your light or dark setting.
 
-With local models, nothing leaves your computer. API keys live in the system keychain.
+With local models, nothing leaves your computer. API keys live in the system keychain. The one exception is yours to make: **Share anonymous usage stats and crash reports** in Settings → Privacy, off unless you turn it on. It sends a random install ID, the app version, the system and chip type, and daily counts (dictations, words, failures by kind, median speech and cleanup times, which models are in use, meetings started and finished), plus crash reports that hold only the fixed wording of the error, the line of Echotype's code it came from and the names of the functions it passed through. Never audio, text, your dictionary, app names, file paths, names or emails.
 
 ## Speed
 
@@ -139,7 +139,7 @@ Releases include a Windows installer (.msi or .exe, x64) and a Linux .AppImage a
 
 ## Local models
 
-Echotype picks the models for your Mac by itself (**Automatic**): on a Mac with 8 GB of memory, Small and the smallest Echotype cleanup model, which macOS may page out when it needs the room; with more, Large v3 Turbo Q5 and the 1.5B cleanup model, kept ready. Turn on **Settings → Advanced → Show advanced settings** to choose the models yourself and set how the cleanup model uses memory.
+Echotype picks the models for your Mac by itself (**Automatic**): Echotype Tiny for cleanup on every Mac; on a Mac with 8 GB of memory, Small, with the cleanup model paged out when macOS needs the room; with more, Large v3 Turbo Q5, with the cleanup model kept ready. Turn on **Settings → Advanced → Show advanced settings** to choose the models yourself (Echotype Medium among them) and set how the cleanup model uses memory.
 
 | Model | Download | Memory | Use it for |
 |---|---|---|---|

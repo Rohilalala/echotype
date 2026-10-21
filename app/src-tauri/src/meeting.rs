@@ -734,6 +734,112 @@ pub fn delete(id: &str) -> Result<(), String> {
     std::fs::remove_dir_all(dir_of(id)?).map_err(|e| format!("Could not delete the meeting: {e}"))
 }
 
+// ---------- old audio ----------
+
+const AUDIO: [&str; 2] = ["audio-mic.wav", "audio-system.wav"];
+
+/// Whether meeting `m`'s audio is due to go: `days` (0 = never) after the meeting ended. A meeting
+/// still recording or being written up is never touched.
+pub fn audio_expired(m: &Meeting, days: u32, now_ms: u64) -> bool {
+    let ended = m.started_ms + (m.duration_s.max(0.0) * 1000.0) as u64;
+    days > 0 && !matches!(m.state.as_str(), "recording" | "processing") && now_ms.saturating_sub(ended) > u64::from(days) * 86_400_000
+}
+
+/// Deletes the WAVs of meetings that ended more than `days` ago (about 52 MB a track an hour) and
+/// says so on the meeting. meeting.json stays: the transcript, speakers and summary are kept.
+pub fn prune_audio(days: u32) {
+    let Ok(rd) = std::fs::read_dir(meetings_dir()) else { return };
+    let now = now_ms();
+    for e in rd.flatten() {
+        let dir = e.path();
+        if !AUDIO.iter().any(|f| dir.join(f).is_file()) {
+            continue; // already pruned: skip reading its transcript
+        }
+        let Ok(mut m) = load(&e.file_name().to_string_lossy()) else { continue };
+        if !audio_expired(&m, days, now) {
+            continue;
+        }
+        for f in AUDIO {
+            let _ = std::fs::remove_file(dir.join(f));
+        }
+        if AUDIO.iter().any(|f| dir.join(f).is_file()) {
+            eprintln!("echotype: could not delete the old audio of meeting {}", m.id);
+            continue;
+        }
+        m.notices.push(format!("The audio was deleted {days} days after the meeting to save space (Settings → Meetings). The transcript and notes stay."));
+        save(&dir, &m);
+    }
+}
+
+// ---------- search ----------
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Snippet {
+    pub start: f32,
+    pub text: String,
+}
+
+#[derive(Serialize, Debug)]
+pub struct Hit {
+    pub id: String,
+    pub title: String,
+    pub started_ms: u64,
+    pub snippets: Vec<Snippet>,
+}
+
+const SNIPPET_CHARS: usize = 160;
+
+/// Lowercase, one char for one char, so a match's char position is also its place in the original.
+fn fold(s: &str) -> String {
+    s.chars().map(|c| c.to_lowercase().next().unwrap_or(c)).collect()
+}
+
+/// Up to 3 lines of `m` that hold the most `words` (folded), in time order, or None unless every
+/// word is somewhere in its title, transcript or summary.
+pub fn search_meeting(m: &Meeting, words: &[String]) -> Option<Vec<Snippet>> {
+    let lines: Vec<String> = m.segments.iter().map(|s| fold(&s.text)).collect();
+    let other = [fold(&m.title), fold(m.summary.as_deref().unwrap_or_default())];
+    if words.is_empty() || !words.iter().all(|w| other.iter().chain(&lines).any(|t| t.contains(w.as_str()))) {
+        return None;
+    }
+    let mut best: Vec<(usize, usize)> = lines.iter().enumerate().map(|(i, l)| (words.iter().filter(|w| l.contains(w.as_str())).count(), i)).filter(|(n, _)| *n > 0).collect();
+    best.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    best.truncate(3);
+    best.sort_by_key(|&(_, i)| i);
+    Some(best.into_iter().map(|(_, i)| snippet(&m.segments[i], &lines[i], words)).collect())
+}
+
+/// The line, or SNIPPET_CHARS of it from a little before its first match.
+fn snippet(s: &Segment, low: &str, words: &[String]) -> Snippet {
+    let n = s.text.chars().count();
+    if n <= SNIPPET_CHARS {
+        return Snippet { start: s.start, text: s.text.clone() };
+    }
+    let first = words.iter().filter_map(|w| low.find(w.as_str())).min().unwrap_or(0);
+    let from = low[..first].chars().count().saturating_sub(40).min(n - SNIPPET_CHARS);
+    let mut text: String = s.text.chars().skip(from).take(SNIPPET_CHARS).collect();
+    if from > 0 {
+        text = format!("…{}", text.trim_start());
+    }
+    if from + SNIPPET_CHARS < n {
+        text = format!("{}…", text.trim_end());
+    }
+    Snippet { start: s.start, text }
+}
+
+/// Meetings where every word of `query` appears (any case), newest first.
+// ponytail: reads every meeting.json per query (hundreds are fine); keep an index if thousands get slow.
+pub fn search(query: &str) -> Vec<Hit> {
+    let words: Vec<String> = query.split_whitespace().map(fold).collect();
+    if words.is_empty() {
+        return vec![];
+    }
+    let hit = |m: Meeting| search_meeting(&m, &words).map(|snippets| Hit { id: m.id, title: m.title, started_ms: m.started_ms, snippets });
+    let mut out: Vec<Hit> = std::fs::read_dir(meetings_dir()).map(|rd| rd.flatten().filter_map(|e| load(&e.file_name().to_string_lossy()).ok().and_then(hit)).collect()).unwrap_or_default();
+    out.sort_by(|a, b| b.started_ms.cmp(&a.started_ms));
+    out
+}
+
 /// UTC "2026-10-14-090512" for folder names (civil-from-days, Howard Hinnant).
 fn stamp(ms: u64) -> String {
     let secs = ms / 1000;
@@ -898,6 +1004,7 @@ fn open(app: &AppHandle, title: Option<String>) -> Result<Meeting, String> {
     crate::emit_state(app, crate::hint("Meeting notes on. Let everyone know this meeting is being transcribed.", None));
     emit(app, &id, "recording");
     show_window(app, &id);
+    crate::telemetry::meeting(&s, false);
     Ok(m)
 }
 
@@ -1029,6 +1136,7 @@ fn run(app: AppHandle, mut session: Session, rx: mpsc::Receiver<Piece>, stopped:
         }
     }
     drop(_done);
+    crate::telemetry::meeting(&crate::current_settings(&app), true);
     emit(&app, &id, "done");
 }
 
@@ -1069,6 +1177,11 @@ pub async fn meeting_get(id: String) -> R<Meeting> {
         Ok(m)
     })
     .await
+}
+
+#[tauri::command]
+pub async fn meeting_search(query: String) -> R<Vec<Hit>> {
+    blocking(move || Ok(search(&query))).await
 }
 
 #[tauri::command]
@@ -1573,6 +1686,43 @@ mod tests {
         assert_eq!(stamp(0), "1970-01-01-000000");
         assert_eq!(slug("Launch sync: Q4 / pricing!"), "launch-sync-q4-pricing");
         assert_eq!(default_name("s12"), "Speaker 12");
+    }
+
+    #[test]
+    fn old_audio_goes_only_when_the_meeting_ended_long_enough_ago() {
+        const DAY: u64 = 86_400_000;
+        let now = 1000 * DAY;
+        let m = |state: &str, started_days_ago: u64, hours: f32| Meeting { state: state.into(), started_ms: now - started_days_ago * DAY, duration_s: hours * 3600.0, ..Default::default() };
+        assert!(audio_expired(&m("done", 31, 1.0), 30, now));
+        assert!(audio_expired(&m("interrupted", 8, 1.0), 7, now), "the app quit mid-meeting: it still ended");
+        assert!(!audio_expired(&m("done", 29, 1.0), 30, now));
+        assert!(!audio_expired(&m("done", 31, 48.0), 30, now), "counted from the end, not the start");
+        assert!(!audio_expired(&m("done", 400, 1.0), 0, now), "0 keeps audio forever");
+        for busy in ["recording", "processing"] {
+            assert!(!audio_expired(&m(busy, 400, 1.0), 7, now), "{busy} is never touched");
+        }
+    }
+
+    #[test]
+    fn search_needs_every_word_in_any_case_and_shows_the_best_lines() {
+        let q = |m: &Meeting, q: &str| search_meeting(m, &q.split_whitespace().map(fold).collect::<Vec<_>>());
+        let texts = |r: Option<Vec<Snippet>>| r.map(|v| v.into_iter().map(|s| (s.start, s.text)).collect::<Vec<_>>());
+        let mut m = sample();
+        m.summary = Some("## Decisions\n- Ship on Friday.".into());
+        assert_eq!(texts(q(&m, "FRIDAY ship")), Some(vec![(2.0, "Shall we ship Friday?".into())]));
+        assert_eq!(texts(q(&m, "deck yes")), Some(vec![(65.0, "Yes, I'll send the deck.".into())]));
+        assert_eq!(q(&m, "deck tuesday"), None, "every word must match");
+        assert_eq!(q(&m, "   "), None);
+        assert_eq!(q(&m, "launch decisions"), Some(vec![]), "title and summary count; no line to show");
+        // Three lines at most, those with the most words first, shown in time order.
+        m.segments = (0..6).map(|i| Segment { start: i as f32, end: i as f32 + 1.0, speaker: "you".into(), text: if i % 2 == 0 { "ship it" } else { "ship it friday" }.into() }).collect();
+        assert_eq!(q(&m, "ship friday").unwrap().iter().map(|s| s.start).collect::<Vec<_>>(), vec![1.0, 3.0, 5.0]);
+        // A long line is cut around the match, at char boundaries.
+        let long = format!("{} Größe ÉCOLE budget {}", "é".repeat(300), "ü".repeat(300));
+        m.segments = vec![Segment { start: 9.0, end: 10.0, speaker: "s1".into(), text: long }];
+        let s = &q(&m, "école BUDGET größe").unwrap()[0];
+        assert!(s.text.starts_with('…') && s.text.ends_with('…') && s.text.contains("Größe ÉCOLE budget"), "{}", s.text);
+        assert!(s.text.chars().count() <= SNIPPET_CHARS + 2);
     }
 
     #[test]

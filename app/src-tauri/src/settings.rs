@@ -54,6 +54,9 @@ pub struct Settings {
     pub history_enabled: bool,
     /// Count words and speaking speed on this computer (stats.rs). Counts only; on for upgraders too.
     pub usage_stats: bool,
+    /// Opt-in anonymous usage counts and crash reports for the beta (telemetry.rs). Off unless
+    /// switched on; the only thing that ever sends them.
+    pub share_telemetry: bool,
     /// Shown on the Stats page ("Aditya's stats"). Stays on this computer.
     pub display_name: String,
     pub onboarded: bool,
@@ -69,6 +72,9 @@ pub struct Settings {
     /// are offered these instead of having keys taken; onboarding binds them for new installs.
     pub paste_last_hotkey: String,
     pub copy_last_hotkey: String,
+    /// Command Mode: held like the dictation shortcut, it applies the spoken instruction to the
+    /// selected text (or writes what it asks for). "" is unbound.
+    pub command_hotkey: String,
     /// Launch at login. Off for upgraders; onboarding offers it pre-checked.
     pub autostart: bool,
     /// Start, stop and lock sounds.
@@ -134,6 +140,9 @@ pub struct Settings {
     /// Builds before 2026-10-19: "ask" | "auto" here; migrate() moves it into `meeting_auto_stop`.
     #[serde(skip_serializing)]
     pub meeting_end: String,
+    /// Meeting audio is deleted this many days after the meeting ends (7 or 30); 0 keeps it.
+    /// The transcript, speakers and summary stay either way (meeting.rs prune_audio).
+    pub meeting_audio_days: u32,
 }
 
 /// Per calling app: "ask" (offer notes) | "start" (start them) | "never". calls::choice maps a call to its field.
@@ -278,12 +287,15 @@ impl Default for Settings {
             restore_clipboard: true,
             history_enabled: true,
             usage_stats: true,
+            share_telemetry: false,
             display_name: String::new(),
             onboarded: false,
             onboard_step: 0,
             talk_key: "accelerator".into(),
             paste_last_hotkey: String::new(),
             copy_last_hotkey: String::new(),
+            // macOS only: elsewhere ⌥⇧ switches keyboard layouts, and no modifier wait guards the ⌘C.
+            command_hotkey: if cfg!(target_os = "macos") { "Alt+Shift+Space" } else { "" }.into(),
             autostart: false,
             sounds: true,
             dismissed: vec![],
@@ -314,6 +326,7 @@ impl Default for Settings {
             call_start: CallStart::default(),
             meeting_auto_stop: true,
             meeting_end: String::new(),
+            meeting_audio_days: 30,
         }
     }
 }
@@ -417,6 +430,9 @@ impl Settings {
         }
         if !matches!(self.cleaner_memory.as_str(), "save" | "ready") {
             self.cleaner_memory = "ready".into();
+        }
+        if !matches!(self.meeting_audio_days, 0 | 7 | 30) {
+            self.meeting_audio_days = 30;
         }
         // No Echotype Cloud in this build: its users land on this Mac's own models, on Automatic.
         if !CLOUD && self.stt.provider == "cloud" {
@@ -708,6 +724,7 @@ mod tests {
         assert!(!s.onboarded);
         assert!(s.detect_meetings && s.call_start == CallStart::default() && s.call_start.zoom == "ask", "calls are offered, never recorded unasked");
         assert!(s.meeting_auto_stop);
+        assert_eq!(s.meeting_audio_days, 30);
     }
 
     #[test]

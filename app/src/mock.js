@@ -15,13 +15,14 @@ const settings = {
   dictionary: ['Echotype', 'Tauri', 'Hinglish', 'Supabase'],
   replacements: [{ from: 'my email', to: 'aditya@example.com' }],
   restore_clipboard: true, history_enabled: true,
-  usage_stats: !q.has('statsoff'), display_name: q.get('name') || '',
+  usage_stats: !q.has('statsoff'), share_telemetry: q.has('telemetry'), display_name: q.get('name') || '',
   onboarded: !q.has('onboarding'), onboard_step: 0,
   talk_key: q.get('talk') || 'accelerator',
   paste_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+V',
   copy_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+C',
+  command_hotkey: 'Alt+Shift+Space',
   autostart: !q.has('upgrade'), sounds: true, sound_pack: 'classic', pill_fade: true, orb_listen: 'listening', orb_think: 'working', orb_detail: 1, orb_color: '#eef1ff', pill_size: 1.5, ball_size: 1,
-  advanced: q.has('advanced'), cleaner_memory: 'ready', cleaner_idle_unload: false, cleaner_idle_minutes: 10, cleaner_context: 1024, greetings: true, detect_meetings: true, prefer_builtin_mic: true, pause_music: false, meeting_auto_stop: true,
+  advanced: q.has('advanced'), cleaner_memory: 'ready', cleaner_idle_unload: false, cleaner_idle_minutes: 10, cleaner_context: 1024, greetings: true, detect_meetings: true, prefer_builtin_mic: true, pause_music: false, meeting_auto_stop: true, meeting_audio_days: 30,
   call_start: { meet: 'ask', teams: 'ask', zoom: 'ask', slack: 'ask', facetime: 'ask', webex: 'ask', discord: 'ask', other: 'ask' }, cloud_moved: q.has('moved'),
   look: 'system',
   pill_idle: !q.has('pilloff'), pill_hidden_until: q.has('pillhidden') ? now + 42 * 60000 : 0, pill_in_recordings: false,
@@ -48,9 +49,9 @@ const models = [
 // ?ram=8 previews an 8 GB Mac (Automatic's light setup and its warnings); ?cloud shows Echotype Cloud.
 const low = q.get('ram') === '8';
 const sys = { total_ram_gb: low ? 8 : 24, available_ram_gb: low ? 3.2 : 5.1, os: 'macos', arch: 'aarch64', can_autostart: q.get('appdir') !== '0', low_ram: low, cloud: q.has('cloud'),
-  echotype_model_installed: true, echotype_model_mb: 940,
-  cleaners: [{ id: 'echotype-tiny', label: 'Echotype Tiny', note: '0.5B. Light and quick; best for English.', downloadable: q.has('dl-cleaners'), size_mb: 401, ram_mb: 552, installed: false, automatic: low, warning: null },
-    { id: 'echotype-medium', label: 'Echotype Medium', note: '1.5B. Catches more; uses about twice the memory.', downloadable: q.has('dl-cleaners'), size_mb: 940, ram_mb: 1099, installed: true, automatic: !low, warning: low ? 'Uses about 1.1 GB while dictating. On an 8 GB Mac this can slow other apps.' : null }] };
+  echotype_model_installed: true, echotype_model_mb: 401,
+  cleaners: [{ id: 'echotype-tiny', label: 'Echotype Tiny', note: '0.5B. Light and quick; best for English.', downloadable: q.has('dl-cleaners'), size_mb: 401, ram_mb: 552, installed: true, automatic: true, recommended: true, warning: null },
+    { id: 'echotype-medium', label: 'Echotype Medium', note: '1.5B. Catches more; uses about twice the memory.', downloadable: q.has('dl-cleaners'), size_mb: 940, ram_mb: 1099, installed: false, automatic: false, recommended: false, warning: low ? 'Uses about 1.1 GB while dictating. On an 8 GB Mac this can slow other apps.' : null }] };
 for (const m of models) Object.assign(m, { english_only: m.id.endsWith('.en'), translates: false, fits: m.ram_mb + 2048 <= sys.available_ram_gb * 1024 });
 const rec = models.find(m => m.id === 'large-v3-turbo-q5_0');
 rec.recommended = true;
@@ -267,7 +268,9 @@ const liveMeeting = {
   speakers: { you: 'You', s1: 'Speaker 1', s2: 'Speaker 2' }, segments: sampleSegments.slice(0, 5), notices: [], summary: null, name_hints: { s1: 'Priya' },
 };
 let meetingList = mq === 'empty' ? [] : mq === 'live' ? [liveMeeting, doneMeeting] : [doneMeeting,
-  { id: '2026-10-12-140000-hiring-loop', title: 'Hiring loop debrief', started_ms: now - 3 * 86400000, duration_s: 1520, state: 'done', speakers: {}, segments: [], notices: [], summary: null },
+  { id: '2026-09-12-140000-hiring-loop', title: 'Hiring loop debrief', started_ms: now - 34 * 86400000, duration_s: 1520, state: 'done', speakers: { you: 'You', s1: 'Speaker 1' }, summary: null,
+    segments: [{ start: 4, end: 9, speaker: 's1', text: 'The candidate was strong on system design but the onboarding exercise ran long.' }, { start: 12, end: 15, speaker: 'you', text: 'Let’s ship the offer by Friday.' }],
+    notices: ['The audio was deleted 30 days after the meeting to save space (Settings → Meetings). The transcript stays, but speakers can’t be re-checked without the audio.'] },
   { id: '2026-10-10-100000-meeting', title: 'Meeting', started_ms: now - 5 * 86400000, duration_s: 312, state: 'interrupted', speakers: {}, segments: [], notices: [], summary: null }];
 Object.assign(commands, {
   meeting_status: () => ({ live: mq === 'live' ? { id: liveMeeting.id, started_ms: liveMeeting.started_ms, recording: true } : null, computer_audio: !q.has('miconly'), speakers: !q.has('miconly'), screen_recording: !q.has('noscreen'), download_mb: mq === 'empty' ? 36 : 0, summaries: q.has('cloud') }),
@@ -286,6 +289,13 @@ Object.assign(commands, {
   },
   meeting_list: () => meetingList.map(m => ({ ...m, segments: [], summary: null })),
   meeting_get: ({ id }) => structuredClone(meetingList.find(m => m.id === id)),
+  // meeting.rs search: every word somewhere, up to 3 lines with the most words, in time order.
+  meeting_search: ({ query }) => {
+    const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+    return meetingList.filter(m => words.length && words.every(w => [m.title, m.summary || '', ...m.segments.map(s => s.text)].some(t => t.toLowerCase().includes(w))))
+      .map(m => ({ id: m.id, title: m.title, started_ms: m.started_ms, snippets: m.segments.map((s, i) => [words.filter(w => s.text.toLowerCase().includes(w)).length, i])
+        .filter(([n]) => n).sort((a, b) => b[0] - a[0] || a[1] - b[1]).slice(0, 3).sort((a, b) => a[1] - b[1]).map(([, i]) => ({ start: m.segments[i].start, text: m.segments[i].text })) }));
+  },
   meeting_start: () => { throw 'Browser preview: meetings are not recorded here.'; },
   meeting_stop: () => null,
   meeting_rename_speaker: ({ id, speaker, name }) => { const m = meetingList.find(x => x.id === id); m.speakers[speaker] = name.trim(); return structuredClone(m); },
