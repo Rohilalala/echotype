@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -90,7 +91,7 @@ func (x *harness) json(method, path, body string, hdr ...string) *httptest.Respo
 // signIn signs in through the fake Supabase as a user with this confirmed email and returns the API key.
 func (x *harness) signIn(t *testing.T, email string) string {
 	t.Helper()
-	token := fmt.Sprintf("supa-token-%d", len(x.users))
+	token := jwtWith("otp", len(x.users))
 	x.users[token] = map[string]any{"id": "u-" + email, "email": email, "email_confirmed_at": "2026-10-12T09:00:00Z"}
 	w := x.json("POST", "/v1/auth/supabase", `{"access_token":"`+token+`"}`)
 	if w.Code != 200 {
@@ -98,6 +99,12 @@ func (x *harness) signIn(t *testing.T, email string) string {
 	}
 	key, _ := decode(t, w)["api_key"].(string)
 	return key
+}
+
+// jwtWith is a token shaped like Supabase's: only its payload's amr claim is read. n keeps tokens apart.
+func jwtWith(method string, n int) string {
+	p, _ := json.Marshal(map[string]any{"amr": []map[string]any{{"method": method, "timestamp": n}}})
+	return "h." + base64.RawURLEncoding.EncodeToString(p) + ".sig"
 }
 
 func bearer(key string) []string { return []string{"Authorization", "Bearer " + key} }
@@ -163,15 +170,52 @@ func TestAuthFlowAndKeyHashing(t *testing.T) {
 
 func TestSupabaseSignInNeedsATokenSupabaseVouchesFor(t *testing.T) {
 	x := newHarness(t, nil)
-	x.users["unconfirmed"] = map[string]any{"email": "a@b.co", "email_confirmed_at": nil}
-	x.users["no-email"] = map[string]any{"email": "", "email_confirmed_at": "2026-10-12T09:00:00Z"} // a phone-only user
-	x.users["bad-email"] = map[string]any{"email": "Ada <a@b.co>", "email_confirmed_at": "2026-10-12T09:00:00Z"}
-	for _, tok := range []string{"unknown", "unconfirmed", "no-email", "bad-email"} {
+	ok := "2026-10-12T09:00:00Z"
+	tokens := map[string]map[string]any{
+		"unknown":     nil,
+		"unconfirmed": {"email": "a@b.co", "email_confirmed_at": nil},
+		"no-email":    {"email": "", "email_confirmed_at": ok}, // a phone-only user
+		"bad-email":   {"email": "Ada <a@b.co>", "email_confirmed_at": ok},
+		// A password proves nothing about the address (a project that auto-confirms sign-ups), nor does an anonymous user.
+		"password":  {"email": "a@b.co", "email_confirmed_at": ok},
+		"anonymous": {"email": "a@b.co", "email_confirmed_at": ok},
+		"totp-only": {"email": "a@b.co", "email_confirmed_at": ok}, // a second factor alone proves no address
+	}
+	for name, u := range tokens {
+		method := map[string]string{"password": "password", "anonymous": "anonymous", "totp-only": "totp"}[name]
+		if method == "" {
+			method = "otp"
+		}
+		tok := jwtWith(method, len(x.users)+100)
+		if u != nil {
+			x.users[tok] = u
+		}
 		w := x.json("POST", "/v1/auth/supabase", `{"access_token":"`+tok+`"}`)
 		if w.Code != 401 || errType(t, w) != "invalid_token" {
-			t.Fatalf("%s: %d %s", tok, w.Code, w.Body)
+			t.Fatalf("%s: %d %s", name, w.Code, w.Body)
 		}
 	}
+	for _, tok := range []string{"not-a-jwt", "a.!!!.c", "a." + base64.RawURLEncoding.EncodeToString([]byte(`{"amr":[]}`)) + ".c"} {
+		x.users[tok] = map[string]any{"email": "a@b.co", "email_confirmed_at": ok}
+		if w := x.json("POST", "/v1/auth/supabase", `{"access_token":"`+tok+`"}`); w.Code != 401 {
+			t.Fatalf("%q: %d", tok, w.Code)
+		}
+	}
+	// Google/Apple (oauth) and a code plus a second factor are fine.
+	for _, amr := range [][]string{{"oauth"}, {"totp", "otp"}} {
+		var list []map[string]any
+		for _, m := range amr {
+			list = append(list, map[string]any{"method": m})
+		}
+		p, _ := json.Marshal(map[string]any{"amr": list})
+		tok := "h." + base64.RawURLEncoding.EncodeToString(p) + ".s"
+		x.users[tok] = map[string]any{"email": "ok@b.co", "email_confirmed_at": ok}
+		if w := x.json("POST", "/v1/auth/supabase", `{"access_token":"`+tok+`"}`); w.Code != 200 {
+			t.Fatalf("%v: %d %s", amr, w.Code, w.Body)
+		}
+	}
+	x.s.db.Exec(`DELETE FROM api_keys`)
+	x.s.db.Exec(`DELETE FROM accounts`)
 	calls := x.supaCalls
 	if w := x.json("POST", "/v1/auth/supabase", `{"access_token":"  "}`); w.Code != 401 || x.supaCalls != calls {
 		t.Fatalf("blank token: %d, asked Supabase: %v", w.Code, x.supaCalls != calls)
@@ -185,13 +229,14 @@ func TestSupabaseSignInNeedsATokenSupabaseVouchesFor(t *testing.T) {
 
 func TestSupabaseDownIsNotASignInFailure(t *testing.T) {
 	x := newHarness(t, nil)
-	x.users["tok"] = map[string]any{"email": "a@b.co", "email_confirmed_at": "2026-10-12T09:00:00Z"}
+	tok := jwtWith("oauth", 0)
+	x.users[tok] = map[string]any{"email": "a@b.co", "email_confirmed_at": "2026-10-12T09:00:00Z"}
 	x.supaDown = true
-	if w := x.json("POST", "/v1/auth/supabase", `{"access_token":"tok"}`); w.Code != 502 || errType(t, w) != "auth_unavailable" {
+	if w := x.json("POST", "/v1/auth/supabase", `{"access_token":"`+tok+`"}`); w.Code != 502 || errType(t, w) != "auth_unavailable" {
 		t.Fatalf("Supabase down: %d %s", w.Code, w.Body)
 	}
 	x.supaDown = false
-	if w := x.json("POST", "/v1/auth/supabase", `{"access_token":"tok"}`); w.Code != 200 {
+	if w := x.json("POST", "/v1/auth/supabase", `{"access_token":"`+tok+`"}`); w.Code != 200 {
 		t.Fatalf("Supabase back: %d", w.Code)
 	}
 }

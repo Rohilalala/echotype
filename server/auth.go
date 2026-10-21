@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -66,10 +67,47 @@ func (s *server) authSupabase(w http.ResponseWriter, r *http.Request) {
 
 var errBadToken = errors.New("bad token")
 
+// signedInBy reports whether every sign-in method in the token's amr claim proves the email:
+// an emailed code or link (otp, magiclink, email/signup) or Google/Apple (oauth), plus an optional
+// second factor. A password or
+// an anonymous user does not, so an account cannot be had by signing up with someone's address,
+// whatever the Supabase project allows. The payload is read unverified: it is only trusted once
+// Supabase has accepted the same token in supabaseEmail.
+func signedInBy(token string) bool {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	var claims struct {
+		AMR []struct {
+			Method string `json:"method"`
+		} `json:"amr"`
+	}
+	if json.Unmarshal(raw, &claims) != nil || len(claims.AMR) == 0 {
+		return false
+	}
+	proved := false
+	for _, m := range claims.AMR {
+		switch m.Method {
+		case "otp", "oauth", "magiclink", "email/signup": // a code or link from the inbox, or Google/Apple
+			proved = true
+		case "totp": // a second factor on top
+		default:
+			return false
+		}
+	}
+	return proved
+}
+
 // supabaseEmail asks Supabase whose access token this is (GET /auth/v1/user) and returns the
-// user's confirmed email. A token Supabase rejects, or a user without a confirmed email, is errBadToken.
+// user's confirmed email. A token Supabase rejects, one from a sign-in that does not prove the
+// email (signedInBy), or a user without a confirmed email, is errBadToken.
 func (s *server) supabaseEmail(ctx context.Context, token string) (string, error) {
-	if strings.TrimSpace(token) == "" {
+	if strings.TrimSpace(token) == "" || !signedInBy(token) {
 		return "", errBadToken
 	}
 	req, err := http.NewRequestWithContext(ctx, "GET", s.cfg.SupabaseURL+"/auth/v1/user", nil)
