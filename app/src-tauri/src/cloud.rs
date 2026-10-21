@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::time::{Duration, Instant};
 
 /// The Supabase project that signs people in. The anon key is public by design: it only lets
@@ -17,6 +18,16 @@ const SUPABASE_URL: &str = "https://njozixvvvygsbawbyets.supabase.co";
 const SUPABASE_ANON_KEY: &str = "sb_publishable_12buu7IYCStk5rVbl_RCFA_8TBKafr7";
 
 const SECRET: &str = "cloud";
+
+/// Moves on with every sign-in, Cancel and Sign out, so an older browser sign-in that is still
+/// waiting (or still finishing) stops instead of storing its key over the one the user has now.
+static ATTEMPT: AtomicU64 = AtomicU64::new(0);
+const CANCELLED: &str = "Sign-in cancelled.";
+
+/// Ends any browser sign-in still in progress; returns the number of the attempt that starts now.
+pub fn cancel() -> u64 {
+    ATTEMPT.fetch_add(1, SeqCst) + 1
+}
 /// The error every command returns when there is no usable key. The UI matches on it.
 pub const SIGNED_OUT: &str = "signed out";
 
@@ -93,10 +104,13 @@ fn supabase(path: &str, body: Value) -> Result<Value, String> {
 }
 
 /// Trades a Supabase session for an Echotype Cloud key, stores the key, and returns `{email, plan}` (never the key).
-fn redeem(session: &Value) -> Result<Value, String> {
+fn redeem(session: &Value, attempt: u64) -> Result<Value, String> {
     let token = session["access_token"].as_str().filter(|t| !t.is_empty()).ok_or("The sign-in service sent no session. Try again.")?;
     let v = call(Method::POST, "/auth/supabase", None, Some(json!({ "access_token": token }))).map_err(|(_, e)| e)?;
     let key = v["api_key"].as_str().filter(|k| !k.is_empty()).ok_or("Echotype Cloud did not return a key. Try signing in again.")?;
+    if ATTEMPT.load(SeqCst) != attempt {
+        return Err(CANCELLED.into());
+    }
     settings::set_secret(SECRET, key)?;
     Ok(json!({ "email": v["email"], "plan": v["plan"] }))
 }
@@ -108,7 +122,8 @@ pub fn start_login(email: &str) -> Result<(), String> {
 
 /// Checks the emailed code and signs in.
 pub fn verify(email: &str, code: &str) -> Result<Value, String> {
-    redeem(&supabase("/verify", json!({ "type": "email", "email": email.trim(), "token": code.trim() }))?)
+    let attempt = cancel();
+    redeem(&supabase("/verify", json!({ "type": "email", "email": email.trim(), "token": code.trim() }))?, attempt)
 }
 
 /// What a browser sign-in waits for before giving up.
@@ -121,6 +136,7 @@ pub fn sign_in_with(provider: &str, open: impl FnOnce(String) -> Result<(), Stri
     if !matches!(provider, "google" | "apple") {
         return Err(format!("Unknown sign-in provider '{provider}'"));
     }
+    let attempt = cancel();
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("Could not start sign-in: {e}"))?;
     let redirect = format!("http://127.0.0.1:{}/callback", listener.local_addr().map_err(|e| e.to_string())?.port());
     let mut raw = [0u8; 32];
@@ -134,17 +150,21 @@ pub fn sign_in_with(provider: &str, open: impl FnOnce(String) -> Result<(), Stri
     )
     .map_err(|e| e.to_string())?;
     open(url.to_string())?;
-    let code = wait_for_code(&listener, Instant::now() + BROWSER_WAIT)?;
-    redeem(&supabase("/token?grant_type=pkce", json!({ "auth_code": code, "code_verifier": verifier }))?)
+    let code = wait_for_code(&listener, Instant::now() + BROWSER_WAIT, attempt)?;
+    redeem(&supabase("/token?grant_type=pkce", json!({ "auth_code": code, "code_verifier": verifier }))?, attempt)
 }
 
-/// Answers browser requests on the listener until one brings `?code=` (or Supabase's `?error=`).
-fn wait_for_code(listener: &TcpListener, until: Instant) -> Result<String, String> {
+/// Answers browser requests on the listener until one brings `?code=` (or Supabase's `?error=`),
+/// or another attempt, Cancel or Sign out ends this one.
+fn wait_for_code(listener: &TcpListener, until: Instant, attempt: u64) -> Result<String, String> {
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     loop {
         let mut stream = match listener.accept() {
             Ok((s, _)) => s,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if ATTEMPT.load(SeqCst) != attempt {
+                    return Err(CANCELLED.into());
+                }
                 if Instant::now() > until {
                     return Err("Sign-in timed out. Try again.".into());
                 }
@@ -215,6 +235,7 @@ pub fn stripe_url(raw: &str) -> Option<String> {
 }
 
 pub fn logout() -> Result<(), String> {
+    cancel();
     settings::delete_secret(SECRET)
 }
 
@@ -279,8 +300,12 @@ mod tests {
         (url, rx)
     }
 
+    /// Browser sign-ins share ATTEMPT, so one test's sign-in would cancel another's.
+    static BROWSER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn browser_sign_in_ties_the_code_to_this_app() {
+        let _one = BROWSER.lock().unwrap_or_else(|e| e.into_inner());
         let (supa, sent) = fake_http(400, r#"{"error":"invalid_grant","error_description":"Invalid code"}"#);
         // SAFETY: only this test reads the variable while it runs (the other browser test never reaches Supabase).
         unsafe { std::env::set_var("ECHOTYPE_SUPABASE_URL", &supa) };
@@ -314,6 +339,7 @@ mod tests {
 
     #[test]
     fn browser_sign_in_reports_a_refusal() {
+        let _one = BROWSER.lock().unwrap_or_else(|e| e.into_inner());
         let err = sign_in_with("apple", |page| {
             let q: std::collections::HashMap<_, _> = reqwest::Url::parse(&page).unwrap().query_pairs().into_owned().collect();
             let back = q["redirect_to"].clone();
@@ -323,5 +349,21 @@ mod tests {
         .unwrap_err();
         assert_eq!(err, "Sign-in did not finish: The user cancelled");
         assert!(sign_in_with("github", |_| Ok(())).is_err());
+    }
+
+    #[test]
+    fn cancel_ends_a_waiting_browser_sign_in() {
+        let _one = BROWSER.lock().unwrap_or_else(|e| e.into_inner());
+        let started = Instant::now();
+        let err = sign_in_with("google", |_| {
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_millis(200));
+                cancel(); // the Cancel button, a newer sign-in or Sign out
+            });
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(err, CANCELLED);
+        assert!(started.elapsed() < Duration::from_secs(5), "stops at once, not after BROWSER_WAIT");
     }
 }

@@ -832,10 +832,11 @@ function cloudPanel() {
   if (cloud.status === 'error') return [h('p', { className: 'empty', role: 'alert' }, `${cloud.error} `, h('button', { className: 'btn', type: 'button', onclick: () => { cloud = { status: 'loading' }; renderCloud(); refreshCloud(); } }, 'Try again'))];
   if (cloud.status === 'browser') {
     return [cloudRow('Finish signing in in your browser', `Echotype opened ${cloud.provider} sign-in. Come back here once the page says you are signed in.`,
-      [h('button', { className: 'btn quiet', type: 'button', onclick: () => { cloudAttempt++; cloud = { status: 'out' }; renderCloud(); } }, 'Cancel')])];
+      [h('button', { className: 'btn quiet', type: 'button', onclick: () => { cloudAttempt++; invoke('cloud_cancel_sign_in').catch(() => {}); cloud = { status: 'out' }; renderCloud(); } }, 'Cancel')])];
   }
   if (cloud.status === 'out') {
-    // A sign-in cancelled (or superseded) here still finishes in Rust; its answer is dropped.
+    // Cancel, a newer sign-in or Sign out ends a browser sign-in in Rust too (cloud::cancel), so it
+    // never stores a key; cloudAttempt drops its answer here.
     const provider = (id, name) => h('button', { className: 'btn', type: 'button', onclick: async () => {
       const mine = ++cloudAttempt;
       cloud = { status: 'browser', provider: name };

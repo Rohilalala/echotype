@@ -255,6 +255,7 @@ const commands = {
   cloud_checkout: () => { if (!cloudAccount) throw 'signed out'; cloudAccount = { ...sampleAccount('pro'), email: cloudAccount.email }; return null; },
   cloud_portal: () => { if (!cloudAccount) throw 'signed out'; return null; },
   cloud_logout: () => { cloudAccount = null; return null; },
+  cloud_cancel_sign_in: () => null,
   retry_last: async () => {
     emit('dictation-state', { state: 'transcribing' }); await wait(700);
     emit('dictation-state', { state: 'done', text: 'Moving the design review to Friday at 3.', copied: true });
