@@ -35,8 +35,9 @@ pub const CLEANERS: &[Cleaner] = &[
 
 /// Where the cleaner files are served from: the echotype-models Cloudflare R2 bucket (uploaded with
 /// app/scripts/r2-put.sh, beside Qwen's LICENSE and a NOTICE), `{DOWNLOAD_URL}/{file}`.
-// ponytail: the bucket's r2.dev address, which Cloudflare rate-limits; a custom domain for launch.
-pub const DOWNLOAD_URL: Option<&str> = Some("https://pub-da62fbe34de644598313554b0a5ccc51.r2.dev");
+/// models.tryechotype.tech is the bucket's custom domain (its r2.dev address is rate-limited and
+/// stays on only for builds that still fetch notices from it).
+pub const DOWNLOAD_URL: Option<&str> = Some("https://models.tryechotype.tech");
 
 pub fn find(id: &str) -> Option<&'static Cleaner> {
     CLEANERS.iter().find(|c| c.id == id)

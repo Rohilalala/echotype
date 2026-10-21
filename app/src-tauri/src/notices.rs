@@ -11,7 +11,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
 /// Edit this file in the bucket to send a notice or retire a version; no app release needed.
-pub const URL: &str = "https://pub-da62fbe34de644598313554b0a5ccc51.r2.dev/app.json";
+pub const URL: &str = "https://models.tryechotype.tech/app.json";
 const EVERY: Duration = Duration::from_secs(6 * 3600);
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
