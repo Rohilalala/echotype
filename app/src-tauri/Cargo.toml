@@ -30,7 +30,7 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 enigo = "0.6"
 arboard = "3"
 sha2 = "0.10"
-sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 symphonia = { version = "0.6", default-features = false, features = ["aac", "isomp4", "mp3", "ogg", "wav", "flac", "vorbis", "pcm", "mkv"] }
 symphonia-adapter-libopus = "0.3"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "multipart", "json"] }
