@@ -488,11 +488,11 @@ function fillRemote(kind) {
   const cfg = S[kind], p = preset(cfg.provider), custom = cfg.provider === 'custom';
   const url = $(`#${kind}Url`);
   url.readOnly = !custom;
+  url.closest('.row').hidden = cfg.provider === 'echotype'; // the built-in model has no URL to show
   url.value = custom ? cfg.base_url : p?.base_url || '';
   url.placeholder = custom ? 'http://localhost:8000/v1' : '';
   $(`#${kind}UrlDesc`).textContent = custom
     ? `Any OpenAI-compatible ${kind === 'stt' ? '/audio/transcriptions' : '/chat/completions'} endpoint.`
-    : cfg.provider === 'echotype' ? `Built in: runs on this Mac, nothing to start. ${sys?.echotype_model_installed ? `Installed, ${fmtMB(sys.echotype_model_mb)}.` : `Not installed (${fmtMB(sys?.echotype_model_mb ?? 401)}).`}`
     : `Set by the ${p?.label ?? ''} preset.`;
   if (kind === 'cleanup') renderCleaner();
   const model = $(`#${kind}Model`);
@@ -740,8 +740,9 @@ async function refreshLastApp() {
 }
 $('#cleanupProvider').addEventListener('change', e => setProvider('cleanup', e.target.value));
 
-// The built-in model: "Automatic (recommended)", or with advanced settings a pick of every
-// Echotype cleaner with its RAM and the low-memory warning.
+// The built-in model: "Automatic (recommended)", or with advanced settings a pick of the
+// installed Echotype cleaners with their RAM and the low-memory warning. Others are downloaded
+// on the Models page; one that was picked and then deleted stays listed so the pick is visible.
 function renderCleaner() {
   const builtIn = S.cleanup.provider === 'echotype', list = sys?.cleaners ?? [];
   $('#cleanerRow').hidden = !builtIn;
@@ -749,11 +750,13 @@ function renderCleaner() {
   if (!builtIn) return;
   const pick = $('#cleanerPick'), auto = list.find(c => c.automatic);
   const label = c => `${c.label}, about ${fmtMB(c.ram_mb)} RAM${c.installed ? '' : ' (not installed)'}`;
+  const shown = list.filter(c => c.installed || c.id === S.cleanup.model);
   pick.disabled = !S.advanced;
-  pick.replaceChildren(...(S.advanced ? list.map(c => h('option', { value: c.id }, label(c))) : [h('option', { value: '' }, 'Automatic (recommended)')]));
+  pick.replaceChildren(...(S.advanced ? shown.map(c => h('option', { value: c.id }, label(c))) : [h('option', { value: '' }, 'Automatic (recommended)')]));
   const cur = S.advanced ? list.find(c => c.id === S.cleanup.model) ?? auto : auto;
   pick.value = S.advanced ? cur?.id ?? '' : '';
-  $('#cleanerDesc').textContent = S.advanced ? cur?.warning ?? '' : auto ? `Uses ${auto.label}.` : '';
+  $('#cleanerDesc').textContent = S.advanced ? cur?.warning ?? ''
+    : !auto ? '' : auto.installed ? `Uses ${auto.label}. Runs on this Mac.` : `Uses ${auto.label}, which isn't downloaded yet. Get it on the Models page.`;
   $('#cleanerDesc').classList.toggle('warn', S.advanced && !!cur?.warning);
 }
 $('#cleanerPick').addEventListener('change', e => { S.cleanup.model = e.target.value; save(); renderCleaner(); });
