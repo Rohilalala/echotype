@@ -1,7 +1,8 @@
 <!DOCTYPE html>
 <!-- Supabase Auth email ("Magic Link" and "Confirm signup" templates), sent through Resend.
-     {{ .Token }} is the 6-digit code; its last digit picks one of ten lines, so each email reads
-     a little differently. Push changes with the management API (PATCH
+     {{ .Token }} is the 6-digit code. Its fifth digit picks the layout (0-4: logo and name up top,
+     5-9: centred with the orb as the logo) and its last digit one of ten lines, so each email
+     reads a little differently. Push changes with the management API (PATCH
      /v1/projects/<ref>/config/auth: mailer_templates_magic_link_content and _confirmation_content).
      Tables, bgcolor and inline styles because email apps ignore modern layout. The Gmail app in
      dark mode inverts colours: it leaves background-image alone (the black stays black), and the
@@ -22,75 +23,33 @@
 </head>
 <body class="body" bgcolor="#000000" style="margin:0;padding:0;background-color:#000000;background-image:linear-gradient(#000000,#000000);-webkit-text-size-adjust:100%;">
 <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:#000000;">{{ .Token }} is your Echotype sign-in code.&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;</div>
+{{ $d := slice .Token 5 6 }}{{ $line := "Hold a key, say it, done." }}{{ if eq $d "0" }}{{ $line = "Speak your thoughts out. Let Echotype do the rest." }}{{ end }}{{ if eq $d "1" }}{{ $line = "Talk the way you think. Echotype types it clean." }}{{ end }}{{ if eq $d "2" }}{{ $line = "Your voice, typed. Nothing leaves your Mac." }}{{ end }}{{ if eq $d "3" }}{{ $line = "Say it once. Echotype gets it down." }}{{ end }}{{ if eq $d "4" }}{{ $line = "Think out loud. Echotype keeps up." }}{{ end }}{{ if eq $d "5" }}{{ $line = "Less typing, more thinking." }}{{ end }}{{ if eq $d "6" }}{{ $line = "Ramble freely. Echotype tidies up." }}{{ end }}{{ if eq $d "7" }}{{ $line = "Every word you say stays on your Mac." }}{{ end }}{{ if eq $d "8" }}{{ $line = "Your ideas move faster than your fingers. Now your writing does too." }}{{ end }}
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#000000" style="background-color:#000000;background-image:linear-gradient(#000000,#000000);">
   <tr>
     <td align="center" bgcolor="#000000" style="background-color:#000000;background-image:linear-gradient(#000000,#000000);padding:44px 24px 56px 24px;">
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:440px;">
-
-        <!-- Logo and name -->
-        <tr>
-          <td align="left" style="padding:0;">
-            <table role="presentation" cellpadding="0" cellspacing="0" border="0">
-              <tr>
-                <td style="padding:0 12px 0 0;vertical-align:middle;">
-                  <img src="https://pub-da62fbe34de644598313554b0a5ccc51.r2.dev/email/logo.png" width="36" height="36" alt="" style="display:block;width:36px;height:36px;border:0;border-radius:9px;">
-                </td>
-                <td style="vertical-align:middle;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:20px;line-height:24px;font-weight:600;letter-spacing:-0.3px;color:#ffffff;">
-                  <div class="gm-screen"><div class="gm-diff">Echotype</div></div>
-                </td>
-              </tr>
-            </table>
-          </td>
-        </tr>
-
-        <!-- Headline -->
-        <tr>
-          <td align="left" style="padding:48px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:32px;line-height:38px;font-weight:600;letter-spacing:-0.6px;color:#ffffff;">
-            <div class="gm-screen"><div class="gm-diff">Here's your code to sign in to Echotype.</div></div>
-          </td>
-        </tr>
-
-        <!-- The code -->
-        <tr>
-          <td style="padding:28px 0 0 0;">
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-              <tr>
-                <td align="center" bgcolor="#161618" style="background-color:#161618;background-image:linear-gradient(#161618,#161618);border:1px solid #2a2a2f;border-radius:16px;padding:24px 12px 24px 28px;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:44px;line-height:52px;font-weight:300;letter-spacing:16px;color:#ffffff;font-variant-numeric:tabular-nums;">
-                  <div class="gm-screen"><div class="gm-diff">{{ .Token }}</div></div>
-                </td>
-              </tr>
-            </table>
-          </td>
-        </tr>
-        <tr>
-          <td align="left" style="padding:14px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:14px;line-height:22px;color:#8e8e96;">
-            It works for the next 10 minutes. If you didn't ask for it, ignore this email: nobody can sign in without the code.
-          </td>
-        </tr>
-
-        <!-- The orb and today's line -->
-        <tr>
-          <td style="padding:48px 0 0 0;">
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #1f1f23;">
-              <tr>
-                <td width="96" style="padding:28px 20px 0 0;vertical-align:middle;">
-                  <img src="https://pub-da62fbe34de644598313554b0a5ccc51.r2.dev/email/orb.gif" width="96" height="96" alt="" style="display:block;width:96px;height:96px;border:0;">
-                </td>
-                <td style="padding:28px 0 0 0;vertical-align:middle;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:20px;line-height:27px;font-weight:500;letter-spacing:-0.2px;color:#ffffff;">
-                  <div class="gm-screen"><div class="gm-diff">{{ $d := slice .Token 5 6 }}{{ if eq $d "0" }}Speak your thoughts out. Let Echotype do the rest.{{ else if eq $d "1" }}Talk the way you think. Echotype types it clean.{{ else if eq $d "2" }}Your voice, typed. Nothing leaves your Mac.{{ else if eq $d "3" }}Say it once. Echotype gets it down.{{ else if eq $d "4" }}Think out loud. Echotype keeps up.{{ else if eq $d "5" }}Less typing, more thinking.{{ else if eq $d "6" }}Ramble freely. Echotype tidies up.{{ else if eq $d "7" }}Every word you say stays on your Mac.{{ else if eq $d "8" }}Your ideas move faster than your fingers. Now your writing does too.{{ else }}Hold a key, say it, done.{{ end }}</div></div>
-                </td>
-              </tr>
-            </table>
-          </td>
-        </tr>
-
-        <!-- Footer -->
-        <tr>
-          <td align="left" style="padding:48px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:12px;line-height:18px;color:#5c5c66;">
-            Echotype is dictation that stays on your Mac.<br>
-            <a href="https://tryechotype.tech" style="color:#8e8e96;text-decoration:underline;">tryechotype.tech</a>
-          </td>
-        </tr>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:440px;">{{ if lt (slice .Token 4 5) "5" }}
+        <!-- A: logo and name up top, the orb and the line sign off -->
+        <tr><td align="left"><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+          <td style="padding:0 12px 0 0;vertical-align:middle;"><img src="https://pub-da62fbe34de644598313554b0a5ccc51.r2.dev/email/logo.png" width="36" height="36" alt="" style="display:block;width:36px;height:36px;border:1px solid #2a2a2f;border-radius:9px;"></td>
+          <td style="vertical-align:middle;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:20px;line-height:24px;font-weight:600;letter-spacing:-0.3px;color:#ffffff;"><div class="gm-screen"><div class="gm-diff">Echotype</div></div></td>
+        </tr></table></td></tr>
+        <tr><td align="left" style="padding:48px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:32px;line-height:38px;font-weight:600;letter-spacing:-0.6px;color:#ffffff;"><div class="gm-screen"><div class="gm-diff">Here's your code to sign in to Echotype.</div></div></td></tr>
+        <tr><td style="padding:28px 0 0 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center" bgcolor="#161618" style="background-color:#161618;background-image:linear-gradient(#161618,#161618);border:1px solid #2a2a2f;border-radius:16px;padding:24px 12px 24px 28px;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:44px;line-height:52px;font-weight:300;letter-spacing:16px;color:#ffffff;font-variant-numeric:tabular-nums;"><div class="gm-screen"><div class="gm-diff">{{ .Token }}</div></div></td></tr></table></td></tr>
+        <tr><td align="left" style="padding:14px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:14px;line-height:22px;color:#8e8e96;">It works for the next 10 minutes. If you didn't ask for it, ignore this email: nobody can sign in without the code.</td></tr>
+        <tr><td style="padding:48px 0 0 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #1f1f23;"><tr>
+          <td width="96" style="padding:28px 20px 0 0;vertical-align:middle;"><img src="https://pub-da62fbe34de644598313554b0a5ccc51.r2.dev/email/orb.gif" width="96" height="96" alt="" style="display:block;width:96px;height:96px;border:0;"></td>
+          <td style="padding:28px 0 0 0;vertical-align:middle;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:20px;line-height:27px;font-weight:500;letter-spacing:-0.2px;color:#ffffff;"><div class="gm-screen"><div class="gm-diff">{{ $line }}</div></div></td>
+        </tr></table></td></tr>
+        <tr><td align="left" style="padding:48px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:12px;line-height:18px;color:#5c5c66;">Echotype is dictation that stays on your Mac.<br><a href="https://tryechotype.tech" style="color:#8e8e96;text-decoration:underline;">tryechotype.tech</a></td></tr>{{ else }}
+        <!-- B: centred, the animated orb is the logo, the line under the code -->
+        <tr><td align="center"><img src="https://pub-da62fbe34de644598313554b0a5ccc51.r2.dev/email/orb.gif" width="120" height="120" alt="" style="display:block;width:120px;height:120px;border:0;"></td></tr>
+        <tr><td align="center" style="padding:6px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:22px;line-height:26px;font-weight:600;letter-spacing:-0.3px;color:#ffffff;"><div class="gm-screen"><div class="gm-diff">Echotype</div></div></td></tr>
+        <tr><td align="center" style="padding:40px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:30px;line-height:36px;font-weight:600;letter-spacing:-0.6px;color:#ffffff;"><div class="gm-screen"><div class="gm-diff">Here's your code to sign in to Echotype.</div></div></td></tr>
+        <tr><td style="padding:28px 0 0 0;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center" bgcolor="#161618" style="background-color:#161618;background-image:linear-gradient(#161618,#161618);border:1px solid #2a2a2f;border-radius:16px;padding:24px 12px 24px 28px;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:44px;line-height:52px;font-weight:300;letter-spacing:16px;color:#ffffff;font-variant-numeric:tabular-nums;"><div class="gm-screen"><div class="gm-diff">{{ .Token }}</div></div></td></tr></table></td></tr>
+        <tr><td align="center" style="padding:14px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:14px;line-height:22px;color:#8e8e96;">It works for the next 10 minutes.</td></tr>
+        <tr><td align="center" style="padding:44px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:19px;line-height:26px;font-style:italic;color:#d4d4d8;"><div class="gm-screen"><div class="gm-diff">{{ $line }}</div></div></td></tr>
+        <tr><td align="center" style="padding:28px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:13px;line-height:20px;color:#5c5c66;">Didn't ask for this? Ignore it. Nobody can sign in without the code.</td></tr>
+        <tr><td align="center" style="padding:48px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:12px;line-height:18px;color:#5c5c66;">Echotype is dictation that stays on your Mac.<br><a href="https://tryechotype.tech" style="color:#8e8e96;text-decoration:underline;">tryechotype.tech</a></td></tr>{{ end }}
       </table>
     </td>
   </tr>
