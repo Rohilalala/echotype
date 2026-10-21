@@ -234,6 +234,13 @@ fn unsure(f: &Focused) -> bool {
 /// kAXErrorAPIDisabled: Accessibility is off for Echotype.
 pub const AX_DISABLED: i32 = -25211;
 
+/// Asks the frontmost app to build its accessibility tree (Electron and Chromium apps), so the
+/// paste check can see its text box. Call when a recording starts.
+pub fn wake_accessibility() {
+    #[cfg(target_os = "macos")]
+    mac::wake_accessibility();
+}
+
 /// The paste decision. `focus`: Ok(None) when nothing has focus, Err(AXError) when the API
 /// could not tell, in which case Echotype pastes as it always has. Without Accessibility there
 /// is no ⌘V at all, so that is the card too.
@@ -440,13 +447,64 @@ mod mac {
     #[link(name = "ApplicationServices", kind = "framework")]
     unsafe extern "C" {
         fn AXUIElementCreateSystemWide() -> CFTypeRef;
+        fn AXUIElementCreateApplication(pid: i32) -> CFTypeRef;
         fn AXUIElementSetMessagingTimeout(el: CFTypeRef, seconds: f32) -> i32;
         fn AXUIElementCopyAttributeValue(el: CFTypeRef, attr: CFTypeRef, out: *mut CFTypeRef) -> i32;
         fn AXUIElementIsAttributeSettable(el: CFTypeRef, attr: CFTypeRef, out: *mut u8) -> i32;
+        fn AXUIElementSetAttributeValue(el: CFTypeRef, attr: CFTypeRef, value: CFTypeRef) -> i32;
     }
 
     /// kAXErrorNoValue: nothing is focused.
     const AX_NO_VALUE: i32 = -25212;
+    /// kAXErrorCannotComplete: "can't tell", which pastes as Echotype always has.
+    const AX_CANNOT_TELL: i32 = -25204;
+
+    /// The app with keyboard focus (system-wide AXFocusedApplication), owned. Chrome can leave
+    /// that question unanswered (-25204) while answering on its own element, so the frontmost
+    /// app stands in.
+    unsafe fn focused_app(sys: &CFType) -> Option<CFType> {
+        let mut out: CFTypeRef = std::ptr::null();
+        // SAFETY: as in focused(): an owned result under the create rule, a valid out-pointer.
+        unsafe {
+            (AXUIElementCopyAttributeValue(sys.as_CFTypeRef(), CFString::from_static_string("AXFocusedApplication").as_CFTypeRef(), &mut out) == 0 && !out.is_null())
+                .then(|| CFType::wrap_under_create_rule(out))
+                .or_else(|| front_pid().map(|pid| CFType::wrap_under_create_rule(AXUIElementCreateApplication(pid))))
+        }
+    }
+
+    /// [[NSWorkspace sharedWorkspace] frontmostApplication].processIdentifier, None without AppKit.
+    fn front_pid() -> Option<i32> {
+        // SAFETY: objc_msgSend cast to each signature: two methods returning objects, one returning
+        // pid_t; a nil receiver answers nil/0, and a missing class is checked.
+        unsafe {
+            let cls = objc_getClass(c"NSWorkspace".as_ptr());
+            if cls.is_null() {
+                return None;
+            }
+            let get: extern "C" fn(*const c_void, *const c_void) -> *const c_void = std::mem::transmute(objc_msgSend as *const ());
+            let app = get(get(cls, sel_registerName(c"sharedWorkspace".as_ptr())), sel_registerName(c"frontmostApplication".as_ptr()));
+            if app.is_null() {
+                return None;
+            }
+            let pid: extern "C" fn(*const c_void, *const c_void) -> i32 = std::mem::transmute(objc_msgSend as *const ());
+            Some(pid(app, sel_registerName(c"processIdentifier".as_ptr()))).filter(|p| *p > 0)
+        }
+    }
+
+    /// Chromium and Electron apps (VS Code, Slack, Chrome, Claude...) keep their accessibility tree
+    /// off until something asks: until then they report no focused element, and Echotype took
+    /// their text boxes for nowhere to paste. AXManualAccessibility turns the tree on; it takes about
+    /// a second to build, so this runs when a recording starts. Harmless for other apps.
+    pub fn wake_accessibility() {
+        // SAFETY: owned CF objects kept alive across the calls; the value is a static CFBoolean.
+        unsafe {
+            let sys = CFType::wrap_under_create_rule(AXUIElementCreateSystemWide());
+            AXUIElementSetMessagingTimeout(sys.as_CFTypeRef(), 0.25);
+            if let Some(app) = focused_app(&sys) {
+                AXUIElementSetAttributeValue(app.as_CFTypeRef(), CFString::from_static_string("AXManualAccessibility").as_CFTypeRef(), core_foundation::boolean::CFBoolean::true_value().as_CFTypeRef());
+            }
+        }
+    }
 
     /// The focused element system-wide, or the AXError that stopped the question. A hung app
     /// answers within 250 ms or counts as "can't tell".
@@ -458,12 +516,26 @@ mod mac {
             let sys = CFType::wrap_under_create_rule(AXUIElementCreateSystemWide());
             AXUIElementSetMessagingTimeout(sys.as_CFTypeRef(), 0.25);
             let mut out: CFTypeRef = std::ptr::null();
-            match AXUIElementCopyAttributeValue(sys.as_CFTypeRef(), attr("AXFocusedUIElement").as_CFTypeRef(), &mut out) {
-                0 if !out.is_null() => {}
-                0 | AX_NO_VALUE => return Ok(None),
+            let el = match AXUIElementCopyAttributeValue(sys.as_CFTypeRef(), attr("AXFocusedUIElement").as_CFTypeRef(), &mut out) {
+                0 if !out.is_null() => CFType::wrap_under_create_rule(out),
+                0 | AX_NO_VALUE => {
+                    // Electron apps answer only on their own element (and system-wide stays empty
+                    // even with their tree on): ask the focused app. One with a window but no answer
+                    // can't tell; no app or no window is nowhere to paste.
+                    let Some(app) = focused_app(&sys) else { return Ok(None) };
+                    AXUIElementSetMessagingTimeout(app.as_CFTypeRef(), 0.25);
+                    let ask = |name: &'static str| {
+                        let mut v: CFTypeRef = std::ptr::null();
+                        (AXUIElementCopyAttributeValue(app.as_CFTypeRef(), attr(name).as_CFTypeRef(), &mut v) == 0 && !v.is_null()).then(|| CFType::wrap_under_create_rule(v))
+                    };
+                    match ask("AXFocusedUIElement") {
+                        Some(el) => el,
+                        None if ask("AXFocusedWindow").is_some() => return Err(AX_CANNOT_TELL),
+                        None => return Ok(None),
+                    }
+                }
                 e => return Err(e),
-            }
-            let el = CFType::wrap_under_create_rule(out);
+            };
             let copy = |name: &'static str| {
                 let mut v: CFTypeRef = std::ptr::null();
                 (AXUIElementCopyAttributeValue(el.as_CFTypeRef(), attr(name).as_CFTypeRef(), &mut v) == 0 && !v.is_null()).then(|| CFType::wrap_under_create_rule(v))
@@ -677,6 +749,21 @@ mod tests {
 
     fn el(role: &str) -> Focused {
         Focused { role: role.into(), ..Default::default() }
+    }
+
+    #[cfg(target_os = "macos")]
+    /// The app in front (run from a terminal in VS Code: an Electron app) after its tree is woken:
+    /// `cargo test -- --ignored --nocapture electron_focus`. Needs Accessibility for the terminal.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn electron_focus_is_seen_once_woken() {
+        let before = mac::focused();
+        wake_accessibility();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let after = mac::focused();
+        eprintln!("before: {before:?}\nafter: {after:?}\ntarget: {:?}", paste_target());
+        assert_eq!(paste_target(), Target::Paste);
     }
 
     #[cfg(target_os = "macos")]
