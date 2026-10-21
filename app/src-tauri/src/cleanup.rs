@@ -31,8 +31,12 @@ pub fn system_prompt(s: &Settings) -> String {
         _ => "",
     };
     let custom = if custom.trim().is_empty() { String::new() } else { format!("\n{}", custom.trim()) };
-    PROMPT.replace("{{DICTIONARY}}", &dict).replace("{{STYLE}}", style).replace("{{CUSTOM}}", &custom).trim_end().to_string()
+    // Light: the built-in model copies an added line into its output, so after_stt checks it instead (light_enough).
+    let light = if s.cleanup.level == "light" { LIGHT } else { "" };
+    PROMPT.replace("{{DICTIONARY}}", &dict).replace("{{STYLE}}", &format!("{style}{light}")).replace("{{CUSTOM}}", &custom).trim_end().to_string()
 }
+
+const LIGHT: &str = "\nLight cleanup only: remove fillers, stutters and repeated words, and fix punctuation and capitals. Keep every other word as spoken: do not reword, reorder, apply corrections or make lists.";
 
 /// Local servers (Ollama, LM Studio) think for seconds unless reasoning is switched off.
 pub fn reasoning_off(provider: &str) -> bool {
@@ -257,14 +261,18 @@ pub fn needs_cleanup(s: &Settings, text: &str) -> bool {
 }
 
 fn levenshtein(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
+    edits(&a.chars().collect::<Vec<_>>(), &b.chars().collect::<Vec<_>>())
+}
+
+/// Insertions, deletions and substitutions from `a` to `b`: characters or words.
+fn edits<T: PartialEq>(a: &[T], b: &[T]) -> usize {
     let mut row: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
+    for (i, ca) in a.iter().enumerate() {
         let mut prev = row[0];
         row[0] = i + 1;
         for j in 1..=b.len() {
             let cur = row[j];
-            row[j] = (row[j] + 1).min(row[j - 1] + 1).min(prev + usize::from(ca != b[j - 1]));
+            row[j] = (row[j] + 1).min(row[j - 1] + 1).min(prev + usize::from(*ca != b[j - 1]));
             prev = cur;
         }
     }
@@ -372,6 +380,9 @@ pub struct Output {
     /// The cleanup the guard rejected (`text` is the words as spoken): "Use cleaned version" copies it.
     #[serde(skip)]
     pub cleaned: Option<String>,
+    /// The dictation ended in "send it" (send_command): Return is pressed once `text` is pasted.
+    #[serde(skip)]
+    pub send: bool,
 }
 
 /// `verbatim` keeps the recognizer's words and skips the LLM entirely, and so does the built-in
@@ -380,7 +391,7 @@ pub struct Output {
 /// kare" became "Arnav ko message kare", "push karenge Thursday tak" lost "Thursday tak").
 // ponytail: also skips that user's English dictations; lift it with a cleaner trained on Hinglish.
 pub fn wants_cleanup(s: &Settings, text: &str) -> bool {
-    s.cleanup.enabled && s.cleanup.style != "verbatim" && !text.trim().is_empty() && !(s.cleanup.provider == "echotype" && stt::romanising(s))
+    s.cleanup.enabled && s.cleanup.style != "verbatim" && s.cleanup.level != "none" && !text.trim().is_empty() && !(s.cleanup.provider == "echotype" && stt::romanising(s))
 }
 
 /// True when the transcript holds at least one letter or digit in any script. Whisper turns
@@ -705,6 +716,194 @@ pub fn voice_commands(text: &str) -> String {
     out
 }
 
+/// The text as (whitespace before, word) pairs; joined back they are the text again.
+fn spaced(text: &str) -> Vec<(&str, &str)> {
+    let (mut out, mut rest) = (vec![], text);
+    while !rest.is_empty() {
+        let w = rest.len() - rest.trim_start().len();
+        let end = rest[w..].find(char::is_whitespace).map_or(rest.len(), |e| w + e);
+        out.push((&rest[..w], &rest[w..end]));
+        rest = &rest[end..];
+    }
+    out
+}
+
+/// Spoken punctuation, typed as the mark.
+const MARKS: [(&str, &str); 13] = [
+    ("comma", ","), ("period", "."), ("full stop", "."), ("question mark", "?"), ("exclamation mark", "!"), ("exclamation point", "!"),
+    ("colon", ":"), ("semicolon", ";"), ("open quote", "\""), ("close quote", "\""), ("end quote", "\""), ("dash", "-"), ("em dash", "—"),
+];
+
+/// "<name> emoji", typed as the emoji.
+const EMOJI: &[(&str, &str)] = &[
+    ("heart", "❤️"), ("red heart", "❤️"), ("broken heart", "💔"), ("heart eyes", "😍"), ("smiley", "😊"), ("smiley face", "😊"),
+    ("smile", "😊"), ("smiling face", "😊"), ("happy face", "😊"), ("grinning face", "😀"), ("laughing", "😂"), ("laughing face", "😂"),
+    ("crying laughing", "😂"), ("tears of joy", "😂"), ("wink", "😉"), ("winking face", "😉"), ("sad face", "😢"), ("crying", "😭"),
+    ("crying face", "😭"), ("thinking", "🤔"), ("thinking face", "🤔"), ("sunglasses", "😎"), ("cool", "😎"), ("upside down face", "🙃"),
+    ("eye roll", "🙄"), ("shrug", "🤷"), ("facepalm", "🤦"), ("skull", "💀"), ("thumbs up", "👍"), ("thumbs-up", "👍"), ("thumbs down", "👎"),
+    ("thumbs-down", "👎"), ("clap", "👏"), ("clapping", "👏"), ("pray", "🙏"), ("praying hands", "🙏"), ("folded hands", "🙏"), ("wave", "👋"),
+    ("waving hand", "👋"), ("ok hand", "👌"), ("muscle", "💪"), ("raised hands", "🙌"), ("eyes", "👀"), ("fire", "🔥"), ("party", "🎉"),
+    ("party popper", "🎉"), ("tada", "🎉"), ("rocket", "🚀"), ("star", "⭐"), ("sparkles", "✨"), ("hundred", "💯"), ("100", "💯"),
+    ("check mark", "✅"), ("checkmark", "✅"), ("cross mark", "❌"), ("warning", "⚠️"), ("coffee", "☕"), ("cake", "🎂"),
+    ("birthday cake", "🎂"), ("gift", "🎁"), ("money", "💰"), ("sun", "☀️"), ("poop", "💩"),
+];
+
+/// Spoken punctuation and emoji in a live dictation ("comma", "question mark", "open quote",
+/// "fire emoji"), before voice_commands and the model. "Comma", "period", "colon" and "dash" are
+/// also plain words, so they count only as a clause of their own, as voice commands do
+/// ("Ship it today, period." but not "a long period."); the other marks also at a clause's end
+/// ("How are you question mark"), and quotes, the em dash and emoji anywhere. Never right after "a", "the" and
+/// the like ("put a question mark here", "send a heart emoji"). The punctuation Whisper put around
+/// a mark is absorbed.
+// ponytail: English names only; a mid-clause "comma" with no pause around it is left to the model.
+pub fn spoken_punctuation(text: &str) -> String {
+    const WORDS: [&str; 4] = ["comma", "period", "colon", "dash"];
+    const DET: [&str; 16] = ["a", "an", "the", "this", "that", "these", "those", "my", "your", "his", "her", "its", "our", "their", "each", "every"];
+    const STOPS: &str = ".,;:!?…";
+    fn core(t: &str) -> &str {
+        t.trim_matches(|c: char| !c.is_alphanumeric())
+    }
+    fn post(t: &str) -> &str {
+        &t[t.trim_end_matches(|c: char| !c.is_alphanumeric()).len()..]
+    }
+    let strip = |t: &mut String| t.truncate(t.trim_end_matches(|c: char| STOPS.contains(c)).len());
+    // Longest first, so "em dash" wins over "dash" and "smiley face emoji" over nothing.
+    let mut phrases: Vec<(Vec<&str>, &str, bool)> = MARKS.iter().map(|(p, m)| (p.split(' ').collect(), *m, false)).collect();
+    phrases.extend(EMOJI.iter().map(|(p, e)| (p.split(' ').chain(["emoji"]).collect(), *e, true)));
+    phrases.sort_by_key(|(w, ..)| std::cmp::Reverse(w.len()));
+    let toks = spaced(text);
+    let last = toks.iter().rposition(|(_, t)| !t.is_empty()).unwrap_or(0);
+    let mut out: Vec<(String, String)> = vec![];
+    let (mut i, mut cap, mut glue, mut open) = (0, false, false, None);
+    while i < toks.len() {
+        let prev = out.last().map(|(_, t)| t.as_str());
+        let starts = prev.is_none_or(|p| p.ends_with(|c: char| STOPS.contains(c))) || toks[i].0.contains('\n');
+        let after_det = prev.is_some_and(|p| DET.contains(&p.to_lowercase().as_str()));
+        let hit = phrases.iter().find(|(words, m, emoji)| {
+            let n = words.len();
+            let said = i + n <= toks.len()
+                && words.iter().enumerate().all(|(k, w)| {
+                    let t = toks[i + k].1;
+                    core(t).eq_ignore_ascii_case(w) && t.starts_with(char::is_alphanumeric) && (k == n - 1 || t.ends_with(char::is_alphanumeric))
+                });
+            let ends = said && (i + n > last || post(toks[i + n - 1].1).contains(|c: char| STOPS.contains(c)));
+            said && !after_det && match words.as_slice() {
+                [w] if WORDS.contains(w) => starts && ends,
+                _ if *emoji || matches!(*m, "\"" | "—") => true,
+                _ => starts || ends,
+            }
+        });
+        let Some((words, m, emoji)) = hit else {
+            let (ws, t) = toks[i];
+            let mut t = t.to_string();
+            if cap && let Some(c) = t.chars().next().filter(|c| c.is_lowercase()) {
+                t = c.to_uppercase().chain(t.chars().skip(1)).collect();
+            }
+            let ws = if glue { "" } else { open.unwrap_or(ws) };
+            if !t.is_empty() {
+                if open.take().is_some() {
+                    t.insert(0, '"');
+                }
+                (cap, glue) = (false, false);
+            }
+            out.push((ws.to_string(), t));
+            i += 1;
+            continue;
+        };
+        let (ws, said) = (toks[i].0, toks[i + words.len() - 1].1);
+        if *emoji {
+            out.push((ws.to_string(), format!("{m}{}", post(said))));
+        } else if words[0] == "open" {
+            open = Some(ws);
+        } else if let Some((_, t)) = out.last_mut() {
+            strip(t);
+            match *m {
+                "\"" => {
+                    t.push('"');
+                    t.push_str(post(said));
+                }
+                "-" => t.push_str(" -"),
+                "—" => {
+                    t.push('—');
+                    glue = true;
+                }
+                m => {
+                    t.push_str(m);
+                    cap = ".?!".contains(m);
+                }
+            }
+        } // else a mark with nothing before it: dropped
+        i += words.len();
+    }
+    out.into_iter().map(|(ws, t)| ws + &t).collect()
+}
+
+/// "Send it" or "send that" said last, as a clause of its own ("See you at five. Send it.", "…at
+/// five, send that"): the text without it, to paste before pressing Return. Not "I'll send it",
+/// "send it tomorrow", or the words said on their own.
+pub fn send_command(text: &str) -> Option<String> {
+    const STOPS: &str = ".,;:!?…";
+    let body = text.trim_end_matches(|c: char| c.is_whitespace() || STOPS.contains(c));
+    ["send it", "send that"].iter().find_map(|p| {
+        let at = body.len().checked_sub(p.len())?;
+        let rest = body.get(..at)?.trim_end();
+        let starts = rest.ends_with(|c: char| c == '\n' || STOPS.contains(c));
+        (body[at..].eq_ignore_ascii_case(p) && starts && has_speech(rest)).then(|| rest.trim_end_matches([',', ';', ':']).to_string())
+    })
+}
+
+/// Fillers ("um", "uh") out, with the commas around them: what Light cleanup falls back to.
+fn remove_fillers(text: &str) -> String {
+    const FILLER: [&str; 10] = ["um", "umm", "uh", "uhh", "er", "erm", "ah", "hmm", "hm", "mm"];
+    let mut out: Vec<(&str, String)> = vec![];
+    let (mut carry, mut cap) = (None::<&str>, false);
+    for (ws, t) in spaced(text) {
+        let core = t.trim_matches(|c: char| !c.is_alphanumeric());
+        if !core.is_empty() && FILLER.contains(&core.to_lowercase().as_str()) {
+            // "I was, uh." keeps the full stop; a filler that starts a sentence hands on its capital.
+            let stop = &t[t.trim_end_matches(['.', '!', '?']).len()..];
+            match out.last_mut() {
+                Some((_, p)) if !stop.is_empty() && !p.ends_with(['.', '!', '?']) => {
+                    p.truncate(p.trim_end_matches([',', ';']).len());
+                    p.push_str(stop);
+                }
+                Some((_, p)) if !p.ends_with(['.', '!', '?']) && !ws.contains('\n') => {}
+                _ => cap |= t.starts_with(char::is_uppercase),
+            }
+            carry = Some(if ws.contains('\n') { ws } else { carry.unwrap_or(ws) });
+            continue;
+        }
+        let mut t = t.to_string();
+        if std::mem::take(&mut cap) && let Some(c) = t.chars().next() {
+            t = c.to_uppercase().chain(t.chars().skip(1)).collect();
+        }
+        out.push((carry.take().unwrap_or(ws), t));
+    }
+    out.into_iter().map(|(ws, t)| format!("{ws}{t}")).collect()
+}
+
+/// Light cleanup drops fillers and repeats and fixes punctuation, never rewords: the model's
+/// text counts only within one word changed in ten of what was said, fillers aside.
+fn light_enough(said: &str, cleaned: &str) -> bool {
+    let said = words(&remove_fillers(said));
+    edits(&said, &words(cleaned)) <= 1 + said.len() / 10
+}
+
+/// Level None: a capital to start each sentence and line, and "I" on its own.
+fn capitalise(text: &str) -> String {
+    let mut out = String::new();
+    let mut cap = true;
+    for c in text.chars() {
+        if cap && c.is_lowercase() {
+            out.extend(c.to_uppercase());
+        } else {
+            out.push(c);
+        }
+        cap = if c.is_alphanumeric() { false } else { cap || c == '\n' || ".!?".contains(c) };
+    }
+    replace_word(&out, "i", "I")
+}
+
 /// Cleanup one line at a time, once voice commands (or a snippet) put line breaks in the text:
 /// the model then cannot merge, reorder or re-bullet them. A bullet's "- " stays outside the call.
 fn by_line(s: &Settings, text: &str, llm: impl Fn(&Settings, &str) -> Result<String, String>) -> Result<String, String> {
@@ -753,11 +952,16 @@ pub fn run(s: &Settings, pcm: &[f32], dictated: bool, on_cleaning: impl FnOnce()
 #[allow(clippy::too_many_arguments)]
 fn after_stt(s: &Settings, raw: String, stt_ms: u64, mut warning: Option<String>, keyless: bool, dictated: bool, on_cleaning: impl FnOnce(), llm: impl Fn(&Settings, &str) -> Result<String, String>) -> Output {
     if !has_speech(&raw) {
-        return Output { raw: String::new(), text: String::new(), stt_ms, cleanup_ms: 0, warning, no_cleanup: false, cleaned: None };
+        return Output { raw: String::new(), text: String::new(), stt_ms, cleanup_ms: 0, warning, no_cleanup: false, cleaned: None, send: false };
     }
     let raw = stt::collapse_loops(&raw);
     let replaced = apply_replacements(&raw, &s.replacements);
-    let mut text = if dictated && s.voice_commands { voice_commands(&replaced) } else { replaced };
+    // "Send it" first, so neither the commands nor the model ever see it.
+    let (replaced, send) = match send_command(&replaced).filter(|_| dictated && s.send_it) {
+        Some(t) => (t, true),
+        None => (replaced, false),
+    };
+    let mut text = if dictated && s.voice_commands { voice_commands(&spoken_punctuation(&replaced)) } else { replaced };
     let (mut cleanup_ms, mut cleaned) = (0, None);
     // "No cleanup": switched off, or on with no key to call the provider. Verbatim is a choice, not raw.
     let no_cleanup = !s.cleanup.enabled || keyless;
@@ -768,6 +972,8 @@ fn after_stt(s: &Settings, raw: String, stt_ms: u64, mut warning: Option<String>
         match res {
             Ok(c) if !c.is_empty() => match rejected(s, &text, &c) {
                 Some(w) => (warning, cleaned) = (Some(w.into()), Some(c)),
+                // Light never rewords: a cleanup that did gives way to the words without their fillers.
+                None if s.cleanup.level == "light" && !light_enough(&text, &c) => text = remove_fillers(&text),
                 // The built-in model ignores the style in its prompt (see restyle); others follow it.
                 None => text = if s.cleanup.provider == "echotype" { restyle(&c, &s.cleanup.style) } else { c },
             },
@@ -783,10 +989,12 @@ fn after_stt(s: &Settings, raw: String, stt_ms: u64, mut warning: Option<String>
         }
         cleanup_ms = t.elapsed().as_millis() as u64;
     }
-    if !no_cleanup {
+    if !no_cleanup && s.cleanup.level == "none" {
+        text = capitalise(&text);
+    } else if !no_cleanup && s.cleanup.level == "medium" {
         text = spoken_lists(&text);
     }
-    Output { raw, text, stt_ms, cleanup_ms, warning, no_cleanup, cleaned }
+    Output { raw, text, stt_ms, cleanup_ms, warning, no_cleanup, cleaned, send }
 }
 
 #[cfg(test)]
@@ -1259,6 +1467,109 @@ mod tests {
         ] {
             assert_eq!(voice_commands(raw), raw);
         }
+    }
+
+    #[test]
+    fn spoken_punctuation_and_emoji_become_marks() {
+        for (said, typed) in [
+            ("Hi Priya, comma, how are you? Question mark.", "Hi Priya, how are you?"),
+            ("how are you question mark", "how are you?"),
+            ("Ship it today, period.", "Ship it today."),
+            ("Ship it today. Full stop. Then rest", "Ship it today. Then rest"),
+            ("Wow exclamation point", "Wow!"),
+            ("Agenda, colon, budget", "Agenda: budget"),
+            ("one semicolon two", "one semicolon two"),
+            ("one. Semicolon. two", "one; two"),
+            ("He said, open quote, hello, close quote, and left.", "He said, \"hello\", and left."),
+            ("He said open quote yes close quote", "He said \"yes\""),
+            ("Ship it, dash, now", "Ship it - now"),
+            ("Ship it em dash now", "Ship it—now"),
+            ("Thanks heart emoji", "Thanks ❤️"),
+            ("Great work fire emoji fire emoji.", "Great work 🔥 🔥."),
+            ("Done, thumbs up emoji, see you", "Done, 👍, see you"),
+            ("Happy birthday party popper emoji", "Happy birthday 🎉"),
+            ("Love it, smiley face emoji!", "Love it, 😊!"),
+            ("Agenda. New line. Budget", "Agenda. New line. Budget"),
+        ] {
+            assert_eq!(spoken_punctuation(said), typed, "{said:?}");
+        }
+        // The words in an ordinary sentence.
+        for same in [
+            "It was a long period.",
+            "The period ends Friday.",
+            "Put a comma here.",
+            "Add a question mark at the end.",
+            "There's a big question mark over it",
+            "He has colon cancer.",
+            "Make a dash for it.",
+            "Send a heart emoji to her.",
+            "The fire is out.",
+            "Whose emoji is that?",
+            "Use the em dash.",
+            "कल मीटिंग नहीं होगी",
+            "Notes:\n- Eggs\n- Milk",
+        ] {
+            assert_eq!(spoken_punctuation(same), same);
+        }
+    }
+
+    #[test]
+    fn send_it_only_as_the_last_clause() {
+        assert_eq!(send_command("See you at five. Send it.").as_deref(), Some("See you at five."));
+        assert_eq!(send_command("See you at five, send that").as_deref(), Some("See you at five"));
+        assert_eq!(send_command("Thanks!\nSEND IT").as_deref(), Some("Thanks!"));
+        for not in ["I'll send it tomorrow.", "Tell him I'll send it.", "Send it.", "Please resend it.", "send it", "Can you send it to Priya?", "Did you send it, Arnav?"] {
+            assert_eq!(send_command(not), None, "{not:?}");
+        }
+        let mut s = Settings::default();
+        let o = after_stt(&s, "Ok, see you then. Send it.".into(), 1, None, false, true, || {}, |_, t| Ok(t.into()));
+        assert_eq!((o.text.as_str(), o.send, o.raw.as_str()), ("Ok, see you then.", true, "Ok, see you then. Send it."), "History still shows what was heard");
+        s.cleanup.enabled = true;
+        let seen = std::cell::RefCell::new(String::new());
+        let o = after_stt(&s, "um ok see you then, send it".into(), 1, None, false, true, || {}, |_, t| {
+            *seen.borrow_mut() = t.into();
+            Ok("Ok, see you then.".into())
+        });
+        assert_eq!((seen.into_inner().as_str(), o.text.as_str(), o.send), ("um ok see you then", "Ok, see you then.", true), "the model never sees it");
+        let file = after_stt(&s, "See you. Send it.".into(), 1, None, false, false, || {}, |_, t| Ok(t.into()));
+        assert!(!file.send && file.text.ends_with("Send it."), "a voice note keeps its words");
+        s.send_it = false;
+        assert!(!post(&s, "See you. Send it.").send, "off in Settings");
+    }
+
+    #[test]
+    fn light_cleanup_never_rewords() {
+        assert_eq!(remove_fillers("So um I was thinking, uh, we should ship it."), "So I was thinking, we should ship it.");
+        assert_eq!(remove_fillers("Um, so I agree. Uh. Then we go"), "So I agree. Then we go");
+        assert_eq!(remove_fillers("I was, uh."), "I was.");
+        assert_eq!(remove_fillers("Notes.\nUm, ship it"), "Notes.\nShip it");
+        assert_eq!(remove_fillers("umbrella and hum"), "umbrella and hum");
+        assert!(light_enough("um so i think we we should ship it on friday", "So I think we should ship it on Friday."));
+        assert!(!light_enough("um so i think we should ship it on friday", "I believe Friday is the day to ship."));
+        assert!(!light_enough("Tuesday, no wait, Thursday", "Thursday."), "a correction is a Medium edit");
+        let mut s = Settings::default();
+        s.cleanup.enabled = true;
+        s.cleanup.level = "light".into();
+        assert!(system_prompt(&s).ends_with(LIGHT.trim_start_matches('\n')) && !system_prompt(&echotype()).contains("Light"));
+        let reworded = |s: &Settings| after_stt(s, "So um I was thinking we should ship it.".into(), 1, None, false, true, || {}, |_, _| Ok("We should ship it.".into())).text;
+        assert_eq!(reworded(&s), "So I was thinking we should ship it.", "the words as said, fillers out");
+        s.cleanup.level = "medium".into();
+        assert_eq!(reworded(&s), "We should ship it.", "Medium keeps today's cleanup");
+        s.cleanup.level = "light".into();
+        let said = "I need 14 footballs, 2 cricket bats and 3 tennis rackets.";
+        assert_eq!(after_stt(&s, said.into(), 1, None, false, true, || {}, |_, t| Ok(t.into())).text, said, "no list either");
+    }
+
+    #[test]
+    fn level_none_skips_the_model_and_only_capitalises() {
+        let mut s = Settings::default();
+        s.cleanup.enabled = true;
+        s.cleanup.level = "none".into();
+        let o = after_stt(&s, "um i think so. new line. yes i do".into(), 1, None, false, true, || panic!("called the LLM"), |_, _| panic!("called the LLM"));
+        assert_eq!((o.text.as_str(), o.no_cleanup), ("Um I think so.\nYes I do", false), "voice commands and capitals, nothing else; a choice, not No cleanup");
+        assert_eq!(capitalise("hi. how are you? i'm ok\nthanks"), "Hi. How are you? I'm ok\nThanks");
+        assert_eq!(capitalise("it costs 3.5 dollars"), "It costs 3.5 dollars");
+        assert!(!wants_cleanup(&s, "hello"));
     }
 
     #[test]

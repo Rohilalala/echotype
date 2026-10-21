@@ -77,6 +77,19 @@ pub fn copy_selection(app: &AppHandle) -> Result<Option<String>, String> {
     sent.map(|()| got)
 }
 
+/// Presses Return in the app in front ("send it"), after a paste: on the main thread, as paste's ⌘V.
+pub fn press_return(app: &AppHandle) -> Result<(), String> {
+    // The app reads the pasteboard in its own time: let the paste land before the message is sent.
+    std::thread::sleep(Duration::from_millis(100));
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+        let _ = tx.send(Enigo::new(&Settings::default()).map_err(|e| e.to_string()).and_then(|mut e| e.key(Key::Return, Direction::Click).map_err(|e| e.to_string())));
+    })
+    .map_err(|e| e.to_string())?;
+    rx.recv().map_err(|e| e.to_string())?
+}
+
 /// Waits (up to `max`) until Control, Option and Shift are up, so a ⌘V sent now is not ⌘⌃V.
 /// False when they are still down after `max`.
 pub fn wait_for_modifiers_up(max: Duration) -> bool {

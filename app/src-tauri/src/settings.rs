@@ -58,6 +58,9 @@ pub struct Settings {
     /// Spoken "new line", "new paragraph", "bullet point" and "scratch that" act as commands in a
     /// dictation (cleanup::voice_commands). On for upgraders too.
     pub voice_commands: bool,
+    /// A live dictation ending in "send it" or "send that" pastes without those words, then presses
+    /// Return (cleanup::send_command). On for upgraders too.
+    pub send_it: bool,
     /// Count words and speaking speed on this computer (stats.rs). Counts only; on for upgraders too.
     pub usage_stats: bool,
     /// Opt-in anonymous usage counts and crash reports for the beta (telemetry.rs). Off unless
@@ -81,12 +84,17 @@ pub struct Settings {
     /// Command Mode: held like the dictation shortcut, it applies the spoken instruction to the
     /// selected text (or writes what it asks for). "" is unbound.
     pub command_hotkey: String,
+    /// Undo the AI edit: the last dictation's words as heard, before cleanup, onto the clipboard. "" is unbound.
+    pub undo_edit_hotkey: String,
     /// Launch at login. Off for upgraders; onboarding offers it pre-checked.
     pub autostart: bool,
     /// Start, stop and lock sounds.
     pub sounds: bool,
     /// One-time notices already dismissed: "upgrade_offer", "bluetooth_tip", "no_cleanup_banner".
     pub dismissed: Vec<String>,
+    /// A language the speech detector heard clearly that is not in `languages`, offered once in
+    /// the sidebar ("" = none). Offering it adds "lang_offer:<code>" to `dismissed`.
+    pub language_offer: String,
     /// The idle pill (macOS): a thin bar bottom-centre while not dictating. On for upgraders too.
     pub pill_idle: bool,
     /// "Hide for 1 hour": the idle pill stays away until this time (ms since the epoch); 0 = not hidden.
@@ -213,6 +221,9 @@ pub struct Cleanup {
     pub base_url: String,
     /// "default" | "casual" | "formal" | "verbatim".
     pub style: String,
+    /// How much the model may change: "none" (no model: voice commands, replacements and capitals
+    /// only) | "light" (fillers, repeats and punctuation, never rewording) | "medium" (everything).
+    pub level: String,
     pub custom_instructions: String,
     /// "Match the app you're typing in": the style comes from the app in front when recording
     /// starts (app_style). Off for everyone until switched on.
@@ -297,6 +308,7 @@ impl Default for Settings {
             restore_clipboard: true,
             history_enabled: true,
             voice_commands: true,
+            send_it: true,
             usage_stats: true,
             share_telemetry: false,
             display_name: String::new(),
@@ -307,9 +319,11 @@ impl Default for Settings {
             copy_last_hotkey: String::new(),
             // macOS only: elsewhere ⌥⇧ switches keyboard layouts, and no modifier wait guards the ⌘C.
             command_hotkey: if cfg!(target_os = "macos") { "Alt+Shift+Space" } else { "" }.into(),
+            undo_edit_hotkey: String::new(),
             autostart: false,
             sounds: true,
             dismissed: vec![],
+            language_offer: String::new(),
             pill_idle: true,
             pill_hidden_until: 0,
             pill_in_recordings: false,
@@ -372,6 +386,7 @@ impl Default for Cleanup {
             model: "gemma3:1b".into(),
             base_url: String::new(),
             style: "default".into(),
+            level: "medium".into(),
             custom_instructions: String::new(),
             match_app: false,
             app_styles: vec![],
@@ -442,6 +457,9 @@ impl Settings {
         }
         if !SOUND_PACKS.contains(&self.sound_pack.as_str()) {
             self.sound_pack = "classic".into();
+        }
+        if !matches!(self.cleanup.level.as_str(), "none" | "light" | "medium") {
+            self.cleanup.level = "medium".into();
         }
         if !matches!(self.cleaner_memory.as_str(), "save" | "ready") {
             self.cleaner_memory = "ready".into();
@@ -796,6 +814,8 @@ mod tests {
         assert_eq!(s.cleanup.provider, "ollama");
         assert_eq!(s.cleanup.model, "gemma3:1b");
         assert_eq!(s.cleanup.style, "default");
+        assert_eq!(s.cleanup.level, "medium", "today's cleanup");
+        assert!(s.send_it && s.undo_edit_hotkey.is_empty() && s.language_offer.is_empty());
         assert_eq!(s.local_api, LocalApi { enabled: false, port: 7811 });
         assert!(!s.onboarded);
         assert!(s.detect_meetings && s.call_start == CallStart::default() && s.call_start.zoom == "ask", "calls are offered, never recorded unasked");
@@ -830,6 +850,7 @@ mod tests {
         assert!(s.prefer_builtin_mic && s.input_device.is_none(), "System default skips Bluetooth mics for upgraders too");
         assert!(!s.pause_music, "music is never paused unasked");
         assert!(s.sounds && s.dismissed.is_empty());
+        assert!(s.send_it && s.cleanup.level == "medium" && s.undo_edit_hotkey.is_empty(), "upgraders get \"send it\", today's cleanup and no new shortcut");
         assert!(s.pill_idle && s.pill_hidden_until == 0 && !s.pill_in_recordings, "the idle pill is on for upgraders, hidden from capture");
         assert!(s.live_text, "upgraders see their words as they speak");
         assert_eq!(s.look, "system", "upgraders follow the system appearance");

@@ -148,6 +148,16 @@
           <div class="row" id="cleanupCloud" hidden></div>
         </div>
 
+        <h2 class="group-title">Level</h2>
+        <div class="group">
+          <div class="row"><span class="row-text"><span class="row-title" id="levelLabel">How much cleanup changes</span><span class="row-desc" id="levelDesc"></span></span>
+            <span class="seg" role="radiogroup" aria-labelledby="levelLabel">
+              <label><input type="radio" name="level" value="none" data-bind="cleanup.level" /><span>None</span></label>
+              <label><input type="radio" name="level" value="light" data-bind="cleanup.level" /><span>Light</span></label>
+              <label><input type="radio" name="level" value="medium" data-bind="cleanup.level" /><span>Medium</span></label>
+            </span></div>
+        </div>
+
         <h2 class="group-title">Style</h2>
         <div class="group" role="radiogroup" aria-label="Style">
           <label class="row choice"><input type="radio" name="style" value="default" data-bind="cleanup.style" /><span class="row-text"><span class="row-title">Default</span><span class="row-desc">Fixes fillers, corrections and punctuation. Keeps your wording.</span></span></label>
@@ -313,8 +323,12 @@
           <span class="actions"><button class="hotkey" data-shortcut="copy_last_hotkey" type="button" aria-labelledby="copyLabel"></button><button class="icon-btn" data-clear="copy_last_hotkey" type="button" aria-label="Turn off the copy last shortcut"></button></span></div>
         <div class="row"><span class="row-text"><span class="row-title" id="commandLabel">Command Mode</span><span class="row-desc">Select text and say what to change: “more formal”, “shorter”, “translate to Spanish”. With nothing selected, say what to write.</span><span class="row-desc warn" id="commandNote" hidden>Needs a general model. The Echotype model only cleans up dictation: pick Ollama, LM Studio or an API key under Cleanup.</span><span class="row-desc error" id="command_hotkeyError" role="alert" hidden></span></span>
           <span class="actions"><button class="hotkey" data-shortcut="command_hotkey" type="button" aria-labelledby="commandLabel"></button><button class="icon-btn" data-clear="command_hotkey" type="button" aria-label="Turn off the Command Mode shortcut"></button></span></div>
-        <label class="row"><span class="row-text"><span class="row-title">Voice commands</span><span class="row-desc">Say “new line”, “new paragraph”, “bullet point” or “next bullet”, and “scratch that” to drop the sentence before it. Said as a phrase of its own, so a sentence that only contains the words is typed as you said it.</span></span>
+        <div class="row"><span class="row-text"><span class="row-title" id="undoLabel">Undo cleanup</span><span class="row-desc">Copies your last dictation as you said it, before cleanup changed it. Undo in the app, then paste.</span><span class="row-desc error" id="undo_edit_hotkeyError" role="alert" hidden></span></span>
+          <span class="actions"><button class="hotkey" data-shortcut="undo_edit_hotkey" type="button" aria-labelledby="undoLabel"></button><button class="icon-btn" data-clear="undo_edit_hotkey" type="button" aria-label="Turn off the undo cleanup shortcut"></button></span></div>
+        <label class="row"><span class="row-text"><span class="row-title">Voice commands</span><span class="row-desc">Say “new line”, “new paragraph”, “bullet point” or “next bullet”, and “scratch that” to drop the sentence before it. Punctuation too: “comma”, “question mark”, “open quote”, and emoji: “thumbs up emoji”. Said as a phrase of its own, so a sentence that only contains the words is typed as you said it.</span></span>
           <input type="checkbox" class="switch" data-bind="voice_commands" /></label>
+        <label class="row"><span class="row-text"><span class="row-title">“Send it”</span><span class="row-desc">End a dictation with “send it” to paste it and press Return, as in a chat. Only as the last words, said on their own.</span></span>
+          <input type="checkbox" class="switch" data-bind="send_it" /></label>
       </div>
 
       <h2 class="group-title" id="pillTitle">Pill</h2>
