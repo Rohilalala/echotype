@@ -221,8 +221,10 @@
 
       <h2 class="group-title">Text on screen</h2>
       <div class="group">
-        <label class="row"><span class="row-text"><span class="row-title">Use text on screen to spell names</span><span class="row-desc">As you start dictating, Echotype reads the words around your cursor, so names, files and code come out spelled the way they are there. Only with a speech model on this Mac. Nothing is saved or sent.</span></span>
+        <label class="row"><span class="row-text"><span class="row-title">Use text on screen to spell names</span><span class="row-desc">As you start dictating, Echotype reads the words around your cursor, so names, files and code come out spelled the way they are there. In Command Mode it also reads the text around your selection, so “reply to this” knows what you are replying to. Never a password field, nothing is saved, and it stays on this Mac unless you allow it below.</span></span>
           <input type="checkbox" class="switch" data-bind="screen_context" /></label>
+        <label class="row" id="screenSend" hidden><span class="row-text"><span class="row-title">Send text on screen to <span id="screenSendName">your cleanup provider</span></span><span class="row-desc">Your cleanup provider runs online. Turn this on to send it the names near your cursor as spelling hints and, in Command Mode, up to 600 characters around your selection with your request. Off, that text never leaves this Mac.</span></span>
+          <input type="checkbox" class="switch" data-bind="screen_context_cloud" /></label>
       </div>
 
       <h2 class="group-title">Snippets</h2>

@@ -421,8 +421,8 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                 Act::Start { id, locked } => match command_ready(&s, command).and_then(|()| start_recording(&app, &s, id)) {
                     Ok(mut l) => {
                         l.command = command;
+                        l.screen = read_screen(&app, &s, command);
                         if !command {
-                            l.screen = read_screen(&app, &s);
                             // Command Mode instructions are never kept, so there is nothing to recover.
                             if s.history_enabled && s.clip_days > 0 {
                                 l.spool = Some(Spool::start(l.rec.tap(), settings::recording_path(now_ms())));
@@ -517,7 +517,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                     let clip = Clip { quality: st.quality(), muted_seen: st.muted_seen(), warning, speaking_ms: st.speaking_ms(), snr_db: st.floor_and_speech().map(|(floor, speech)| speech - floor), front: l.front.clone(), entry: None, screen: lock(&l.screen).clone(), spool: l.spool };
                     drop(st);
                     if l.command {
-                        process_command(&app, pcm, busy.clone());
+                        process_command(&app, pcm, busy.clone(), clip.screen);
                     } else {
                         process(&app, pcm, busy.clone(), clip, true, None);
                     }
@@ -584,18 +584,25 @@ fn start_recording(app: &AppHandle, s: &Settings, id: u64) -> Result<Live, Dicta
     }
 }
 
-/// The app in front, and with "Use text on screen" and a local speech model the names around its
-/// caret, read on another thread so the mic opens at once. A dictation that ends first goes without.
-/// Echotype's own window (no front app) is not read.
-fn read_screen(app: &AppHandle, s: &Settings) -> Arc<Mutex<context::Screen>> {
+/// The app in front, and with "Use text on screen" the names around its caret (for a local speech
+/// model, or the cleanup provider where it may see them) or, for Command Mode, the text around the
+/// selection (cleanup::screen_ok), read on another thread so the mic opens at once. A dictation
+/// that ends first goes without. Echotype's own window (no front app) and password managers are not read.
+fn read_screen(app: &AppHandle, s: &Settings, command: bool) -> Arc<Mutex<context::Screen>> {
     let out = Arc::new(Mutex::new(context::Screen::default()));
-    let (app, read, o) = (app.clone(), s.screen_context && s.stt.provider == "local", out.clone());
+    let ok = cleanup::screen_ok(s);
+    let read = s.screen_context && (ok || !command && s.stt.provider == "local");
+    let (app, o) = (app.clone(), out.clone());
     std::thread::spawn(move || {
         let Some(front) = platform::frontmost_app(&app) else { return };
+        let private = context::private(&front.id);
         lock(&o).app = front.id;
-        if read {
-            let words = context::read();
-            lock(&o).words = words;
+        if let Some((before, sel, after)) = (read && !private).then(|| context::read(true)).flatten() {
+            let mut o = lock(&o);
+            o.words = context::tokens(&before, &format!("{sel}{after}"));
+            if command && ok {
+                o.around = (before, after);
+            }
         }
     });
     out
@@ -942,12 +949,12 @@ fn command_ready(s: &Settings, command: bool) -> Result<(), DictationState> {
 /// cleanup provider apply it and paste the result over the selection. On any failure the user's
 /// text stays as it was and the pill says why.
 // ponytail: results stay out of history and stats; add them if people want edits counted.
-fn process_command(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>) {
+fn process_command(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, screen: context::Screen) {
     if pcm.len() < MIN_SAMPLES {
         emit_state(app, hint("Didn't catch that", None));
         return;
     }
-    process_edit(app, busy, move |app, s| run_command(app, s, &pcm));
+    process_edit(app, busy, move |app, s| run_command(app, s, &pcm, screen));
 }
 
 /// Command Mode or a transform on a worker thread, busy meanwhile; a panic is an error state.
@@ -993,7 +1000,8 @@ fn edit_target(app: &AppHandle, s: &Settings) -> Result<(bool, bool, Option<Stri
     }
 }
 
-fn run_command(app: &AppHandle, s: &Settings, pcm: &[f32]) -> DictationState {
+/// `screen`: read as the recording started (read_screen), for the edit only, not the instruction.
+fn run_command(app: &AppHandle, s: &Settings, pcm: &[f32], screen: context::Screen) -> DictationState {
     let (paste, nowhere, selection) = match edit_target(app, s) {
         Ok(t) => t,
         Err(e) => return e,
@@ -1008,7 +1016,8 @@ fn run_command(app: &AppHandle, s: &Settings, pcm: &[f32]) -> DictationState {
         Ok(_) => return hint("Didn't catch that", None),
         Err(e) => return DictationState { action: error_action(&e), ..edit_error(e) },
     };
-    apply_edit(app, s, "Command", selection.as_deref(), &instruction, paste, nowhere)
+    let s = Settings { screen, ..s.clone() };
+    apply_edit(app, &s, "Command", selection.as_deref(), &instruction, paste, nowhere)
 }
 
 /// A transform's shortcut: its instruction on the selected text, as Command Mode would apply it.
@@ -1019,6 +1028,12 @@ fn run_transform(app: &AppHandle, s: &Settings, name: &str) -> DictationState {
     let Some(instruction) = settings::transform_instruction(s, name).filter(|i| !i.trim().is_empty()) else {
         return hint(format!("Add an instruction to {name} in Settings"), Some("settings"));
     };
+    // The text around the selection, read before ⌘C, once: no time to wait for a slow app here.
+    let mut s = s.clone();
+    if cleanup::screen_ok(&s) && platform::frontmost_app(app).is_some_and(|f| !context::private(&f.id)) {
+        s.screen.around = context::read(false).map(|(before, _, after)| (before, after)).unwrap_or_default();
+    }
+    let s = &s;
     match edit_target(app, s) {
         Ok((paste, nowhere, Some(sel))) => apply_edit(app, s, name, Some(&sel), &instruction, paste, nowhere),
         Ok(_) => hint(format!("Select some text, then use {name}"), None),
@@ -1032,7 +1047,7 @@ fn run_transform(app: &AppHandle, s: &Settings, name: &str) -> DictationState {
 fn apply_edit(app: &AppHandle, s: &Settings, what: &str, selection: Option<&str>, instruction: &str, paste: bool, nowhere: bool) -> DictationState {
     emit_state(app, simple("cleaning"));
     let provider = settings::preset(&s.cleanup.provider).map_or(s.cleanup.provider.clone(), |p| p.label.to_string());
-    let text = match cleanup::chat(s, cleanup::COMMAND_PROMPT, &cleanup::command_input(selection, instruction), Duration::from_secs(60)) {
+    let text = match cleanup::edit(s, selection, instruction) {
         Ok(t) if !t.is_empty() => t,
         Ok(_) => return edit_error(format!("{provider} returned nothing. Your text is unchanged.")),
         Err(e) => return DictationState { action: Some("cleanup"), ..edit_error(format!("{what} failed: {provider}: {}. Your text is unchanged.", e.lines().next().unwrap_or_default().trim_end_matches('.'))) },

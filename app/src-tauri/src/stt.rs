@@ -562,7 +562,8 @@ pub fn romanising(s: &Settings) -> bool {
 pub fn prompt(s: &Settings) -> String {
     let mut parts: Vec<String> = romanised(s).iter().map(|(_, p)| p.to_string()).collect();
     let mut words: Vec<String> = s.dictionary.iter().map(|w| w.trim().replace('\0', "")).filter(|w| !w.is_empty()).collect();
-    for w in &s.screen.words {
+    // Only into this Mac's own speech model: the words may be read for a cleanup provider too.
+    for w in s.screen.words.iter().filter(|_| s.stt.provider == "local") {
         if !words.iter().any(|d| d.eq_ignore_ascii_case(w)) {
             words.push(w.clone());
         }

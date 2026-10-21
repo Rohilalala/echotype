@@ -58,6 +58,10 @@ pub struct Settings {
     /// "Use text on screen to spell names": names and identifiers near the caret go into the local
     /// speech model's prompt (context.rs). Read through Accessibility; never saved or sent. On for upgraders too.
     pub screen_context: bool,
+    /// "Send text on screen to <provider>": names on screen (as spelling hints) and, in Command
+    /// Mode, the text around the selection also go to an online cleanup provider. Off by default;
+    /// a provider on this Mac gets them anyway (cleanup::screen_ok).
+    pub screen_context_cloud: bool,
     /// What the screen showed for this one dictation (lib.rs read_screen). Never saved.
     #[serde(skip)]
     pub screen: crate::context::Screen,
@@ -388,6 +392,7 @@ impl Default for Settings {
             cleanup: Cleanup::default(),
             dictionary: vec![],
             screen_context: true,
+            screen_context_cloud: false,
             screen: Default::default(),
             replacements: vec![],
             learn_words: true,
