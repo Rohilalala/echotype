@@ -48,6 +48,7 @@ const COMMANDS: &[&str] = &[
     "film_float",
     "cloud_start_login",
     "cloud_verify",
+    "cloud_sign_in_with",
     "cloud_account",
     "cloud_checkout",
     "cloud_portal",

@@ -25,20 +25,6 @@ CREATE TABLE IF NOT EXISTS api_keys (
 	account_id INTEGER NOT NULL REFERENCES accounts(id),
 	created_at INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS login_codes (
-	email      TEXT PRIMARY KEY,
-	hash       BLOB NOT NULL,
-	expires_at INTEGER NOT NULL,
-	attempts   INTEGER NOT NULL DEFAULT 0
-);
-
--- Failed sign-in code checks, counted per email across codes (brute-force cap).
-CREATE TABLE IF NOT EXISTS auth_failures (
-	email TEXT NOT NULL,
-	at    INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS auth_failures_email_at ON auth_failures(email, at);
-
 -- One row per proxied request: counts only, never text or audio. A row is written as a
 -- reservation (upper bounds) before the upstream call and settled to real figures after.
 CREATE TABLE IF NOT EXISTS usage (

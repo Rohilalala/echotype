@@ -21,7 +21,7 @@ type server struct {
 	upstream  *http.Client
 	stripe    *http.Client
 	stripeAPI string // https://api.stripe.com, swapped in tests
-	sendCode  func(email, code string) error
+	supabase  *http.Client
 	limits    limiter
 
 	mu       sync.Mutex
@@ -35,11 +35,11 @@ func newServer(cfg config, db *sql.DB) *server {
 		now:       time.Now,
 		upstream:  &http.Client{Timeout: 150 * time.Second},
 		stripe:    &http.Client{Timeout: 30 * time.Second},
+		supabase:  &http.Client{Timeout: 15 * time.Second},
 		stripeAPI: "https://api.stripe.com",
 		limits:    limiter{hits: map[string]*window{}},
 		inflight:  map[int64]int{},
 	}
-	s.sendCode = s.mailCode
 	return s
 }
 
@@ -52,8 +52,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /style.css", page("style.css"))
 	mux.HandleFunc("GET /billing/done", page("done.html"))
 
-	mux.HandleFunc("POST /v1/auth/start", s.authStart)
-	mux.HandleFunc("POST /v1/auth/verify", s.authVerify)
+	mux.HandleFunc("POST /v1/auth/supabase", s.authSupabase)
 	mux.HandleFunc("GET /v1/me", s.authed(s.me))
 	mux.HandleFunc("GET /v1/models", s.authed(s.models))
 	mux.HandleFunc("POST /v1/audio/transcriptions", s.authed(s.audio("transcriptions")))

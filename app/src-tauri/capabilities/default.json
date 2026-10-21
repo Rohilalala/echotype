@@ -64,6 +64,7 @@
     "allow-film-float",
     "allow-cloud-start-login",
     "allow-cloud-verify",
+    "allow-cloud-sign-in-with",
     "allow-cloud-account",
     "allow-cloud-checkout",
     "allow-cloud-portal",
