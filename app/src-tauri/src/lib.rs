@@ -428,7 +428,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                                 l.spool = Some(Spool::start(l.rec.tap(), settings::recording_path(now_ms())));
                             }
                         }
-                        llm::prewarm(&s); // warm while the user talks, not after
+                        llm::prewarm(&s, command); // warm while the user talks, not after
                         // Recording before anything shows, so the pill loop takes Esc for it (pill.rs owns Esc).
                         state(&app).recording.store(true, Ordering::SeqCst);
                         let _ = state(&app).pill_wake.send(());
@@ -1038,6 +1038,8 @@ fn apply_edit(app: &AppHandle, s: &Settings, what: &str, selection: Option<&str>
         Err(e) => return DictationState { action: Some("cleanup"), ..edit_error(format!("{what} failed: {provider}: {}. Your text is unchanged.", e.lines().next().unwrap_or_default().trim_end_matches('.'))) },
     };
     *lock(&state(app).last_output) = Some(text.clone());
+    // Undo edit then copies the text as it was before this edit, not an older dictation.
+    *lock(&state(app).last_raw) = selection.map(str::to_string);
     if llm::wanted(s) {
         // The edit swapped Echotype Writer in; have the cleaner back before the next dictation.
         let s = s.clone();

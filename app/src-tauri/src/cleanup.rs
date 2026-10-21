@@ -157,11 +157,12 @@ pub fn uses_writer(s: &Settings, system: &str) -> bool {
 pub fn chat(s: &Settings, system: &str, text: &str, timeout: Duration) -> Result<String, String> {
     let c = &s.cleanup;
     let writer = uses_writer(s, system);
-    let (base, key) = if c.provider == "echotype" {
-        let (url, key) = llm::ensure_for(s, writer)?; // the built-in model's server, started on first use
-        (url, Some(key))
+    // _in_use keeps the built-in server from being swapped to the other model mid-request.
+    let (base, key, _in_use) = if c.provider == "echotype" {
+        let (url, key, lease) = llm::use_for(s, writer)?; // the built-in model's server, started on first use
+        (url, Some(key), Some(lease))
     } else {
-        (settings::base_url(&c.provider, &c.base_url)?, settings::provider_key("llm", &c.provider))
+        (settings::base_url(&c.provider, &c.base_url)?, settings::provider_key("llm", &c.provider), None)
     };
     let preset = settings::preset(&c.provider);
     // A local server (Ollama, LM Studio) runs whatever the user pulled: never guess a model it may not have.
@@ -978,8 +979,9 @@ pub fn run(s: &Settings, pcm: &[f32], dictated: bool, on_cleaning: impl Fn()) ->
 /// as it was and the warning says so.
 /// Only with cleanup on: that switch is the user's choice to send dictated text to the cleanup
 /// provider, which may be a cloud API. A transform must never send it anywhere new on its own.
+/// Level None and the Verbatim style mean "no model" too.
 fn auto_transform_on(s: &Settings) -> bool {
-    s.cleanup.enabled && !s.auto_transform.is_empty()
+    s.cleanup.enabled && s.cleanup.level != "none" && s.cleanup.style != "verbatim" && !s.auto_transform.is_empty()
 }
 
 fn auto_transform(s: &Settings, mut out: Output, blocked: Option<String>, chat: impl FnOnce(&str) -> Result<String, String>) -> Output {
@@ -1747,6 +1749,12 @@ mod tests {
         assert!(!auto_transform_on(&s), "cleanup off: dictated text goes nowhere new");
         s.cleanup.enabled = true;
         assert!(auto_transform_on(&s));
+        s.cleanup.level = "none".into();
+        assert!(!auto_transform_on(&s), "Level None: no model, so no transform either");
+        s.cleanup.level = "medium".into();
+        s.cleanup.style = "verbatim".into();
+        assert!(!auto_transform_on(&s), "a Verbatim app gets the words as heard");
+        s.cleanup.style = "default".into();
         s.auto_transform.clear();
         assert!(!auto_transform_on(&s));
     }

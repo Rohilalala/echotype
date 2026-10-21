@@ -11,7 +11,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 pub struct Cleaner {
@@ -246,6 +246,24 @@ pub fn ensure(settings: &Settings) -> Result<(String, String), String> {
 
 /// ensure, for the cleaner or (`writer`) for Echotype Writer: the other one is stopped first.
 pub fn ensure_for(settings: &Settings, writer: bool) -> Result<(String, String), String> {
+    use_for(settings, writer).map(|(url, key, _)| (url, key))
+}
+
+/// Requests running on the server now. A swap to the other model waits for them, so a file
+/// job's cleanup isn't killed by a Command Mode edit and the other way round.
+static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+/// Held for the length of one request on the server `use_for` returned.
+pub struct InUse;
+
+impl Drop for InUse {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// `ensure_for`, plus a lease that keeps this server from being swapped out until it drops.
+pub fn use_for(settings: &Settings, writer: bool) -> Result<(String, String, InUse), String> {
     let c = if writer { &WRITER } else { cleaner(settings) };
     let opts = if writer {
         Opts { model: model_path(c), ctx: WRITER_CONTEXT, lock: memory(settings) == "ready", kv8: true }
@@ -253,14 +271,22 @@ pub fn ensure_for(settings: &Settings, writer: bool) -> Result<(String, String),
         Opts { model: model_path(c), ctx: context(settings), lock: memory(settings) == "ready", kv8: false }
     };
     IDLE_SECS.store(idle(settings).map_or(0, |d| d.as_secs()), Ordering::Relaxed);
-    let mut g = SERVER.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(s) = g.as_mut()
-        && matches!(s.child.try_wait(), Ok(None))
-        && s.opts == opts
-    {
-        s.last_used = Instant::now();
-        return Ok((url(s.port), s.key.clone()));
-    }
+    let asked = Instant::now();
+    let mut g = loop {
+        let mut g = SERVER.lock().unwrap_or_else(|e| e.into_inner());
+        let alive = g.as_mut().is_some_and(|s| matches!(s.child.try_wait(), Ok(None)));
+        if let Some(s) = g.as_mut().filter(|s| alive && s.opts == opts) {
+            s.last_used = Instant::now();
+            IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+            return Ok((url(s.port), s.key.clone(), InUse));
+        }
+        // ponytail: polls every 50 ms; a Condvar if the wait ever shows up in timings.
+        if !alive || IN_FLIGHT.load(Ordering::SeqCst) == 0 || asked.elapsed() > Duration::from_secs(90) {
+            break g;
+        }
+        drop(g);
+        std::thread::sleep(Duration::from_millis(50));
+    };
     *g = None; // died, never started or other settings: stop it before starting another
     let bin = sidecar();
     preflight(bin.as_deref(), &opts.model, stt::ram_of(c.id), stt::ram_mb().1)?;
@@ -275,7 +301,8 @@ pub fn ensure_for(settings: &Settings, writer: bool) -> Result<(String, String),
         drop(s);
         s = start(&bin.expect("checked by preflight"), &opts, &log)?;
     }
-    let out = (url(s.port), s.key.clone());
+    let out = (url(s.port), s.key.clone(), InUse);
+    IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
     *g = Some(s);
     reap_when_idle();
     Ok(out)
@@ -310,7 +337,7 @@ fn reap_when_idle() {
 /// weights and GPU go cold. Called when a recording starts: if the cleaner has been idle for 20 s
 /// or is not running, it answers one short request with the same system prompt (llama-server
 /// keeps that prefix cached), so it is warm by the time the speech is transcribed.
-pub fn prewarm(s: &Settings) {
+pub fn prewarm(s: &Settings, command: bool) {
     if !s.cleanup.enabled {
         return;
     }
@@ -321,7 +348,12 @@ pub fn prewarm(s: &Settings) {
     if cold {
         let s = s.clone();
         std::thread::spawn(move || {
-            let _ = crate::cleanup::chat(&s, &crate::cleanup::system_prompt(&s), "Okay.", Duration::from_secs(20));
+            // Command Mode runs on Echotype Writer: loading the cleaner first would only be thrown away.
+            if command {
+                let _ = ensure_for(&s, true);
+            } else {
+                let _ = crate::cleanup::chat(&s, &crate::cleanup::system_prompt(&s), "Okay.", Duration::from_secs(20));
+            }
         });
     }
 }
