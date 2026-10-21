@@ -39,11 +39,12 @@ pub const CLEANERS: &[Cleaner] = &[
 /// stays on only for builds that still fetch notices from it).
 pub const DOWNLOAD_URL: Option<&str> = Some("https://models.tryechotype.tech");
 
-/// Echotype Writer: a Qwen2.5-1.5B-Instruct (Apache-2.0) distilled on Command Mode edits, for the
+/// Echotype Writer: a Qwen2.5-1.5B-Instruct (Apache-2.0) distilled on 2,489 Command Mode edits by
+/// Qwen3-4B-Instruct-2507 (LoRA, IQ4_XS: judged 4.58/5 against 4.17 for the plain 1.5B), for the
 /// edits the cleaners can't do (Command Mode, Transforms) with the built-in provider. It shares the
 /// one llama-server with the cleaner: an edit swaps it in, the next dictation swaps the cleaner back,
 /// so memory never holds both.
-pub const WRITER: Cleaner = Cleaner { id: "echotype-writer", label: "Echotype Writer", file: "echotype-writer-q4_k_m.gguf", size_mb: 940, sha256: "", note: "1.5B. Edits selected text when you ask: Command Mode and Transforms." };
+pub const WRITER: Cleaner = Cleaner { id: "echotype-writer", label: "Echotype Writer", file: "echotype-writer-iq4_xs.gguf", size_mb: 860, sha256: "223d1f0457e5326b9781c4355ebd90355b54fdc7364481866620d4035f1922f7", note: "1.5B. Edits selected text when you ask: Command Mode and Transforms." };
 
 /// Context the writer is served with: a selection and its rewrite, kept in an 8-bit KV cache.
 const WRITER_CONTEXT: u32 = 2048;
