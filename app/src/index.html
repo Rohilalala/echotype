@@ -424,6 +424,8 @@
       <div class="group">
         <label class="row"><span class="row-text"><span class="row-title">Keep history</span><span class="row-desc">Stored on this Mac only.</span></span>
           <input type="checkbox" class="switch" data-bind="history_enabled" /></label>
+        <label class="row" id="clipDaysRow"><span class="row-text"><span class="row-title">Keep dictation audio</span><span class="row-desc">To play a dictation back or re-run it from History. Older recordings are deleted; the text stays.</span></span>
+          <select data-bind="clip_days" data-num><option value="7">7 days</option><option value="14">14 days</option><option value="30">30 days</option><option value="0">Don't keep</option></select></label>
         <label class="row"><span class="row-text"><span class="row-title">Restore clipboard</span><span class="row-desc">Put back what you had copied after Echotype pastes.</span></span>
           <input type="checkbox" class="switch" data-bind="restore_clipboard" /></label>
         <label class="row"><span class="row-text"><span class="row-title">Share anonymous usage stats and crash reports</span><span class="row-desc">Off unless you turn it on. Once a day Echotype sends a random install ID that is not linked to you or your account, the app version, the system and chip type, and that day's counts: dictations, words, failures by kind, median speech and cleanup times, which speech and cleanup models are in use, and meetings started and finished. A crash adds the fixed wording of the error and where in Echotype's code it happened. Never audio, text, your dictionary, app names, file paths, names or emails.</span></span>
@@ -438,6 +440,13 @@
           <div class="row col"><div class="code-head"><span class="row-title">Try it</span><button class="btn" id="copyCurl" type="button">Copy</button></div>
             <pre class="code" id="curl"></pre></div>
         </div>
+      </div>
+
+      <h2 class="group-title" id="mcpTitle">Use with AI apps</h2>
+      <div class="group">
+        <div class="row col"><span class="row-text"><span class="row-title">Claude, Cursor and other MCP apps</span><span class="row-desc">Let an AI app search your dictation history and meeting notes, and read your Dictionary and stats. Read-only, and it works with Echotype closed. Paste this into the app's MCP settings (in Claude Desktop: Settings → Developer → Edit Config), then restart the app.</span></span>
+          <div class="code-head"><span class="row-title">Config</span><button class="btn" id="copyMcp" type="button">Copy</button></div>
+          <pre class="code" id="mcpConfig"></pre></div>
       </div>
 
       <h2 class="group-title">Advanced</h2>

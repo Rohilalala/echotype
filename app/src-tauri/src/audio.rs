@@ -362,7 +362,7 @@ pub fn dbfs(samples: &[f32]) -> f32 {
 pub struct Level {
     /// 0..1 above the room's noise floor, so whispers visibly move it.
     pub meter: f32,
-    /// Every window so far (at least 2 s) was below -70 dBFS: "Is your mic muted?".
+    /// Every window so far (at least 2 s) was below -70 dBFS: "No sound from your microphone".
     pub muted: bool,
 }
 
@@ -482,6 +482,8 @@ pub struct Recorder {
     /// stream, which the hand-back no longer waits for).
     done: mpsc::Receiver<(Vec<f32>, u32)>,
     tap: Tap,
+    /// The mic picked was missing or would not open, so this one stood in (open_stream).
+    pub fallback: Option<String>,
 }
 
 /// A look at a running recording from another thread (lib.rs partials).
@@ -508,6 +510,24 @@ impl Tap {
         };
         resample(&tail, rate, RATE)
     }
+
+    /// A recording fed by hand at `rate` (tests).
+    #[cfg(test)]
+    pub fn fake(rate: u32) -> Self {
+        Self { buf: Default::default(), rate: Arc::new(AtomicU32::new(rate)) }
+    }
+
+    #[cfg(test)]
+    pub fn feed(&self, pcm: &[f32]) {
+        self.buf.lock().unwrap().extend_from_slice(pcm);
+    }
+
+    /// What was recorded from sample `at` on, at the device rate, and that rate. A change of rate
+    /// means a reopen resampled the whole recording, so the caller starts again from 0.
+    pub fn since(&self, at: usize) -> (Vec<f32>, u32) {
+        let b = self.buf.lock().unwrap_or_else(|e| e.into_inner());
+        (b.get(at..).unwrap_or_default().to_vec(), self.rate.load(Ordering::SeqCst))
+    }
 }
 
 impl Recorder {
@@ -515,13 +535,13 @@ impl Recorder {
     /// dBFS of the last 50 ms (unclamped) and whether the device has gone away (unplugged, Bluetooth dropped).
     pub fn start(device: Option<String>, mut on_window: impl FnMut(f32, bool) + Send + 'static) -> Result<Self, String> {
         let (stop, stop_rx) = mpsc::channel::<()>();
-        let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+        let (ready_tx, ready_rx) = mpsc::channel::<Result<Option<String>, String>>();
         let (done_tx, done) = mpsc::channel::<(Vec<f32>, u32)>();
         let tap = Tap { buf: Arc::new(Mutex::new(Vec::<f32>::with_capacity(48_000 * 30))), rate: Arc::new(AtomicU32::new(RATE)) };
         let (buf, shared_rate) = (tap.buf.clone(), tap.rate.clone());
         std::thread::spawn(move || {
             let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let (mut stream, mut rate) = match open_stream(device.clone(), buf.clone(), lost.clone()) {
+            let (mut stream, mut rate, fallback) = match open_stream(device.clone(), buf.clone(), lost.clone()) {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = ready_tx.send(Err(e));
@@ -529,7 +549,7 @@ impl Recorder {
                 }
             };
             shared_rate.store(rate, Ordering::SeqCst);
-            let _ = ready_tx.send(Ok(()));
+            let _ = ready_tx.send(Ok(fallback));
             let (mut seen, mut live_at, mut reopens, mut ever_live) = (0usize, Instant::now(), 0, false);
             while let Err(mpsc::RecvTimeoutError::Timeout) = stop_rx.recv_timeout(Duration::from_millis(50)) {
                 let window = (rate as usize / WINDOWS_PER_SEC).max(1);
@@ -552,7 +572,7 @@ impl Recorder {
                     reopens += 1;
                     live_at = Instant::now();
                     drop(std::mem::replace(&mut stream, match open_stream(device.clone(), buf.clone(), lost.clone()) {
-                        Ok((s, r)) => {
+                        Ok((s, r, _)) => {
                             let mut b = buf.lock().unwrap_or_else(|e| e.into_inner());
                             if r != rate && !b.is_empty() {
                                 *b = resample(&b, rate, r);
@@ -570,7 +590,7 @@ impl Recorder {
                     }));
                     continue;
                 } else if reopens < MAX_REOPENS {
-                    continue; // still waking up: not silence, so no "Is your mic muted?" yet
+                    continue; // still waking up: not silence, so no "No sound from your microphone" yet
                 }
                 on_window(db, lost.load(std::sync::atomic::Ordering::SeqCst));
             }
@@ -579,7 +599,7 @@ impl Recorder {
             drop(stream); // after the hand-back: the caller transcribes while CoreAudio stops it
         });
         match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self { stop, done, tap }),
+            Ok(Ok(fallback)) => Ok(Self { stop, done, tap, fallback }),
             Ok(Err(e)) => Err(e),
             Err(_) => Err("The audio thread stopped unexpectedly".into()),
         }
@@ -597,14 +617,46 @@ impl Recorder {
     }
 }
 
-pub(crate) fn open_stream(device: Option<String>, buf: Arc<Mutex<Vec<f32>>>, lost: Arc<std::sync::atomic::AtomicBool>) -> Result<(cpal::Stream, u32), String> {
+/// Opens `device` (None: the system default). One that is missing or will not open gives way to
+/// the system default, then the built-in mic; the third value then says which one stood in.
+pub(crate) fn open_stream(device: Option<String>, buf: Arc<Mutex<Vec<f32>>>, lost: Arc<std::sync::atomic::AtomicBool>) -> Result<(cpal::Stream, u32, Option<String>), String> {
     let host = cpal::default_host();
-    let dev = device
-        .and_then(|name| host.input_devices().ok()?.find(|d| d.name().ok().as_deref() == Some(name.as_str())))
-        .or_else(|| host.default_input_device())
-        .ok_or("No microphone found")?;
-    let cfg = dev.default_input_config().map_err(|e| format!("Microphone unavailable: {e}"))?;
-    start(&dev, cfg, buf, lost)
+    // Each is looked up only when the one before it failed: listing devices takes 60-200 ms.
+    let by_name = |name: &str| host.input_devices().ok()?.find(|d| d.name().ok().as_deref() == Some(name));
+    let picked = || device.as_deref().and_then(|n| Some((n.to_string(), by_name(n)?)));
+    let default = || host.default_input_device().map(|d| (d.name().unwrap_or_default(), d));
+    let builtin = || quick_inputs().into_iter().find(|d| d.builtin).and_then(|d| Some((d.name.clone(), by_name(&d.name)?)));
+    let (stream, used, i) = first_open(&[&picked, &default, &builtin], |dev| {
+        let cfg = dev.default_input_config().map_err(|e| format!("Microphone unavailable: {e}"))?;
+        start(dev, cfg, buf.clone(), lost.clone())
+    })?;
+    let wanted = if device.is_some() { 0 } else { 1 };
+    let note = (i > wanted).then(|| match &device {
+        Some(n) => format!("{n} isn't available, so Echotype used {used}."),
+        None => format!("The system default microphone didn't open, so Echotype used {used}."),
+    });
+    if let Some(n) = &note {
+        eprintln!("echotype: {n}");
+    }
+    Ok((stream.0, stream.1, note))
+}
+
+/// The first of `picks` (each a lazily found device and its name) that `open` opens, with its
+/// name and place in the list. A name already tried is skipped; the error is the last one seen.
+fn first_open<D, T>(picks: &[&dyn Fn() -> Option<(String, D)>], mut open: impl FnMut(&D) -> Result<T, String>) -> Result<(T, String, usize), String> {
+    let (mut tried, mut err) = (vec![], "No microphone found".to_string());
+    for (i, pick) in picks.iter().enumerate() {
+        let Some((name, dev)) = pick() else { continue };
+        if tried.contains(&name) {
+            continue;
+        }
+        match open(&dev) {
+            Ok(t) => return Ok((t, name, i)),
+            Err(e) => err = e,
+        }
+        tried.push(name);
+    }
+    Err(err)
 }
 
 /// Windows: what the default output plays (WASAPI loopback; cpal records an output device that way).
@@ -838,6 +890,25 @@ mod tests {
         assert!(levels[50].muted && !levels.last().unwrap().muted && !st.silent());
         let (st, levels) = stats(&clip(-60.0, Some(-20.0), 3.0));
         assert!(levels.iter().all(|l| !l.muted) && !st.silent());
+    }
+
+    #[test]
+    fn a_missing_or_broken_mic_gives_way_to_the_default_then_the_built_in() {
+        let mic = |n: &'static str| move || Some((n.to_string(), n));
+        let gone = || None::<(String, &str)>;
+        let open = |broken: &'static [&'static str]| move |d: &&'static str| if broken.contains(d) { Err(format!("{d} would not open")) } else { Ok(*d) };
+        let (usb, default, builtin) = (mic("USB"), mic("AirPods"), mic("MacBook Pro Microphone"));
+        assert_eq!(first_open(&[&usb, &default, &builtin], open(&[])).unwrap(), ("USB", "USB".into(), 0), "the pick, when it opens");
+        assert_eq!(first_open(&[&gone, &default, &builtin], open(&[])).unwrap().2, 1, "unplugged: the system default");
+        assert_eq!(first_open(&[&usb, &default, &builtin], open(&["USB"])).unwrap().1, "AirPods", "won't open: the system default");
+        assert_eq!(first_open(&[&usb, &default, &builtin], open(&["USB", "AirPods"])).unwrap().2, 2, "then the built-in mic");
+        let mut tries = vec![];
+        let res = first_open(&[&builtin, &builtin, &builtin], |d: &&str| {
+            tries.push(*d);
+            Err::<(), _>("busy".to_string())
+        });
+        assert_eq!((res, tries.len()), (Err("busy".into()), 1), "the default is the built-in mic: tried once, and the error says why");
+        assert_eq!(first_open(&[&gone, &gone, &gone], open(&[])), Err("No microphone found".into()));
     }
 
     #[test]

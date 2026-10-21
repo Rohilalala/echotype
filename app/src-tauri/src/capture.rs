@@ -62,7 +62,7 @@ impl Drop for Capture {
 }
 
 fn mic(device: Option<String>, started: Instant, tx: Sender<Piece>, stop: Arc<AtomicBool>) -> Result<JoinHandle<()>, String> {
-    pump(Source::Mic, move |buf, lost| audio::open_stream(device, buf, lost), started, tx, stop)
+    pump(Source::Mic, move |buf, lost| audio::open_stream(device, buf, lost).map(|(s, r, _)| (s, r)), started, tx, stop)
 }
 
 /// Runs one cpal input stream on its own thread, sending 16 kHz mono pieces tagged `src`.
