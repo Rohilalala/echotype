@@ -15,10 +15,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Apple silicon only: the speech and cleanup models need it, so there is no Intel build.
           - os: macos-latest
             args: --target aarch64-apple-darwin
-          - os: macos-latest
-            args: --target x86_64-apple-darwin
           - os: ubuntu-22.04
             args: --bundles appimage,deb
           # ponytail: no Windows ARM64 yet. ggml needs clang-cl there and cmake-rs pins the VS
@@ -41,7 +40,7 @@ jobs:
           node-version: 22
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
-          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
       - name: Linux deps
         if: runner.os == 'Linux'
         run: |
