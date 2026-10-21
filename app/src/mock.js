@@ -25,7 +25,7 @@ const settings = {
   advanced: q.has('advanced'), cleaner_memory: 'ready', cleaner_idle_unload: false, cleaner_idle_minutes: 10, cleaner_context: 1024, greetings: true, detect_meetings: true, prefer_builtin_mic: true, pause_music: false, meeting_auto_stop: true, meeting_audio_days: 30,
   call_start: { meet: 'ask', teams: 'ask', zoom: 'ask', slack: 'ask', facetime: 'ask', webex: 'ask', discord: 'ask', other: 'ask' }, cloud_moved: q.has('moved'),
   look: 'system',
-  pill_idle: !q.has('pilloff'), pill_hidden_until: q.has('pillhidden') ? now + 42 * 60000 : 0, pill_in_recordings: false,
+  pill_idle: !q.has('pilloff'), pill_hidden_until: q.has('pillhidden') ? now + 42 * 60000 : 0, pill_in_recordings: false, live_text: true,
   pill_positions: {}, pill_screen: null, pill_follow_cursor: true, show_in: q.has('menubar') ? 'menubar' : 'pill',
   dismissed: q.has('upgrade') || q.has('onboarding') ? [] : ['upgrade_offer'],
 };
@@ -169,7 +169,11 @@ const commands = {
     if (busy) return null;
     busy = true;
     emit('dictation-state', { state: 'recording' });
-    for (let i = 0; i < 60; i++) { await wait(50); emit('audio-level', { meter: Math.abs(Math.sin(i / 4)) * 0.6 + Math.random() * 0.2, muted: false }); }
+    for (let i = 0; i < 60; i++) {
+      await wait(50);
+      emit('audio-level', { meter: Math.abs(Math.sin(i / 4)) * 0.6 + Math.random() * 0.2, muted: false });
+      if (i >= 30 && i % 10 === 0) partialOf('Let’s move the standup to 10:30 tomorrow.', (i - 20) / 40);
+    }
     emit('dictation-state', { state: 'transcribing' }); await wait(700);
     emit('dictation-state', { state: 'cleaning' }); await wait(600);
     emit('dictation-state', { state: 'done', text: 'Let’s move the standup to 10:30 tomorrow.' });
@@ -346,9 +350,18 @@ if (q.has('view') || q.has('hover')) {
   setTimeout(() => emit('pill', { active: q.has('state'), hover: q.has('hover'), expand: q.get('view') === 'hint', hint: 'Hold ⌥ Space or click to dictate' }), 60);
 }
 
+// What lib.rs sends while recording (dictation-partial): the words so far, cut like last_words
+// to their last 24 characters from a word start. `done` (0..1) is how much has been said.
+function partialOf(text, done) {
+  if (!settings.live_text) return;
+  const so = text.split(' ').slice(0, Math.max(1, Math.round(text.split(' ').length * done))).join(' ');
+  emit('dictation-partial', so.length <= 24 ? so : '…' + so.slice(-24).replace(/^\S*\s/, ''));
+}
+
 // overlay.html?state=<state>&chip=<chip> (and index.html?state=... for the Home hero) renders any
 // dictation state through the real overlay/Home code: state = recording|transcribing|cleaning|done|error|hint,
 // chip = quiet|too_quiet|no_cleanup, plus message=, error=, action=, copied=1, locked=1, muted=1,
+// partial=... with state=recording (the words so far; partial=1 for a stock sentence),
 // card=1 (nowhere to paste; text= sets the transcript, nokey=1 drops the paste-last hint),
 // offer=Start notes with state=hint&card=1&warning=...&text=... (a detected call's offer, calls.rs),
 // cleaned=... with state=done&card=1&nokey=1&warning=... (the guard pasted the words as spoken).
@@ -368,6 +381,8 @@ if (q.has('state')) {
       const level = () => emit('audio-level', { meter: muted ? 0 : still ? [0.75, 1, 0.9][i++ % 3] : Math.abs(Math.sin(i++ / 3)) * 0.5 + Math.random() * 0.25, muted });
       for (let k = 0; k < 4; k++) level(); // at once, so a screenshot never depends on (throttled) timers
       setInterval(level, 50);
+      const words = q.get('partial');
+      if (words) partialOf(words === '1' ? 'And so, my fellow Americans, ask not what your country can do for you' : words, 1);
     }
   }, 50);
 }
@@ -399,7 +414,10 @@ function press() {
   live = true;
   emit('dictation-state', { state: 'recording' });
   let i = 0;
-  levelTimer = setInterval(() => emit('audio-level', { meter: Math.abs(Math.sin(i++ / 3)) * 0.55 + 0.15, muted: false }), 50);
+  levelTimer = setInterval(() => {
+    emit('audio-level', { meter: Math.abs(Math.sin(i++ / 3)) * 0.55 + 0.15, muted: false });
+    if (i >= 30 && i % 20 === 0) partialOf('Echotype, meet my Mac.', Math.min(1, i / 80));
+  }, 50);
 }
 addEventListener('keydown', e => { if (e.code === 'Space' && e.altKey && !e.repeat) { e.preventDefault(); press(); } }, true);
 addEventListener('keyup', e => { if (held && (e.code === 'Space' || e.key === 'Alt')) { e.preventDefault(); release(); } }, true);

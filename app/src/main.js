@@ -1272,7 +1272,7 @@ function renderPill() {
   const bar = S.show_in === 'menubar';
   $('#showInDesc').textContent = bar ? 'No pill on screen. The menu bar icon shows when Echotype listens; click it to dictate, right-click for options.'
     : 'Drag the pill anywhere on any display; double-click it to put it back.';
-  $('#pillFollowRow').hidden = $('#pillIdleRow').hidden = $('#pillHideRow').hidden = $('#pillRecRow').hidden = bar;
+  $('#pillFollowRow').hidden = $('#pillIdleRow').hidden = $('#pillHideRow').hidden = $('#pillRecRow').hidden = $('#pillLiveRow').hidden = bar;
   $('#pillSizeRow').hidden = $('#ballSizeRow').hidden = $('#pillPreviewRow').hidden = $('#pillFadeRow').hidden = bar;
   for (const id of ['orbListenRow', 'orbThinkRow', 'orbDetailRow', 'orbColorRow']) $('#' + id).hidden = bar;
   $('#soundPackRow').hidden = !S.sounds;

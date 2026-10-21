@@ -7,11 +7,14 @@ const chipEl = document.getElementById('chip');
 const creason = document.getElementById('creason'), fixBtn = document.getElementById('fix');
 const ctext = document.getElementById('ctext'), ckey = document.getElementById('ckey'), copyBtn = document.getElementById('copy'), ring = document.getElementById('ringLeft');
 const laterBtn = document.getElementById('later');
+const spot = document.getElementById('spot'), said = document.getElementById('said');
 const CHIP = { too_quiet: 'Too quiet, move the mic closer', quiet: 'Quiet voice', no_cleanup: 'No cleanup' };
 const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
 // `cur`: the last dictation state. `view`: what pill.rs says to show (idle ball or that state,
 // hover, near, the hint); null in the browser preview, where the state alone decides.
 let cur = { state: 'idle' }, view = null, muted = false;
+// The words recognised so far while recording (lib.rs partials), already cut to fit.
+let partial = '';
 // Transcribing and cleanup usually finish in well under 200 ms: until then the pill goes back to
 // the ball, so a quick dictation goes listening → pasted without a flash of the thinking orb.
 const THINK_AFTER_MS = 200;
@@ -50,6 +53,8 @@ function render() {
   pill.classList.toggle('card', card);
   // Listening and thinking are the orb; a plain paste falls straight back into the ball.
   pill.classList.toggle('orb', active && !muted && ['recording', 'transcribing', 'cleaning'].includes(cur.state));
+  said.textContent = active && cur.state === 'recording' && !muted ? partial : '';
+  pill.classList.toggle('live', !!said.textContent);
   pill.classList.toggle('collapse', active && cur.state === 'done' && !card && !cur.copied && !cur.chip);
   // The guard's card shows the cleanup it did not paste, the one Copy cleaned copies.
   ctext.textContent = card ? cur.cleaned ?? cur.text ?? '' : '';
@@ -82,7 +87,7 @@ listen('dictation-state', ({ payload: p }) => {
   cur = p;
   // A new state shows at once; pill.rs confirms (or ends it) with its next `pill` event.
   if (view && p.state !== 'idle') view = { ...view, active: true };
-  if (p.state !== 'recording') muted = false;
+  if (p.state !== 'recording') { muted = false; partial = ''; }
   cleanedCopied = false;
   if (p.card) {
     // A new card: the ring starts over and Copy says Copy again. A detected call's offer
@@ -95,6 +100,13 @@ listen('dictation-state', ({ payload: p }) => {
     ring.style.animation = '';
     ring.style.animationDuration = p.offer ? '15s' : '';
   }
+  render();
+});
+
+// A late partial (the recording just ended) is dropped, as pill.rs set_partial drops it.
+listen('dictation-partial', ({ payload }) => {
+  if (cur.state !== 'recording') return;
+  partial = payload;
   render();
 });
 
@@ -147,6 +159,8 @@ const hash = i => { const h = Math.sin(i * 12.9898) * 43758.5453; return h - Mat
 // Per particle: position, velocity, look, and its own stiffness (a little uneven, so the swarm flows).
 const P = Array.from({ length: N }, (_, i) => ({ x: W / 2, y: H - 16, vx: 0, vy: 0, r: 0.4, a: 0, w: 0.1, k: 380 + 260 * hash(i + 1) }));
 let alpha = 0.35, level = 0, clockL = 0, clockT = 0, last = 0, raf = 0, prevOrb = null, helloAt = -1e9;
+// The orb's centre across: the body's, or .spot's once the live words push it left.
+let orbX = W / 2;
 
 const follow = (v, to, dt, ms) => (still ? to : v + (to - v) * (1 - Math.exp(-dt / ms)));
 
@@ -224,8 +238,11 @@ function frame(now) {
     clockL += (dt / 1000) * LISTEN.speed * (1 + 1.6 * level);
     clockT += (dt / 1000) * THINK.speed;
   }
-  // Recording and thinking orbs are centred on the body; while listening ✕ and ✓ widen it.
-  const cx = box.x + box.w / 2, cy = box.y + box.h / 2;
+  // Recording and thinking orbs are centred on the body; while listening ✕ and ✓ widen it, and
+  // the live words take the room to its right.
+  const sp = pill.classList.contains('live') ? spot.getBoundingClientRect() : null;
+  orbX = follow(orbX, sp ? sp.x + sp.width / 2 : box.x + box.w / 2, dt, 70);
+  const cx = orb ? orbX : box.x + box.w / 2, cy = box.y + box.h / 2;
   const kind = orb ? 'orb' : ball ? 'ball' : 'edge';
   const T = targets(kind, cx, cy);
   if (orb !== prevOrb) {

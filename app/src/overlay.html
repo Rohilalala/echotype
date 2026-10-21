@@ -63,6 +63,14 @@
   .pill.active.orb[data-state="recording"]:is(.hover, .locked) { width: 96px; }
   .pill.active.orb :is(.label, .secs, .chip) { display: block; position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
   .pill.active.orb[data-state="recording"]:is(.hover, .locked) .btn:is(.x, .ok) { display: flex; }
+  /* Listening with the words so far (pill.rs live_w): the orb sits in .spot, the words to its
+     right, one line, dimmer than a notice; ✕ and ✓ open at the ends as without them. */
+  .pill.active.orb.live { width: auto; padding: 0 10px 0 0; justify-content: flex-start; }
+  .pill.active.orb.live:is(.hover, .locked) { width: auto; padding: 0 10px 0 0; }
+  .pill.active.orb.live :is(.spot, .said) { display: block; }
+  .pill.active.orb.live .btn.ok { margin-left: 4px; }
+  .spot { width: 36px; height: 36px; flex: none; }
+  .said { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; line-height: 15px; color: rgba(255, 255, 255, 0.7); }
   /* Pasted: back to the ball at once; the line is still announced. */
   .pill.active.collapse { width: calc(10px * var(--ball, 1)); height: calc(10px * var(--ball, 1)); margin-bottom: calc(16px - 5px * var(--ball, 1)); padding: 0; }
   .pill.active.collapse :is(.label, .secs, .chip) { display: block; position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
@@ -136,6 +144,8 @@
   <canvas id="body" aria-hidden="true"></canvas>
   <div class="pill" id="pill" data-state="idle" role="group" aria-label="Start dictation">
     <button class="btn x" type="button" data-act="cancel" aria-label="Cancel dictation" title="Cancel"><svg viewBox="0 0 8 8"><path d="M1 1l6 6M7 1L1 7"/></svg></button>
+    <span class="spot" id="spot" aria-hidden="true"></span>
+    <span class="said" id="said" aria-hidden="true"></span>
     <span class="label" id="label" role="status" aria-live="polite"></span>
     <span class="secs" id="secs" aria-hidden="true"></span>
     <span class="chip" id="chip" hidden></span>

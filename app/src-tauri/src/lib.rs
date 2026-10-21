@@ -50,6 +50,16 @@ const SHOW_AFTER: Duration = Duration::from_millis(150);
 /// A pill click shows its recording this much later (the mic opens at once), so the second
 /// click of a double-click (put the pill back) can take it back before anything shows or plays.
 const CLICK_SHOW_AFTER: Duration = Duration::from_millis(250);
+/// Live words while recording (Settings → Pill → Show words as you speak, local model only): the
+/// first partial once this much is recorded, then one every PARTIAL_EVERY, each on the last
+/// PARTIAL_TAIL of audio. Partials are never cleaned up or pasted; the final run is unchanged.
+const PARTIAL_FROM: f32 = 1.5;
+const PARTIAL_EVERY: Duration = Duration::from_secs(1);
+// ponytail: a fixed 6 s tail (~100 ms a run on an M5 Pro with turbo Q5), plenty for the ~2 s of
+// speech the pill shows; transcribe more and stitch if the pill ever shows more than one line.
+pub(crate) const PARTIAL_TAIL: Duration = Duration::from_secs(6);
+/// The partial's last characters the pill shows (pill.rs sizes the capsule from what is sent).
+const PARTIAL_CHARS: usize = 24;
 
 struct AppState {
     settings: Mutex<Settings>,
@@ -259,6 +269,8 @@ struct Live {
     front: Option<platform::FrontApp>,
     /// Started by the Command Mode shortcut: the words are an instruction for the selected text.
     command: bool,
+    /// Set as the recording ends: the partials loop stops and a partial in flight aborts.
+    partials: Arc<AtomicBool>,
 }
 
 /// One thread owns the recorder and the talk-key state machine, so every key, click, Esc and
@@ -384,6 +396,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                 Act::Discard { hint: show } => {
                     let edit = live.as_ref().is_some_and(|l| l.command);
                     if let Some(l) = live.take() {
+                        l.partials.store(true, Ordering::SeqCst);
                         l.rec.stop();
                         music::set(false);
                     }
@@ -396,6 +409,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                 }
                 Act::Finish => {
                     let Some(l) = live.take() else { continue };
+                    l.partials.store(true, Ordering::SeqCst); // first: a partial in flight lets go of the model
                     state(&app).recording.store(false, Ordering::SeqCst);
                     let pcm = l.rec.stop();
                     music::set(false); // the mic is closed: the music needn't wait for transcription
@@ -464,12 +478,64 @@ fn start_recording(app: &AppHandle, s: &Settings, id: u64) -> Result<Live, Dicta
         }
     });
     match rec {
-        Ok(rec) => Ok(Live { id, shown: false, locked: false, rec, stats, lost, front: None, command: false }),
+        Ok(rec) => {
+            let partials = Arc::new(AtomicBool::new(false));
+            if s.live_text && s.stt.provider == "local" {
+                spawn_partials(app, s, rec.tap(), partials.clone());
+            }
+            Ok(Live { id, shown: false, locked: false, rec, stats, lost, front: None, command: false, partials })
+        }
         Err(_) if platform::microphone_status() == "denied" => {
             Err(DictationState { state: "error", error: Some("Microphone access is off".into()), action: Some("microphone"), ..Default::default() })
         }
         Err(e) => Err(DictationState { state: "error", error: Some(e), action: Some("microphone"), ..Default::default() }),
     }
+}
+
+/// Whether to start a partial now, with `secs` recorded and the last one started `since` ago
+/// (None: none yet). One loop runs them in turn, so a slow one delays the next, never overlaps it.
+fn partial_due(secs: f32, since: Option<Duration>) -> bool {
+    secs >= PARTIAL_FROM && since.is_none_or(|d| d >= PARTIAL_EVERY)
+}
+
+/// The end of `text` in at most `max` characters, from the start of a word, "…" first when cut.
+fn last_words(text: &str, max: usize) -> String {
+    let n = text.chars().count();
+    if n <= max {
+        return text.to_string();
+    }
+    let tail: String = text.chars().skip(n - max).collect();
+    // Unspaced scripts (CJK) have no word start to find: cut anywhere.
+    let tail = tail.split_once(' ').map_or(tail.as_str(), |(_, rest)| rest).trim_start();
+    format!("…{tail}")
+}
+
+/// While `stop` is unset, transcribes the recording's tail about once a second and sends the last
+/// words to the pill (`dictation-partial`). Same model, language and dictionary as the final run.
+fn spawn_partials(app: &AppHandle, s: &Settings, tap: audio::Tap, stop: Arc<AtomicBool>) {
+    let (app, s) = (app.clone(), s.clone());
+    std::thread::spawn(move || {
+        let Ok((model, _)) = stt::pick_local_model(&s) else { return };
+        let (prompt, vad) = (stt::prompt(&s.dictionary), speakers::vad());
+        let mut last: Option<Instant> = None;
+        while !stop.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(100));
+            if !partial_due(tap.secs(), last.map(|t| t.elapsed())) {
+                continue;
+            }
+            last = Some(Instant::now());
+            let pcm = tap.tail(PARTIAL_TAIL.as_secs_f32());
+            let Ok(text) = stt::transcribe_partial(&model, &pcm, &s.languages, s.translate_to_english, &prompt, vad.as_deref(), &stop) else { continue };
+            // Silence keeps the words already up.
+            if stop.load(Ordering::SeqCst) || !cleanup::has_speech(&text) {
+                continue;
+            }
+            let text = last_words(&stt::collapse_loops(&text), PARTIAL_CHARS);
+            lock(&state(&app).pill).set_partial(text.chars().count());
+            let _ = app.emit_to("overlay", "dictation-partial", &text);
+            let _ = state(&app).pill_wake.send(());
+        }
+    });
 }
 
 /// What the recording itself said about the clip, carried to the done state.
@@ -2260,9 +2326,28 @@ fn cli_report(result: R<cleanup::Output>, total_ms: u128) -> (String, String, i3
 
 #[cfg(test)]
 mod tests {
-    use super::{HistoryEntry, KEEP_SAMPLES, Rerun, Settings, accel_label, as_ran, chip, cli_report, commit, keep, parse_hotkey, stt, unregistered_shortcuts};
+    use super::{HistoryEntry, KEEP_SAMPLES, Rerun, Settings, accel_label, as_ran, chip, cli_report, commit, keep, last_words, parse_hotkey, partial_due, stt, unregistered_shortcuts};
     use crate::audio::Quality;
     use std::cell::RefCell;
+    use std::time::Duration;
+
+    #[test]
+    fn a_partial_runs_from_1_5_s_then_once_a_second() {
+        let ms = |n| Some(Duration::from_millis(n));
+        assert!(!partial_due(1.4, None), "too little audio for whisper to say anything yet");
+        assert!(partial_due(1.5, None), "the first one as soon as there is enough");
+        assert!(!partial_due(4.0, ms(999)), "less than a second after the last one started");
+        assert!(partial_due(4.0, ms(1000)));
+        assert!(partial_due(4.0, ms(2600)), "one that ran long is followed at once, never overlapped");
+    }
+
+    #[test]
+    fn the_pill_gets_the_last_words_cut_at_a_word() {
+        assert_eq!(last_words("ask not what", 24), "ask not what", "short enough: as it is");
+        assert_eq!(last_words("my fellow Americans, ask not what your country", 24), "…not what your country", "\"sk\" of a cut word goes");
+        assert!(last_words("my fellow Americans, ask not what your country", 24).chars().count() <= 25);
+        assert_eq!(last_words("我们今天下午三点开会讨论新的设计方案吧好不好呢真的可以", 10), "…案吧好不好呢真的可以", "no spaces: the last characters");
+    }
 
     /// Under the app manifest a command missing from a capability fails only at runtime, in the
     /// window, so check generate_handler!, build.rs COMMANDS and both capability files agree.

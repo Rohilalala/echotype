@@ -56,6 +56,12 @@ fn idle_hit() -> (f64, f64) {
 const ORB: f64 = 36.0;
 /// While recording, ✕ and ✓ sit either side of the orb, so its hit area is this wide.
 const REC_W: f64 = 96.0;
+
+/// Recording with the words so far (lib.rs partials): ✕, the orb, the words, ✓ and 10 pt of
+/// padding (overlay.html .live), ~6 pt a character as text_w estimates.
+fn live_w(chars: usize) -> f64 {
+    (16.0 + ORB + 4.0 + 16.0 + 10.0 + 6.0 * chars as f64).min(MAX_W)
+}
 /// The idle ball brightens while the cursor is this close to it (points, centre to cursor).
 const NEAR: f64 = 80.0;
 /// Hover must rest this long before the idle bar opens into its hint (D1), so passing over it
@@ -189,7 +195,7 @@ fn rank(s: &DictationState) -> u8 {
 #[derive(Debug, Clone, Copy)]
 struct Active {
     recording: bool,
-    /// Characters on the line (notices, transcribing, cleaning).
+    /// Characters on the line (notices, transcribing, cleaning; the live words while recording).
     chars: usize,
     /// A notice: its rank and when it ends. None while recording/transcribing/cleaning.
     notice: Option<(u8, Instant)>,
@@ -240,7 +246,8 @@ impl Pill {
         self.active = match s.state {
             "idle" if lingering.is_some() => return false,
             "idle" => None,
-            "recording" => Some(Active { recording: true, chars, notice: None, card: false }),
+            // Locking re-sends recording: the live words stay.
+            "recording" => Some(Active { recording: true, chars: self.active.filter(|a| a.recording).map_or(chars, |a| a.chars), notice: None, card: false }),
             "transcribing" | "cleaning" => Some(Active { recording: false, chars, notice: None, card: false }),
             _ => {
                 let r = rank(s);
@@ -267,6 +274,13 @@ impl Pill {
             _ => Some(Said { text: said(s), rank: rank(s), card: s.card && s.offer.is_none() && s.cleaned.is_none() }),
         };
         true
+    }
+
+    /// The live words' length while recording; a partial that lands after the recording ended is ignored.
+    pub fn set_partial(&mut self, chars: usize) {
+        if let Some(a) = self.active.as_mut().filter(|a| a.recording) {
+            a.chars = chars;
+        }
     }
 
     pub fn set_level(&mut self, muted: bool, meter: f32) {
@@ -342,6 +356,7 @@ impl Pill {
             None => idle_hit(),
             // ✕ and ✓ (16 pt each) stay either side of the words.
             Some(a) if a.recording && self.muted => (text_w("Is your mic muted?".len()) + 36.0, LINE_H),
+            Some(a) if a.recording && a.chars > 0 => (live_w(a.chars), ORB),
             Some(a) if a.recording => (REC_W, ORB),
             Some(Active { notice: None, .. }) => (ORB, ORB),
             Some(a) if a.card => (CARD_W, 57.0 + 15.0 * if a.chars > CARD_LINE { 2.0 } else { 1.0 }),
@@ -1440,6 +1455,29 @@ mod tests {
         p.on_state(&st("transcribing"), ms(800));
         p.set_level(true, 0.0);
         assert_eq!(p.capsule(false, 32), (ORB, ORB), "thinking is the orb alone; muted only applies to a live recording");
+    }
+
+    #[test]
+    fn live_words_widen_the_recording_capsule_and_never_outlive_it() {
+        let t0 = Instant::now();
+        let mut p = Pill::default();
+        p.set_partial(10);
+        assert!(p.active.is_none(), "words with nothing recording are dropped");
+        p.on_state(&st("recording"), t0);
+        p.set_partial(25);
+        assert_eq!(p.capsule(false, 0), (232.0, ORB), "✕, orb, 25 characters, ✓: still inside MAX_W");
+        p.set_partial(60);
+        assert_eq!(p.capsule(false, 0).0, MAX_W);
+        p.set_partial(25);
+        p.on_state(&DictationState { state: "recording", locked: true, ..Default::default() }, t0);
+        assert_eq!(p.capsule(false, 0).0, 232.0, "locking keeps the words");
+        p.set_level(true, 0.0);
+        assert_eq!(p.capsule(false, 0).1, LINE_H, "muted wins over the words");
+        p.on_state(&st("transcribing"), t0);
+        p.set_partial(25);
+        assert_eq!(p.capsule(false, 0), (ORB, ORB), "a late partial cannot widen the thinking orb");
+        p.on_state(&st("recording"), t0 + Duration::from_secs(5));
+        assert_eq!(p.capsule(false, 0), (REC_W, ORB), "the next recording starts without words");
     }
 
     #[test]
