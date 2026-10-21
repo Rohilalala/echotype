@@ -73,6 +73,7 @@
     "allow-meeting-status",
     "allow-meeting-list",
     "allow-meeting-get",
+    "allow-meeting-search",
     "allow-meeting-rename-speaker",
     "allow-meeting-delete",
     "allow-meeting-export",

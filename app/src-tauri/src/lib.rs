@@ -15,6 +15,7 @@ mod settings;
 mod stats;
 mod speakers;
 mod stt;
+mod telemetry;
 mod tray;
 mod wispr;
 
@@ -105,10 +106,13 @@ struct AppState {
 
 enum Cmd {
     Key(Ev),
+    /// The Command Mode shortcut went down or up: the same talk-key rules, but the recording is an instruction.
+    Command(Ev),
     /// A click on the pill: Ev::Toggle, with the recording shown after CLICK_SHOW_AFTER.
     Click,
     Retry,
-    Rerun(Rerun),
+    /// Re-run with one change: the last dictation (None) or a History entry's kept audio.
+    Rerun(Rerun, Option<u64>),
     /// Recording `n`'s microphone went away: transcribe what it captured.
     Lost(u64),
     /// Recording `n` survived SHOW_AFTER: show it and play the start (or, once locked, the lock) sound.
@@ -263,6 +267,8 @@ struct Live {
     lost: Arc<AtomicBool>,
     /// The app in front as recording started, when the style follows it (the user may switch away while it transcribes).
     front: Option<platform::FrontApp>,
+    /// Started by the Command Mode shortcut: the words are an instruction for the selected text.
+    command: bool,
     /// Set as the recording ends: the partials loop stops and a partial in flight aborts.
     partials: Arc<AtomicBool>,
 }
@@ -277,7 +283,9 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
         let mut live: Option<Live> = None;
         for cmd in rx {
             let s = current_settings(&app);
+            let command = matches!(cmd, Cmd::Command(_));
             let (ev, click) = match cmd {
+                Cmd::Command(ev) => (ev, false),
                 Cmd::Key(ev) => {
                     // Onboarding presses its keycaps down with the real keys.
                     if matches!(ev, Ev::Press | Ev::ModPress | Ev::Release) {
@@ -304,15 +312,19 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                 Cmd::Retry => {
                     if live.is_none() && !busy.load(Ordering::SeqCst) {
                         if let Some(k) = lock(&state(&app).last_clip).take_if(|k| k.failed) {
-                            process(&app, k.pcm, busy.clone(), Clip::default(), false, None);
+                            process(&app, k.pcm, busy.clone(), Clip { entry: k.entry, ..Default::default() }, false, None);
                         }
                     }
                     continue;
                 }
-                Cmd::Rerun(r) => {
+                Cmd::Rerun(r, entry) => {
                     if live.is_none() && !busy.load(Ordering::SeqCst) {
-                        if let Some(k) = lock(&state(&app).last_clip).take() {
-                            process(&app, k.pcm, busy.clone(), Clip::default(), false, Some(r));
+                        let kept = match entry {
+                            Some(ts) => std::fs::read(settings::clip_path(ts)).ok().and_then(|b| audio::decode(b, Some("wav")).ok()).map(|pcm| Kept { pcm, failed: false, entry }),
+                            None => lock(&state(&app).last_clip).take(),
+                        };
+                        if let Some(k) = kept {
+                            process(&app, k.pcm, busy.clone(), Clip { entry: k.entry, ..Default::default() }, false, Some(r));
                         }
                     }
                     continue;
@@ -326,8 +338,10 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
             }
             match act {
                 Act::None => {}
-                Act::Start { id, locked } => match start_recording(&app, &s, id) {
+                // Command Mode with a provider that can't follow instructions says so before the mic opens.
+                Act::Start { id, locked } => match command_ready(&s, command).and_then(|()| start_recording(&app, &s, id)) {
                     Ok(mut l) => {
+                        l.command = command;
                         llm::prewarm(&s); // warm while the user talks, not after
                         // Recording before anything shows, so the pill loop takes Esc for it (pill.rs owns Esc).
                         state(&app).recording.store(true, Ordering::SeqCst);
@@ -380,6 +394,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                     });
                 }
                 Act::Discard { hint: show } => {
+                    let edit = live.as_ref().is_some_and(|l| l.command);
                     if let Some(l) = live.take() {
                         l.partials.store(true, Ordering::SeqCst);
                         l.rec.stop();
@@ -388,7 +403,9 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                     state(&app).recording.store(false, Ordering::SeqCst);
                     let _ = state(&app).pill_wake.send(());
                     let verb = if toggle_mode { "Press" } else { "Hold" };
-                    emit_state(&app, if show { hint(format!("{verb} {} to dictate", key_label(&s, cfg!(target_os = "macos"))), None) } else { simple("idle") });
+                    let mac = cfg!(target_os = "macos");
+                    let tip = if edit { format!("{verb} {} to edit text", accel_label(&s.command_hotkey, mac)) } else { format!("{verb} {} to dictate", key_label(&s, mac)) };
+                    emit_state(&app, if show { hint(tip, None) } else { simple("idle") });
                 }
                 Act::Finish => {
                     let Some(l) = live.take() else { continue };
@@ -407,9 +424,13 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                         continue;
                     }
                     let warning = l.lost.load(Ordering::SeqCst).then(|| "Microphone disconnected. Transcribed what was captured.".to_string());
-                    let clip = Clip { quality: st.quality(), muted_seen: st.muted_seen(), warning, speaking_ms: st.speaking_ms(), snr_db: st.floor_and_speech().map(|(floor, speech)| speech - floor), front: l.front.clone() };
+                    let clip = Clip { quality: st.quality(), muted_seen: st.muted_seen(), warning, speaking_ms: st.speaking_ms(), snr_db: st.floor_and_speech().map(|(floor, speech)| speech - floor), front: l.front.clone(), entry: None };
                     drop(st);
-                    process(&app, pcm, busy.clone(), clip, true, None);
+                    if l.command {
+                        process_command(&app, pcm, busy.clone());
+                    } else {
+                        process(&app, pcm, busy.clone(), clip, true, None);
+                    }
                 }
             }
         }
@@ -462,7 +483,7 @@ fn start_recording(app: &AppHandle, s: &Settings, id: u64) -> Result<Live, Dicta
             if s.live_text && s.stt.provider == "local" {
                 spawn_partials(app, s, rec.tap(), partials.clone());
             }
-            Ok(Live { id, shown: false, locked: false, rec, stats, lost, front: None, partials })
+            Ok(Live { id, shown: false, locked: false, rec, stats, lost, front: None, command: false, partials })
         }
         Err(_) if platform::microphone_status() == "denied" => {
             Err(DictationState { state: "error", error: Some("Microphone access is off".into()), action: Some("microphone"), ..Default::default() })
@@ -529,12 +550,16 @@ struct Clip {
     snr_db: Option<f32>,
     /// Live::front. A retry has none, so it gets the user's style.
     front: Option<platform::FrontApp>,
+    /// The history entry this audio was recorded as: a re-run replaces its result.
+    entry: Option<u64>,
 }
 
 /// A dictation's audio kept in memory (AppState last_clip).
 struct Kept {
     pcm: Vec<f32>,
     failed: bool,
+    /// Clip::entry.
+    entry: Option<u64>,
 }
 
 /// A successful dictation is kept for Re-run up to 5 minutes (16 kHz f32, about 19 MB); a failed
@@ -542,8 +567,8 @@ struct Kept {
 // ponytail: longer clips are simply not offered for Re-run; keep them too if anyone misses it.
 const KEEP_SAMPLES: usize = 5 * 60 * audio::RATE as usize;
 
-fn keep(pcm: Vec<f32>, failed: bool) -> Option<Kept> {
-    (failed || pcm.len() <= KEEP_SAMPLES).then_some(Kept { pcm, failed })
+fn keep(pcm: Vec<f32>, failed: bool, entry: Option<u64>) -> Option<Kept> {
+    (failed || pcm.len() <= KEEP_SAMPLES).then_some(Kept { pcm, failed, entry })
 }
 
 /// Re-run last: the kept clip through the whole pipeline again with one thing changed. Its menu
@@ -616,6 +641,7 @@ fn pastes(s: &Settings, main_focused: bool) -> bool {
 /// so the text goes to the clipboard instead. A Re-run (`rerun`) is copied and shown on the card.
 fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, paste: bool, rerun: Option<Rerun>) {
     if pcm.len() < MIN_SAMPLES {
+        telemetry::failure(&current_settings(app), telemetry::Failure::NoSpeech);
         emit_state(app, hint("Didn't catch that", None));
         return;
     }
@@ -641,11 +667,15 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
         .unwrap_or_else(|_| Err("Transcription crashed unexpectedly".into()));
         let failed = result.is_err();
         // Keep the audio for retry_last (failed) and Re-run last; it replaces the one before.
-        *lock(&state(&app).last_clip) = keep(pcm, failed);
+        *lock(&state(&app).last_clip) = keep(pcm, failed, clip.entry);
         let ev = match result {
-            Err(e) => DictationState { state: "error", action: memory_action(&s, &e).or(error_action(&e)), error: Some(e), retry: true, ..Default::default() },
+            Err(e) => {
+                telemetry::failure(&s, if error_action(&e) == Some("model") { telemetry::Failure::ModelLoad } else { telemetry::Failure::Other });
+                DictationState { state: "error", action: memory_action(&s, &e).or(error_action(&e)), error: Some(e), retry: true, ..Default::default() }
+            }
             // Whisper invents "Thank you." and the like from noise; with no voice above the room, it's noise.
             Ok(out) if out.text.is_empty() || (cleanup::whisper_filler(&out.raw) && clip.snr_db.is_some_and(|d| d < NOISE_SNR_DB)) => {
+                telemetry::failure(&s, telemetry::Failure::NoSpeech);
                 hint(if clip.muted_seen { "No audio. Check your mic" } else { "Didn't catch that" }, clip.muted_seen.then_some("microphone"))
             }
             Ok(out) => {
@@ -656,21 +686,30 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
                 let chip = chip(clip.quality, out.no_cleanup && out.warning.is_none());
                 // Nothing focused takes text (the desktop, a list, Accessibility off): no ⌘V into nowhere.
                 let nowhere = paste && platform::paste_target() == platform::Target::Card;
-                let res = if nowhere && !platform::accessibility_granted() {
-                    // As before: on the clipboard, since there is no way to paste it.
-                    platform::copy(&out.text).map_err(|e| (e, false)).and(Err(("Accessibility is off, so Echotype copied instead of pasting".into(), true)))
-                } else if nowhere {
-                    Err(("Nowhere to paste".to_string(), true))
-                } else if paste {
-                    platform::paste(&app, &out.text, s.restore_clipboard)
-                } else {
-                    platform::copy(&out.text).map_err(|e| (e, false))
-                };
+                let res = deliver(&app, &s, &out.text, paste, nowhere);
                 // After the paste, not before: the disk writes took 15-20 ms off the time to text.
                 if rerun.is_none() {
                     record_stats(&app, &s, stats::Source::Dictation, &out.text, speaking_ms); // a re-run's words were counted once
+                    telemetry::dictation(&s, stats::words(&out.text), out.stt_ms, out.cleanup_ms);
                 }
-                record_history(&s, &out);
+                if out.cleaned.is_some() {
+                    telemetry::failure(&s, telemetry::Failure::CleanupRejected);
+                }
+                if let Err((_, fell_back)) = &res {
+                    telemetry::failure(&s, if *fell_back { telemetry::Failure::PasteFellBack } else { telemetry::Failure::Other });
+                }
+                let recorded = record_history(&s, &out, clip.entry);
+                let wav = recorded.and_then(|ts| {
+                    let st = state(&app);
+                    let mut kept = lock(&st.last_clip);
+                    let k = kept.as_mut()?;
+                    k.entry = Some(ts);
+                    clip.entry.is_none().then(|| (ts, audio::wav_bytes(&k.pcm)))
+                });
+                // A new entry keeps its audio on disk too, for Re-run in History.
+                if let Some(Err(e)) = wav.map(|(ts, wav)| settings::save_clip(ts, &wav)) {
+                    eprintln!("echotype: could not keep the audio for history: {e}");
+                }
                 let action = warning.as_deref().and_then(|w| memory_action(&s, w));
                 match res {
                     // A re-run is not pasted: the card shows what it heard this time, with Copy.
@@ -698,6 +737,102 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
         drop(guard);
         emit_state(&app, ev);
     });
+}
+
+/// Pastes `text`, or copies it when `paste` is off. `nowhere`: nothing focused takes text.
+/// The error says whether the text is on the clipboard, as platform::paste does.
+fn deliver(app: &AppHandle, s: &Settings, text: &str, paste: bool, nowhere: bool) -> Result<(), (String, bool)> {
+    if nowhere && !platform::accessibility_granted() {
+        // As before: on the clipboard, since there is no way to paste it.
+        platform::copy(text).map_err(|e| (e, false)).and(Err(("Accessibility is off, so Echotype copied instead of pasting".into(), true)))
+    } else if nowhere {
+        Err(("Nowhere to paste".to_string(), true))
+    } else if paste {
+        platform::paste(app, text, s.restore_clipboard)
+    } else {
+        platform::copy(text).map_err(|e| (e, false))
+    }
+}
+
+/// Command Mode can run: Accessibility (to read the selection) and a provider that follows
+/// instructions. The hint says what is missing.
+fn command_ready(s: &Settings, command: bool) -> Result<(), DictationState> {
+    if !command {
+        return Ok(());
+    }
+    if !platform::accessibility_granted() {
+        return Err(hint("Command Mode needs Accessibility to read your selection", Some("accessibility")));
+    }
+    match cleanup::command_blocked(s, cleanup::keyless(s)) {
+        Some(why) => Err(hint(why, Some("cleanup"))),
+        None => Ok(()),
+    }
+}
+
+/// Command Mode after the key comes up: read the selection, transcribe the instruction, have the
+/// cleanup provider apply it and paste the result over the selection. On any failure the user's
+/// text stays as it was and the pill says why.
+// ponytail: results stay out of history and stats; add them if people want edits counted.
+fn process_command(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>) {
+    if pcm.len() < MIN_SAMPLES {
+        emit_state(app, hint("Didn't catch that", None));
+        return;
+    }
+    busy.store(true, Ordering::SeqCst);
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let guard = Busy(busy);
+        let s = current_settings(&app);
+        let ev = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_command(&app, &s, &pcm)))
+            .unwrap_or_else(|_| DictationState { state: "error", error: Some("Command Mode crashed unexpectedly. Your text is unchanged.".into()), ..Default::default() });
+        drop(guard);
+        emit_state(&app, ev);
+    });
+}
+
+fn run_command(app: &AppHandle, s: &Settings, pcm: &[f32]) -> DictationState {
+    let error = |e: String| DictationState { state: "error", error: Some(e), ..Default::default() };
+    // The selection first, while it is still the one the user meant. Echotype's own window, or
+    // focus that takes no text: nothing to read, so the instruction is something to write.
+    let paste = pastes(s, main_window_focused(app));
+    let nowhere = paste && platform::paste_target() == platform::Target::Card;
+    let selection = if !paste || nowhere {
+        None
+    } else if !platform::wait_for_modifiers_up(Duration::from_millis(500)) {
+        return error("Let go of the shortcut to edit. Your text is unchanged.".into()); // a ⌘C now would carry its modifiers
+    } else {
+        match platform::copy_selection(app) {
+            Ok(t) => t,
+            Err(e) => return error(format!("Couldn't read the selection: {e}. Your text is unchanged.")),
+        }
+    };
+    emit_state(app, simple("transcribing"));
+    // The instruction as spoken: no cleanup pass, which would "clean" it into something else.
+    let mut raw = s.clone();
+    raw.cleanup.enabled = false;
+    let instruction = match cleanup::run(&raw, pcm, false, || {}) {
+        Ok(out) if !out.text.is_empty() => out.text,
+        Ok(_) => return hint("Didn't catch that", None),
+        Err(e) => return DictationState { action: error_action(&e), ..error(e) },
+    };
+    emit_state(app, simple("cleaning"));
+    let provider = settings::preset(&s.cleanup.provider).map_or(s.cleanup.provider.clone(), |p| p.label.to_string());
+    let text = match cleanup::chat(s, cleanup::COMMAND_PROMPT, &cleanup::command_input(selection.as_deref(), &instruction), Duration::from_secs(60)) {
+        Ok(t) if !t.is_empty() => t,
+        Ok(_) => return error(format!("{provider} returned nothing. Your text is unchanged.")),
+        Err(e) => return DictationState { action: Some("cleanup"), ..error(format!("Command failed: {provider}: {}. Your text is unchanged.", e.lines().next().unwrap_or_default().trim_end_matches('.'))) },
+    };
+    *lock(&state(app).last_output) = Some(text.clone());
+    match deliver(app, s, &text, paste, nowhere) {
+        Ok(()) => DictationState { state: "done", text: Some(text), copied: !paste, ..Default::default() },
+        Err((e, true)) => {
+            if s.sounds {
+                platform::play_sound(app, "nopaste");
+            }
+            card(s, text, Some(e), None)
+        }
+        Err((e, false)) => DictationState { state: "error", text: Some(text), error: Some(e), ..Default::default() },
+    }
 }
 
 /// The "nowhere to paste" card. Home offers the Accessibility fix when that is why.
@@ -764,25 +899,28 @@ pub(crate) fn record_stats(app: &AppHandle, s: &Settings, source: stats::Source,
     }
 }
 
-fn record_history(s: &Settings, out: &cleanup::Output) {
+/// Adds `out` to history, or, re-running entry `rerun_of`, replaces that entry's result. The
+/// entry's ts when it was written.
+fn record_history(s: &Settings, out: &cleanup::Output, rerun_of: Option<u64>) -> Option<u64> {
     if !s.history_enabled {
-        return;
+        return None;
     }
     let cleaned = cleanup::wants_cleanup(s, &out.raw) && !out.no_cleanup;
     let entry = HistoryEntry {
-        ts: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64),
+        ts: rerun_of.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)),
         raw: out.raw.clone(),
         text: out.text.clone(),
         stt_ms: out.stt_ms,
         cleanup_ms: out.cleanup_ms,
-        stt_provider: if s.stt.provider == "local" { format!("local:{}", stt::model_id(&s.stt.local_model)) } else { s.stt.provider.clone() },
+        // The model that ran (Automatic's pick, a re-run's), so Re-run offers the others.
+        stt_provider: if s.stt.provider == "local" { format!("local:{}", stt::model_id(&stt::local_model(s))) } else { s.stt.provider.clone() },
         cleanup_provider: cleaned.then(|| s.cleanup.provider.clone()),
         no_cleanup: out.no_cleanup,
         cleaned: out.cleaned.clone(),
+        original: None,
     };
-    if let Err(e) = settings::append_history(&entry) {
-        eprintln!("echotype: could not write history: {e}");
-    }
+    let res = if rerun_of.is_some() { settings::rerun_history(&entry) } else { settings::append_history(&entry) };
+    res.map(|()| entry.ts).inspect_err(|e| eprintln!("echotype: could not write history: {e}")).ok()
 }
 
 /// Installs, retargets or removes the fn / modifier tap for `s.talk_key`. Returns why the
@@ -849,16 +987,16 @@ fn swap_hotkey(app: &AppHandle, old: &str, new: &str) -> Result<(), String> {
     })
 }
 
-const SHORTCUT_NAMES: [&str; 3] = ["dictation", "paste last", "copy last"];
+const SHORTCUT_NAMES: [&str; 4] = ["dictation", "paste last", "copy last", "Command Mode"];
 
-fn shortcuts(s: &Settings) -> [String; 3] {
-    [s.hotkey.clone(), s.paste_last_hotkey.clone(), s.copy_last_hotkey.clone()]
+fn shortcuts(s: &Settings) -> [String; 4] {
+    [s.hotkey.clone(), s.paste_last_hotkey.clone(), s.copy_last_hotkey.clone(), s.command_hotkey.clone()]
 }
 
 /// The settings fields whose shortcut is set but not registered right now: taken by another app
 /// at launch, and fixed by picking another key. Asked live, so a fixed one stops being reported.
 fn unregistered_shortcuts(s: &Settings, registered: impl Fn(&str) -> bool) -> Vec<&'static str> {
-    let fields = ["hotkey", "paste_last_hotkey", "copy_last_hotkey"];
+    let fields = ["hotkey", "paste_last_hotkey", "copy_last_hotkey", "command_hotkey"];
     shortcuts(s).iter().zip(fields).filter(|(k, _)| !k.is_empty() && !registered(k)).map(|(_, f)| f).collect()
 }
 
@@ -955,9 +1093,9 @@ async fn get_settings(app: AppHandle) -> R<Settings> {
     Ok(current_settings(&app))
 }
 
-/// Saves `new`, keeping the three global shortcuts and launch at login in step with what is on
+/// Saves `new`, keeping the global shortcuts and launch at login in step with what is on
 /// disk. Each changes only when it differs. A shortcut that cannot register (or is already one
-/// of the other two) never blocks the rest: it keeps its old key and the reason comes back as a
+/// of the others) never blocks the rest: it keeps its old key and the reason comes back as a
 /// warning; the same for launch at login. A failed save undoes every swap, so the registrations,
 /// the file and memory never disagree. The dictation shortcut can't be unbound; the others can ("").
 fn commit(old: &Settings, mut new: Settings, swap: impl Fn(&str, &str) -> R<()>, autostart: impl Fn(bool) -> R<()>, save: impl Fn(&Settings) -> R<()>) -> R<(Settings, Option<String>)> {
@@ -968,13 +1106,13 @@ fn commit(old: &Settings, mut new: Settings, swap: impl Fn(&str, &str) -> R<()>,
     }
     let (mut warnings, mut swapped) = (vec![], vec![]);
     // Slots moving onto a key another slot is leaving go last, after that key is unregistered.
-    let mut order = [0, 1, 2];
+    let mut order = [0, 1, 2, 3];
     order.sort_by_key(|&i| olds.iter().any(|o| same_shortcut(&keys[i], o)));
     for i in order {
         if keys[i] == olds[i] {
             continue;
         }
-        let clash = (0..3).find(|&j| j != i && same_shortcut(&keys[i], &keys[j]));
+        let clash = (0..4).find(|&j| j != i && same_shortcut(&keys[i], &keys[j]));
         let res = match clash {
             Some(j) => Err(format!("{} is already the {} shortcut", keys[i], SHORTCUT_NAMES[j])),
             None => swap(&olds[i], &keys[i]),
@@ -987,7 +1125,7 @@ fn commit(old: &Settings, mut new: Settings, swap: impl Fn(&str, &str) -> R<()>,
             }
         }
     }
-    [new.hotkey, new.paste_last_hotkey, new.copy_last_hotkey] = keys.clone();
+    [new.hotkey, new.paste_last_hotkey, new.copy_last_hotkey, new.command_hotkey] = keys.clone();
     let autostart_changed = new.autostart != old.autostart
         && match autostart(new.autostart) {
             Ok(()) => true,
@@ -1037,6 +1175,7 @@ fn commit_settings(app: &AppHandle, change: impl FnOnce(&Settings) -> Settings) 
     if old.history_enabled && !new.history_enabled {
         *lock(&state(app).last_output) = None; // switching history off also forgets the in-memory copy
         *lock(&state(app).last_cleaned) = None;
+        settings::clear_clips();
     }
     if new.talk_key != old.talk_key {
         apply_talk_key(app, &new);
@@ -1175,7 +1314,7 @@ async fn transcribe_file(app: AppHandle, path: String) -> R<cleanup::Output> {
     tauri::async_runtime::spawn_blocking(move || {
         let out = transcribe_path(&s, &path)?;
         record_stats(&app, &s, stats::Source::File, &out.text, 0);
-        record_history(&s, &out);
+        record_history(&s, &out, None);
         Ok(out)
     })
     .await
@@ -1391,26 +1530,52 @@ pub(crate) fn copy_cleaned(app: &AppHandle) -> R<()> {
 
 /// Re-run last (pill menu, History): the kept clip again with one change. Copied, never pasted.
 pub(crate) fn rerun_last(app: &AppHandle, r: Rerun) {
-    let _ = state(app).dictation.send(Cmd::Rerun(r));
+    send(app, Cmd::Rerun(r, None));
 }
 
-/// What History's Re-run offers: [{id, label}], empty when no clip is kept.
+/// Settings as History entry `e` ran, for the Re-run choices that would change its result: the
+/// speech model it used, and no "Without cleanup" when it had none. Languages are not recorded.
+fn as_ran(mut s: Settings, e: &HistoryEntry) -> Settings {
+    match e.stt_provider.strip_prefix("local:") {
+        Some(m) => {
+            s.stt.provider = "local".into();
+            s.stt.rerun_model = Some(m.into());
+        }
+        None => s.stt.provider = e.stt_provider.clone(),
+    }
+    s.cleanup.enabled &= e.cleanup_provider.is_some();
+    s
+}
+
+/// The audio of the last dictation (`ts` None) or of History entry `ts` is still kept.
+fn has_clip(app: &AppHandle, ts: Option<u64>) -> bool {
+    ts.map_or_else(|| lock(&state(app).last_clip).is_some(), |ts| settings::clip_path(ts).is_file())
+}
+
+/// What Re-run offers for the last dictation or History entry `ts`: [{id, label}], empty when
+/// its audio is not kept.
 #[tauri::command]
-async fn rerun_options(app: AppHandle) -> R<Vec<serde_json::Value>> {
-    if lock(&state(&app).last_clip).is_none() {
+async fn rerun_options(app: AppHandle, ts: Option<u64>) -> R<Vec<serde_json::Value>> {
+    if !has_clip(&app, ts) {
         return Ok(vec![]);
     }
-    let s = current_settings(&app);
+    let mut s = current_settings(&app);
+    if let Some(ts) = ts {
+        let Some(e) = settings::get_history(usize::MAX).into_iter().find(|e| e.ts == ts) else { return Ok(vec![]) };
+        s = as_ran(s, &e);
+    }
     Ok(pill::rerun_options(&s, |id| stt::model_file(id).is_some()).into_iter().map(|(r, label)| serde_json::json!({ "id": r.id(), "label": label })).collect())
 }
 
+/// A History entry's re-run replaces its text (the first one is kept) and, like Re-run last, is
+/// copied and shown on the card, never pasted.
 #[tauri::command]
-async fn rerun(app: AppHandle, id: String) -> R<()> {
+async fn rerun(app: AppHandle, id: String, ts: Option<u64>) -> R<()> {
     let r = Rerun::parse(&id).ok_or("Unknown re-run")?;
-    if lock(&state(&app).last_clip).is_none() {
+    if !has_clip(&app, ts) {
         return Err("There is no recording to re-run".into());
     }
-    rerun_last(&app, r);
+    send(&app, Cmd::Rerun(r, ts));
     Ok(())
 }
 
@@ -1856,12 +2021,17 @@ pub fn run() {
                         paste_last(app, true);
                     } else if is(&s.copy_last_hotkey) && !pressed {
                         paste_last(app, false);
+                    } else if is(&s.command_hotkey) {
+                        send(app, Cmd::Command(if pressed { Ev::Press } else { Ev::Release }));
                     }
                 })
                 .build(),
         )
         .setup(|app| {
             let s = Settings::load();
+            telemetry::install_panic_hook(app.package_info().version.to_string());
+            let h = app.handle().clone();
+            telemetry::start(app.package_info().version.to_string(), move || current_settings(&h));
             notices::start(app.handle());
             let (pill_wake, woken) = mpsc::channel();
             app.manage(AppState {
@@ -1963,6 +2133,13 @@ pub fn run() {
                 });
             }
             calls::run(app.handle().clone());
+            // Old meeting audio goes at start, then daily (Settings → Keep meeting audio).
+            // ponytail: thread::sleep stops while the Mac sleeps, so "daily" can stretch; launches catch up.
+            let h = app.handle().clone();
+            std::thread::spawn(move || loop {
+                meeting::prune_audio(current_settings(&h).meeting_audio_days);
+                std::thread::sleep(Duration::from_secs(86_400));
+            });
             std::thread::spawn(move || {
                 if s.stt.provider == "local" {
                     let _ = speakers::ensure_vad(); // for installs from before dictation used it
@@ -2054,6 +2231,7 @@ pub fn run() {
             meeting::meeting_status,
             meeting::meeting_list,
             meeting::meeting_get,
+            meeting::meeting_search,
             meeting::meeting_rename_speaker,
             meeting::meeting_delete,
             meeting::meeting_export,
@@ -2148,7 +2326,7 @@ fn cli_report(result: R<cleanup::Output>, total_ms: u128) -> (String, String, i3
 
 #[cfg(test)]
 mod tests {
-    use super::{KEEP_SAMPLES, Rerun, Settings, accel_label, chip, cli_report, commit, keep, last_words, parse_hotkey, partial_due, stt, unregistered_shortcuts};
+    use super::{HistoryEntry, KEEP_SAMPLES, Rerun, Settings, accel_label, as_ran, chip, cli_report, commit, keep, last_words, parse_hotkey, partial_due, stt, unregistered_shortcuts};
     use crate::audio::Quality;
     use std::cell::RefCell;
     use std::time::Duration;
@@ -2176,9 +2354,9 @@ mod tests {
     #[test]
     fn the_last_clip_is_kept_within_its_cap() {
         let five_min = vec![0.0; KEEP_SAMPLES];
-        assert!(keep(five_min, false).is_some_and(|k| !k.failed), "a success is kept for Re-run");
-        assert!(keep(vec![0.0; KEEP_SAMPLES + 1], false).is_none(), "but not past five minutes");
-        assert!(keep(vec![0.0; KEEP_SAMPLES + 1], true).is_some_and(|k| k.failed), "a failure is kept at any length for Retry");
+        assert!(keep(five_min, false, None).is_some_and(|k| !k.failed), "a success is kept for Re-run");
+        assert!(keep(vec![0.0; KEEP_SAMPLES + 1], false, None).is_none(), "but not past five minutes");
+        assert!(keep(vec![0.0; KEEP_SAMPLES + 1], true, Some(1)).is_some_and(|k| k.failed && k.entry == Some(1)), "a failure is kept at any length for Retry");
     }
 
     #[test]
@@ -2197,6 +2375,21 @@ mod tests {
         let m = run(Rerun::Model("small".into()));
         assert_eq!((m.stt.provider.as_str(), stt::local_model(&m).as_str(), m.advanced), ("local", "small", false), "the model, without switching on advanced settings");
         assert_eq!(serde_json::to_value(&m).unwrap()["stt"].get("rerun_model"), None, "never saved");
+    }
+
+    #[test]
+    fn a_history_entry_offers_the_pill_choices_that_would_change_it() {
+        let mut s = Settings { advanced: true, ..Settings::default() }; // the settings say Large v3 Turbo
+        s.cleanup.enabled = true;
+        let entry = |stt: &str, cleanup: Option<&str>| HistoryEntry { ts: 1, raw: "r".into(), text: "t".into(), stt_ms: 1, cleanup_ms: 0, stt_provider: stt.into(), cleanup_provider: cleanup.map(String::from), no_cleanup: false, cleaned: None, original: None };
+        let ids = |s: &Settings, e: HistoryEntry| crate::pill::rerun_options(&as_ran(s.clone(), &e), |id| ["large-v3-turbo-q5_0", "tiny.en"].contains(&id)).into_iter().map(|(r, _)| r.id()).collect::<Vec<_>>();
+        assert_eq!(ids(&s, entry("local:tiny.en", Some("ollama"))), ["model:large-v3-turbo-q5_0", "raw"], "recorded on Tiny: Turbo is the other model");
+        assert_eq!(ids(&s, entry("local:large-v3-turbo-q5_0", None)), ["model:tiny.en"], "no cleanup ran, so none to skip");
+        assert_eq!(ids(&s, entry("groq", Some("groq"))), ["model:large-v3-turbo-q5_0", "model:tiny.en", "raw"], "a cloud transcript, on any local model");
+        s.languages = vec!["en".into(), "hi".into()];
+        assert_eq!(ids(&s, entry("local:tiny.en", None))[..3], ["lang:en", "lang:hi", "lang:auto"], "languages as the pill offers them");
+        let ran = as_ran(s.clone(), &entry("local:tiny.en", None));
+        assert_eq!(serde_json::to_value(&ran).unwrap(), serde_json::to_value(Settings { cleanup: crate::settings::Cleanup { enabled: false, ..s.cleanup.clone() }, ..s.clone() }).unwrap(), "nothing saved changes");
     }
 
     #[test]
@@ -2235,11 +2428,11 @@ mod tests {
     // Regression: a shortcut taken at launch stayed "unavailable" after the user picked one that worked.
     #[test]
     fn unregistered_shortcuts_are_asked_live_and_ignore_unset_ones() {
-        let mut s = Settings { hotkey: "Alt+Space".into(), paste_last_hotkey: "CommandOrControl+Control+V".into(), copy_last_hotkey: String::new(), ..Settings::default() };
+        let mut s = Settings { hotkey: "Alt+Space".into(), paste_last_hotkey: "CommandOrControl+Control+V".into(), copy_last_hotkey: String::new(), command_hotkey: "Alt+Shift+Space".into(), ..Settings::default() };
         assert_eq!(unregistered_shortcuts(&s, |k| k != "Alt+Space"), ["hotkey"]);
         s.hotkey = "Alt+KeyD".into();
         assert!(unregistered_shortcuts(&s, |k| k != "Alt+Space").is_empty());
-        assert_eq!(unregistered_shortcuts(&s, |_| false), ["hotkey", "paste_last_hotkey"]);
+        assert_eq!(unregistered_shortcuts(&s, |_| false), ["hotkey", "paste_last_hotkey", "command_hotkey"]);
     }
 
     #[test]
@@ -2344,6 +2537,23 @@ mod tests {
         }, |_| Ok(()), |_| Ok(())).unwrap();
         assert_eq!(swaps.into_inner(), vec![("CommandOrControl+Control+V".to_string(), String::new())]);
         assert_eq!((kept2.hotkey.as_str(), kept2.paste_last_hotkey.as_str()), ("Alt+Space", ""));
+    }
+
+    #[test]
+    fn the_command_mode_shortcut_is_set_like_the_others() {
+        let old = Settings { command_hotkey: "Alt+Shift+Space".into(), ..Settings::default() };
+        let mut new = old.clone();
+        new.command_hotkey = "Alt+Space".into(); // the dictation shortcut's key
+        let (kept, warning) = commit(&old, new.clone(), |_, _| panic!("swapped onto a taken key"), |_| Ok(()), |_| Ok(())).unwrap();
+        assert_eq!(kept.command_hotkey, "Alt+Shift+Space");
+        assert!(warning.unwrap().contains("already the dictation shortcut"));
+        new.command_hotkey = "Control+Alt+KeyE".into();
+        let swaps = RefCell::new(vec![]);
+        let (kept, _) = commit(&old, new, |o, n| {
+            swaps.borrow_mut().push(format!("{o}>{n}"));
+            Ok(())
+        }, |_| Ok(()), |_| Ok(())).unwrap();
+        assert_eq!((kept.command_hotkey.as_str(), swaps.into_inner()), ("Control+Alt+KeyE", vec!["Alt+Shift+Space>Control+Alt+KeyE".to_string()]));
     }
 
     #[test]
