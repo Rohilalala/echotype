@@ -231,6 +231,15 @@
         <div id="reps"></div>
         <div class="row"><button class="btn" id="addRep" type="button">Add snippet</button></div>
       </div>
+
+      <h2 class="group-title">Import and export</h2>
+      <div class="group">
+        <div class="row"><span class="row-text"><span class="row-title">Import</span><span class="row-desc" id="dictImportDesc">A .txt file with a word on each line, or a .csv with a word a row or “phrase, text” for a snippet. Up to 1,000 at a time; ones already here are skipped.</span></span>
+          <span class="actions"><button class="btn quiet" id="dictImportCancel" type="button" hidden>Cancel</button><button class="btn" id="dictImportAdd" type="button" hidden>Add</button><button class="btn" id="dictImport" type="button">Choose file…</button></span>
+          <input type="file" id="dictFile" accept=".txt,.csv,text/plain,text/csv" hidden /></div>
+        <div class="row"><span class="row-text"><span class="row-title">Export</span><span class="row-desc" id="dictExportDesc">Your words and snippets as a CSV file in Downloads, to keep or import elsewhere.</span></span>
+          <button class="btn" id="dictExport" type="button">Export</button></div>
+      </div>
     </section>
 
     <!-- Meetings (meetings.js) -->
@@ -256,7 +265,8 @@
 
     <!-- Stats (stats.js): counts kept on this computer, never text -->
     <section data-page="stats" hidden>
-      <h1 id="statsTitle" tabindex="-1">Your stats</h1>
+      <div class="page-head"><h1 id="statsTitle" tabindex="-1">Your stats</h1>
+        <span class="actions" id="statsShare" hidden><button class="btn" id="shareCopy" type="button">Copy image</button><button class="btn" id="shareSave" type="button">Save image</button></span></div>
       <p class="lede">Counted on this Mac from what you dictate. Nothing is sent anywhere, and no text is kept here.</p>
       <div class="notice" id="statsOff" hidden>
         <span class="notice-text">Usage stats are off, so nothing new is counted. What was counted stays until you clear it.</span>
@@ -463,8 +473,8 @@
 
       <h2 class="group-title">Privacy</h2>
       <div class="group">
-        <label class="row"><span class="row-text"><span class="row-title">Keep history</span><span class="row-desc">Stored on this Mac only.</span></span>
-          <input type="checkbox" class="switch" data-bind="history_enabled" /></label>
+        <label class="row"><span class="row-text"><span class="row-title">Keep history</span><span class="row-desc">Stored on this Mac only. Stats count your words either way.</span></span>
+          <select id="historyKeep"><option value="keep">Keep</option><option value="day">Delete after 24 hours</option><option value="off">Don't keep</option></select></label>
         <label class="row" id="clipDaysRow"><span class="row-text"><span class="row-title">Keep dictation audio</span><span class="row-desc">To play a dictation back or re-run it from History. Older recordings are deleted; the text stays.</span></span>
           <select data-bind="clip_days" data-num><option value="7">7 days</option><option value="14">14 days</option><option value="30">30 days</option><option value="0">Don't keep</option></select></label>
         <label class="row"><span class="row-text"><span class="row-title">Restore clipboard</span><span class="row-desc">Put back what you had copied after Echotype pastes.</span></span>

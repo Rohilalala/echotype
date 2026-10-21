@@ -104,8 +104,8 @@ fn call(dirs: &Dirs, params: &Value) -> Result<Value, (i64, String)> {
     let query = || args.get("query").and_then(Value::as_str).unwrap_or_default();
     let limit = |def: u64| args.get("limit").and_then(Value::as_u64).unwrap_or(def).clamp(1, MAX_LIMIT) as usize;
     let out = match name {
-        "search_history" => Ok(json!(search_history(&dirs.data, query(), limit(20)))),
-        "recent_dictations" => Ok(json!(search_history(&dirs.data, "", limit(10)))),
+        "search_history" => Ok(json!(search_history(dirs, query(), limit(20)))),
+        "recent_dictations" => Ok(json!(search_history(dirs, "", limit(10)))),
         "search_meetings" => Ok(json!(search_meetings(&dirs.data, query()))),
         "get_meeting_transcript" => meeting_markdown(&dirs.data, args.get("id").and_then(Value::as_str).unwrap_or_default()).map(Value::String),
         "search_notes" => search_notes(&dirs.data, query(), limit(20)),
@@ -131,14 +131,17 @@ fn fold(s: &str) -> String {
 }
 
 /// Dictations holding every word of `query` (all of them for ""), newest first. A recovered
-/// dictation not transcribed yet has no text, so it is left out.
+/// dictation not transcribed yet has no text, so it is left out. Settings → Keep history holds
+/// here too, with the app closed: none when it is "Don't keep", the last day's on "Delete after 24 hours".
 // ponytail: reads all of history.jsonl (500 entries at most) per call.
-fn search_history(data: &Path, query: &str, limit: usize) -> Vec<Value> {
+fn search_history(dirs: &Dirs, query: &str, limit: usize) -> Vec<Value> {
     let words: Vec<String> = query.split_whitespace().map(fold).collect();
-    let file = std::fs::read_to_string(data.join("history.jsonl")).unwrap_or_default();
+    let (s, now) = (settings_in(&dirs.config), chrono::Utc::now().timestamp_millis() as u64);
+    let file = std::fs::read_to_string(dirs.data.join("history.jsonl")).unwrap_or_default();
     file.lines()
         .rev()
         .filter_map(|l| serde_json::from_str::<HistoryEntry>(l).ok())
+        .filter(|e| settings::history_keeps(&s, e.ts, now))
         .filter(|e| !e.text.is_empty() && words.iter().all(|w| fold(&e.text).contains(w.as_str())))
         .take(limit)
         .map(|e| json!({ "when": when(e.ts), "ts": e.ts, "text": e.text }))
@@ -178,9 +181,14 @@ fn search_notes(data: &Path, query: &str, limit: usize) -> Result<Value, String>
     Ok(json!(hits.map(|n| json!({ "title": notes::title(&n.text), "edited": when(n.updated_ms), "text": n.text })).collect::<Vec<_>>()))
 }
 
-fn dictionary(config: &Path) -> Value {
+fn settings_in(config: &Path) -> Settings {
     let mut s: Settings = std::fs::read_to_string(config.join("settings.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
     s.migrate();
+    s
+}
+
+fn dictionary(config: &Path) -> Value {
+    let s = settings_in(config);
     json!({ "words": s.dictionary, "replacements": s.replacements.iter().map(|r| json!({ "from": r.from, "to": r.to })).collect::<Vec<_>>() })
 }
 
@@ -274,6 +282,23 @@ mod tests {
         let (recent, _) = tool(&d, "recent_dictations", json!({ "limit": 2 }));
         assert_eq!(recent.as_array().unwrap().iter().map(|h| h["ts"].as_u64().unwrap()).collect::<Vec<_>>(), [3000, 2000], "the recovered entry has no text yet");
         assert!(recent[0]["when"].as_str().unwrap().len() >= 16);
+    }
+
+    #[test]
+    fn history_tools_follow_keep_history() {
+        let d = scratch("keep");
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        let e = HistoryEntry { ts: now - 60_000, raw: "r".into(), text: "Standup moved to ten".into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "local".into(), cleanup_provider: None, no_cleanup: false, cleaned: None, original: None, recovered: false };
+        let mut file = std::fs::read_to_string(d.data.join("history.jsonl")).unwrap();
+        file += &(serde_json::to_string(&e).unwrap() + "\n");
+        std::fs::write(d.data.join("history.jsonl"), file).unwrap();
+        let keep = |on, day| {
+            std::fs::write(d.config.join("settings.json"), serde_json::to_string(&Settings { history_enabled: on, history_24h: day, ..Default::default() }).unwrap()).unwrap();
+            tool(&d, "recent_dictations", json!({})).0.as_array().unwrap().iter().map(|h| h["text"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+        };
+        assert_eq!(keep(true, false).len(), 4, "Keep: all of it");
+        assert_eq!(keep(true, true), ["Standup moved to ten"], "Delete after 24 hours: only the last day's, before the app prunes");
+        assert!(keep(false, false).is_empty(), "Don't keep: none");
     }
 
     #[test]

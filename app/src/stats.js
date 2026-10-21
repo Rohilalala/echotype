@@ -44,6 +44,8 @@ export function init(deps) {
   $('#clearStats').addEventListener('click', () => confirm(true, $('#clearStatsCancel')));
   $('#clearStatsCancel').addEventListener('click', () => confirm(false));
   $('#clearStatsConfirm').addEventListener('keydown', e => { if (e.key === 'Escape') confirm(false); });
+  $('#shareCopy').addEventListener('click', e => copyCard(e.currentTarget));
+  $('#shareSave').addEventListener('click', e => saveCard(e.currentTarget));
   $('#clearStatsYes').addEventListener('click', async () => {
     try { await api.invoke('clear_stats'); }
     catch (e) { confirm(false); err = `Couldn't clear stats: ${e}`; return renderPage(); }
@@ -100,6 +102,7 @@ function renderPage() {
   const { h } = api, S = api.settings();
   $('#statsOff').hidden = S.usage_stats;
   $('#clearStats').disabled = !view?.count_total;
+  $('#statsShare').hidden = !!err || !view?.count_total;
   const body = $('#statsBody'), gridFocused = document.activeElement?.classList.contains('heat');
   bodyOn = S.usage_stats;
   if (err) return body.replaceChildren(h('p', { className: 'empty', role: 'alert' }, err, h('button', { className: 'btn', type: 'button', onclick: refresh }, 'Try again')));
@@ -231,4 +234,79 @@ function milestones(v) {
     h('h2', { className: 'group-title' }, 'Milestones'),
     marks.length ? h('ul', { className: 'marks' }, marks) : null,
     next && h('p', { className: 'stats-note' }, `Next: ${next[1].replace('First ', '')}, ${num(next[2] - v.words_total)} to go.`));
+}
+
+// ---------- Share: the headline numbers as a PNG card, drawn here ----------
+// Numbers only: no name, no dictated text, no app names. 1200×630 (the size link previews use), at 2×.
+const W = 1200, H = 630, PAD = 72;
+const FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif';
+let icon;
+const loadIcon = () => (icon ??= new Promise(res => { const img = new Image(); img.onload = () => res(img); img.onerror = () => res(null); img.src = 'icon.svg'; }));
+
+function drawCard(v, img) {
+  const c = document.createElement('canvas');
+  c.width = W * 2; c.height = H * 2;
+  const g = c.getContext('2d');
+  g.scale(2, 2);
+  const bg = g.createLinearGradient(0, 0, 0, H); // the app icon's near-black
+  bg.addColorStop(0, '#161618'); bg.addColorStop(1, '#050505');
+  g.fillStyle = bg; g.fillRect(0, 0, W, H);
+  const text = (t, x, y, size, color, weight = 500, align = 'left') => {
+    g.font = `${weight} ${size}px ${FONT}`; g.fillStyle = color; g.textAlign = align;
+    g.fillText(t, x, y);
+    return g.measureText(t).width;
+  };
+  const GRAY = '#8e8e93', DIM = '#636366';
+  if (img) g.drawImage(img, PAD - 8, 60, 72, 72); // its rounded square fills about 80% of the file
+  text('Echotype', img ? PAD + 72 : PAD, 107, 30, '#fff', 600);
+  text(`Week of ${dayMonth(v.week[0].date)}`, W - PAD, 107, 22, GRAY, 500, 'right');
+
+  text('Words this week', PAD, 204, 24, GRAY);
+  text(num(v.words_week), PAD - 4, 318, 120, '#fff', 600);
+  // This week by day, as on the Stats page.
+  const top = Math.max(...v.week.map(d => d.words), 1), bw = 40, gap = (460 - 7 * bw) / 6, x0 = W - PAD - 460;
+  v.week.forEach((d, i) => {
+    const x = x0 + i * (bw + gap), future = d.date > v.today, hgt = d.words ? Math.max(8, (d.words / top) * 130) : 4;
+    g.fillStyle = future ? 'rgba(255,255,255,0.08)' : d.date === v.today ? '#fff' : 'rgba(255,255,255,0.55)';
+    g.beginPath(); g.roundRect(x, 318 - (future ? 4 : hgt), bw, future ? 4 : hgt, 6); g.fill();
+    text(date(d.date).toLocaleDateString([], { weekday: 'narrow' }), x + bw / 2, 352, 18, d.date === v.today ? '#fff' : DIM, 500, 'center');
+  });
+
+  g.fillStyle = 'rgba(255,255,255,0.12)'; g.fillRect(PAD, 392, W - 2 * PAD, 1);
+  const col = (W - 2 * PAD) / 4;
+  [['Total words', num(v.words_total), ''],
+    ['Average speed', v.avg_wpm ? num(v.avg_wpm) : '–', v.avg_wpm ? 'wpm' : ''],
+    ['Best speed', v.best_wpm ? num(v.best_wpm.value) : '–', v.best_wpm ? 'wpm' : ''],
+    ['Streak', num(v.streak), v.streak === 1 ? 'day' : 'days'],
+  ].forEach(([label, value, unit], i) => {
+    const x = PAD + i * col;
+    text(label, x, 446, 20, GRAY);
+    const w = text(value, x, 506, 48, '#fff', 600);
+    if (unit) text(unit, x + w + 8, 506, 22, GRAY);
+  });
+  text('Dictated with Echotype', PAD, H - 50, 18, DIM);
+  return c;
+}
+
+// The card for the numbers on screen. A browser that taints a canvas drawing an SVG gets it without the icon.
+async function card() {
+  const c = drawCard(view, await loadIcon());
+  try { c.getContext('2d').getImageData(0, 0, 1, 1); return c; } catch { return drawCard(view, null); }
+}
+
+const say = (btn, label) => { const was = btn.dataset.label ??= btn.textContent; btn.textContent = label; setTimeout(() => (btn.textContent = was), 1600); };
+
+async function copyCard(btn) {
+  // A promised blob, so the clipboard write starts inside the click as WebKit asks.
+  const png = card().then(c => new Promise((res, rej) => c.toBlob(b => (b ? res(b) : rej(new Error('no image'))), 'image/png')));
+  try { await navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]); say(btn, 'Copied'); }
+  catch (e) { btn.title = String(e?.message || e); say(btn, "Couldn't copy"); }
+}
+
+async function saveCard(btn) {
+  try {
+    const png = (await card()).toDataURL('image/png').split(',')[1];
+    await api.invoke('save_stats_card', { png });
+    say(btn, 'Saved to Downloads');
+  } catch (e) { btn.title = String(e); say(btn, "Couldn't save"); }
 }
