@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Echotype: dictation that stays on your Mac</title>
+<meta name="description" content="Hold a key, say it, and clean text lands wherever you type. Speech recognition and cleanup run on your Mac. Free while in beta.">
+<meta property="og:title" content="Echotype">
+<meta property="og:description" content="Dictation that stays on your Mac. Hold a key, say it, done.">
+<meta property="og:image" content="/assets/icon.png">
+<meta name="theme-color" content="#05060b">
+<link rel="icon" href="/assets/icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+<script type="module" src="/main.js"></script>
+</head>
+<body>
+<canvas id="sky" aria-hidden="true"></canvas>
+
+<header class="nav">
+  <nav class="nav-bar" aria-label="Main">
+    <a class="brand" href="#top"><img src="/assets/icon.png" alt="" width="24" height="24">Echotype</a>
+    <div class="nav-links">
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="#privacy">Privacy</a>
+      <a href="#pricing">Pricing</a>
+    </div>
+    <a class="btn btn-ink btn-sm" href="#download"><svg class="apple" viewBox="0 0 14 17" aria-hidden="true"><path d="M11.6 9c0-2 1.6-2.9 1.7-3a3.7 3.7 0 0 0-2.9-1.6c-1.2-.1-2.4.7-3 .7-.6 0-1.6-.7-2.6-.7A3.9 3.9 0 0 0 1.5 6.4c-1.4 2.4-.4 6 1 8 .7 1 1.5 2 2.5 2 1 0 1.4-.6 2.6-.6s1.5.6 2.6.6c1 0 1.7-1 2.4-2 .8-1.1 1.1-2.2 1.1-2.3 0 0-2.1-.8-2.1-3.1ZM9.6 3.1c.6-.7.9-1.6.8-2.5-.8 0-1.7.5-2.3 1.2-.5.6-1 1.5-.8 2.4.9 0 1.7-.5 2.3-1.1Z"/></svg>Download</a>
+  </nav>
+</header>
+
+<main id="top">
+
+  <!-- Hero: the app's own orb, live -->
+  <section class="hero">
+    <canvas class="hero-orb" id="heroOrb" aria-hidden="true"></canvas>
+    <div class="hero-copy">
+      <h1>Say it.<br><span class="soft">It's written.</span></h1>
+      <p class="lede">Hold a key and talk. Echotype turns what you say into clean text, right where you're typing. It all runs on your Mac.</p>
+      <div class="actions">
+        <a class="btn btn-ink" href="#download"><svg class="apple" viewBox="0 0 14 17" aria-hidden="true"><path d="M11.6 9c0-2 1.6-2.9 1.7-3a3.7 3.7 0 0 0-2.9-1.6c-1.2-.1-2.4.7-3 .7-.6 0-1.6-.7-2.6-.7A3.9 3.9 0 0 0 1.5 6.4c-1.4 2.4-.4 6 1 8 .7 1 1.5 2 2.5 2 1 0 1.4-.6 2.6-.6s1.5.6 2.6.6c1 0 1.7-1 2.4-2 .8-1.1 1.1-2.2 1.1-2.3 0 0-2.1-.8-2.1-3.1ZM9.6 3.1c.6-.7.9-1.6.8-2.5-.8 0-1.7.5-2.3 1.2-.5.6-1 1.5-.8 2.4.9 0 1.7-.5 2.3-1.1Z"/></svg>Download for Mac</a>
+        <a class="btn btn-soft" href="#windows">Windows waitlist</a>
+      </div>
+      <p class="try" id="tryHint">Hold <kbd>space</kbd> and the orb listens.</p>
+      <p class="fine">Free while in beta. For Macs with Apple silicon.</p>
+    </div>
+  </section>
+
+  <!-- How it works: a real dictation, word by word -->
+  <section class="demo band-white" id="how">
+    <div class="wrap">
+      <h2 class="title">Talk the way you think.<br><span class="soft">Echotype tidies it up.</span></h2>
+      <div class="tabs" role="tablist" aria-label="Examples">
+        <button role="tab" aria-selected="true" data-scene="0">Mail</button>
+        <button role="tab" aria-selected="false" data-scene="1">Slack</button>
+        <button role="tab" aria-selected="false" data-scene="2">Notes</button>
+      </div>
+      <div class="window" aria-live="polite">
+        <div class="window-bar"><i></i><i></i><i></i><span id="winTitle">New Message</span></div>
+        <div class="window-head" id="winHead"></div>
+        <div class="window-body"><p id="demoText" class="demo-text"></p></div>
+        <div class="pill" id="pill">
+          <canvas id="pillOrb" aria-hidden="true"></canvas>
+          <span id="pillLabel">Listening</span>
+          <kbd>⌥</kbd><kbd>space</kbd>
+        </div>
+      </div>
+      <p class="caption">Fillers go, corrections land, lists become lists. Your words stay yours.</p>
+    </div>
+  </section>
+
+  <!-- One sentence, revealed as you scroll -->
+  <section class="statement band-grey">
+    <div class="wrap narrow">
+      <p class="reveal" id="statement">You think faster than you type. Echotype closes the gap: hold <kbd>⌥</kbd><kbd>space</kbd>, say it the way you'd say it to a friend, and let go. Clean text appears in Mail, Slack, Notes, your code editor, anywhere there's a cursor.</p>
+    </div>
+  </section>
+
+  <!-- What it does -->
+  <section class="features band-white" id="features">
+    <div class="wrap">
+      <h2 class="title">Small app.<br><span class="soft">Does a lot.</span></h2>
+      <div class="grid">
+        <article class="tile">
+          <div class="art art-fields" aria-hidden="true">
+            <span>Mail</span><span>Slack</span><span>Notes</span><span>Code</span>
+          </div>
+          <h3>Works wherever you type</h3>
+          <p>Text lands at your cursor in any app. No copying, no switching windows.</p>
+        </article>
+        <article class="tile">
+          <div class="art art-clean" aria-hidden="true">
+            <p><span class="gone">um</span> so I <span class="gone">like</span> think we should <span class="gone">you know</span> ship it</p>
+          </div>
+          <h3>Cleans up as you talk</h3>
+          <p>Fillers disappear. Say "no, actually" and the correction replaces the mistake.</p>
+        </article>
+        <article class="tile">
+          <div class="art art-keys" aria-hidden="true">
+            <kbd>new line</kbd><kbd>bullet point</kbd><kbd>scratch that</kbd>
+          </div>
+          <h3>Commands you just say</h3>
+          <p>Start a new line, add a bullet, or take back the last sentence, all by voice.</p>
+        </article>
+        <article class="tile">
+          <div class="art art-meeting" aria-hidden="true">
+            <p><b>Maya</b> Can we move launch to Tuesday?</p>
+            <p><b>You</b> Tuesday works if QA signs off.</p>
+            <p><b>Arjun</b> I'll check with them today.</p>
+          </div>
+          <h3>Meetings, written live</h3>
+          <p>Meet, Teams, Zoom or Slack. Echotype writes the call down as people talk and labels who's speaking.</p>
+        </article>
+        <article class="tile">
+          <div class="art art-lang" aria-hidden="true">
+            <canvas id="langOrb"></canvas>
+            <span id="hello">Hello</span>
+          </div>
+          <h3>99 languages</h3>
+          <p>Speak the languages you speak. Echotype keeps up, and can switch between them.</p>
+        </article>
+        <article class="tile">
+          <div class="art art-command" aria-hidden="true">
+            <span class="sel">hey can u send me the deck when ur free</span>
+            <span class="say">"Make it more formal"</span>
+            <span class="out">Could you send me the deck when you have a moment?</span>
+          </div>
+          <h3>Edit by voice</h3>
+          <p>Select text and say what to change: shorter, friendlier, in Spanish. Command Mode rewrites it in place.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- Privacy: the one dark section -->
+  <section class="privacy band-black" id="privacy">
+    <div class="wrap">
+      <canvas class="privacy-orb" id="privacyOrb" aria-hidden="true"></canvas>
+      <h2 class="title light">What you say<br><span class="soft">stays on your Mac.</span></h2>
+      <div class="claims">
+        <div><h3>Speech recognition runs locally.</h3><p>Your voice is turned into text on your Mac. No audio is uploaded.</p></div>
+        <div><h3>So does the cleanup.</h3><p>Echotype's own small models tidy your words on device, in a fraction of a second.</p></div>
+        <div><h3>No account to dictate.</h3><p>Download it and start talking. There's nothing to sign up for.</p></div>
+        <div><h3>Works offline.</h3><p>On a plane or off the grid, dictation keeps working once the models are downloaded.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Pricing -->
+  <section class="pricing band-grey" id="pricing">
+    <div class="wrap">
+      <h2 class="title">Free while in beta.</h2>
+      <p class="sub">Everything that runs on your Mac stays free. Pro adds a few things that need the cloud.</p>
+      <div class="plans">
+        <div class="plan">
+          <h3>Echotype</h3>
+          <p class="price">Free</p>
+          <ul>
+            <li>Dictation in every app</li>
+            <li>Cleanup, lists and voice commands</li>
+            <li>Live meeting transcripts and exports</li>
+            <li>99 languages</li>
+            <li>Everything runs on your Mac</li>
+          </ul>
+          <a class="btn btn-ink" href="#download">Download for Mac</a>
+        </div>
+        <div class="plan plan-pro">
+          <h3>Echotype Pro</h3>
+          <p class="price">$6<small> a month, or $60 a year</small></p>
+          <ul>
+            <li>Everything in Echotype</li>
+            <li>Meeting summaries</li>
+            <li>Ask anything about a meeting</li>
+            <li>Cloud transcription for older Macs</li>
+          </ul>
+          <span class="btn btn-ghost-light" aria-disabled="true">Arrives after the beta</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Download, and the Windows waitlist -->
+  <section class="download band-white" id="download">
+    <div class="wrap narrow">
+      <h2 class="title">Get Echotype.</h2>
+      <div class="platform">
+        <svg class="platform-icon" viewBox="0 0 14 17" aria-hidden="true"><path d="M11.6 9c0-2 1.6-2.9 1.7-3a3.7 3.7 0 0 0-2.9-1.6c-1.2-.1-2.4.7-3 .7-.6 0-1.6-.7-2.6-.7A3.9 3.9 0 0 0 1.5 6.4c-1.4 2.4-.4 6 1 8 .7 1 1.5 2 2.5 2 1 0 1.4-.6 2.6-.6s1.5.6 2.6.6c1 0 1.7-1 2.4-2 .8-1.1 1.1-2.2 1.1-2.3 0 0-2.1-.8-2.1-3.1ZM9.6 3.1c.6-.7.9-1.6.8-2.5-.8 0-1.7.5-2.3 1.2-.5.6-1 1.5-.8 2.4.9 0 1.7-.5 2.3-1.1Z"/></svg>
+        <div class="platform-text"><h3>Mac</h3><p>Apple silicon (M1 or later), macOS 13 or later.</p></div>
+        <a class="btn btn-ink" href="https://github.com/Rohilalala/echotype/releases/latest">Download</a>
+      </div>
+      <div class="platform" id="windows">
+        <svg class="platform-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M0 2.2 6.5 1.3v6.2H0V2.2Zm7.3-1L16 0v7.5H7.3V1.2ZM0 8.3h6.5v6.3L0 13.7V8.3Zm7.3 0H16V16l-8.7-1.2V8.3Z"/></svg>
+        <div class="platform-text"><h3>Windows</h3><p>Coming soon. We'll send one email when it's ready.</p></div>
+        <form class="capsule" id="waitlist" novalidate>
+          <label class="visually-hidden" for="wlEmail">Email</label>
+          <input id="wlEmail" name="email" type="email" autocomplete="email" placeholder="you@example.com" required>
+          <input class="visually-hidden" name="website" tabindex="-1" autocomplete="off" aria-hidden="true">
+          <button class="btn btn-ink btn-sm" type="submit">Join waitlist</button>
+        </form>
+      </div>
+      <p class="form-note" id="wlNote" role="status"></p>
+    </div>
+  </section>
+
+  <!-- Questions -->
+  <section class="faq band-grey" id="faq">
+    <div class="wrap faq-wrap">
+      <h2 class="title">Questions</h2>
+      <div class="faq-list">
+        <details><summary>Is it really free?</summary><p>Yes. Everything that runs on your Mac is free during the beta and stays free after it. Pro, later, adds cloud features like meeting summaries.</p></details>
+        <details><summary>Does it need the internet?</summary><p>Only to download Echotype and its models the first time. After that, dictation works offline.</p></details>
+        <details><summary>Which apps does it work in?</summary><p>Any app with a text field: Mail, Slack, Notes, Messages, Google Docs in your browser, code editors, terminals. Text goes wherever your cursor is.</p></details>
+        <details><summary>Does it work on Intel Macs?</summary><p>No. Echotype runs its speech and cleanup models on the Mac itself, and that needs Apple silicon: any Mac with an M1 chip or later.</p></details>
+        <details><summary>What happens to my recordings?</summary><p>They stay on your Mac. History keeps recent dictations so you can re-run them, and meeting audio is deleted automatically after the time you choose. Nothing is uploaded.</p></details>
+        <details><summary>When is Windows coming?</summary><p>We're working on it. Join the waitlist above and we'll send you one email when it's ready.</p></details>
+      </div>
+    </div>
+  </section>
+
+  <!-- Last word -->
+  <section class="closing band-white">
+    <div class="wrap narrow center">
+      <img src="/assets/icon.png" alt="" width="96" height="96" class="closing-icon">
+      <h2 class="title">Ready when you are.</h2>
+      <a class="btn btn-ink" href="https://github.com/Rohilalala/echotype/releases/latest"><svg class="apple" viewBox="0 0 14 17" aria-hidden="true"><path d="M11.6 9c0-2 1.6-2.9 1.7-3a3.7 3.7 0 0 0-2.9-1.6c-1.2-.1-2.4.7-3 .7-.6 0-1.6-.7-2.6-.7A3.9 3.9 0 0 0 1.5 6.4c-1.4 2.4-.4 6 1 8 .7 1 1.5 2 2.5 2 1 0 1.4-.6 2.6-.6s1.5.6 2.6.6c1 0 1.7-1 2.4-2 .8-1.1 1.1-2.2 1.1-2.3 0 0-2.1-.8-2.1-3.1ZM9.6 3.1c.6-.7.9-1.6.8-2.5-.8 0-1.7.5-2.3 1.2-.5.6-1 1.5-.8 2.4.9 0 1.7-.5 2.3-1.1Z"/></svg>Download for Mac</a>
+      <p class="fine">Free while in beta. For Macs with Apple silicon.</p>
+    </div>
+  </section>
+</main>
+
+<footer class="footer band-white">
+  <div class="wrap">
+    <div class="foot-cols">
+      <div><h4>Echotype</h4><a href="#how">How it works</a><a href="#features">Features</a><a href="#pricing">Pricing</a></div>
+      <div><h4>Get it</h4><a href="#download">Download for Mac</a><a href="#windows">Windows waitlist</a></div>
+      <div><h4>Trust</h4><a href="#privacy">Privacy</a><a href="#faq">Questions</a></div>
+    </div>
+    <div class="foot-legal"><span>© 2026 Echotype</span><span>Made for people who think out loud.</span></div>
+    <p class="wordmark" aria-hidden="true">Echotype</p>
+  </div>
+</footer>
+</body>
+</html>
