@@ -180,7 +180,12 @@ fn transcript(path: &str, text: &str, secs: f32, format: &str) -> R<(Vec<u8>, &'
 pub fn write_transcript(s: &Settings, path: &str, text: &str, secs: f32) -> R<PathBuf> {
     let (body, ext) = transcript(path, text, secs, &s.watch_format)?;
     let dir = Path::new(path).parent().ok_or("No folder")?;
-    write_free(&if s.watch_subfolder { dir.join(SUBFOLDER) } else { dir.to_path_buf() }, &stem(path), ext, &body)
+    let out = if s.watch_subfolder { dir.join(SUBFOLDER) } else { dir.to_path_buf() };
+    // A shared watched folder could hold a Transcripts symlink pointing anywhere: don't follow it.
+    if s.watch_subfolder && std::fs::symlink_metadata(&out).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(format!("{} is a link to another folder, so transcripts aren't saved there", out.display()));
+    }
+    write_free(&out, &stem(path), ext, &body)
 }
 
 fn emit(app: &AppHandle, v: serde_json::Value) {
@@ -409,6 +414,18 @@ mod tests {
         assert_eq!(write_transcript(&s, &path, "Hello there.", 2.0).unwrap(), dir.join("Transcripts").join("call.srt"));
         assert_eq!(std::fs::read(&rec).unwrap(), b"audio", "the recording is untouched");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_linked_transcripts_folder_is_not_followed() {
+        let (dir, elsewhere) = (temp("link"), temp("link-target"));
+        let rec = dir.join("call.m4a");
+        std::fs::write(&rec, b"audio").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dir.join("Transcripts")).unwrap();
+        let s = Settings { watch_subfolder: true, ..Default::default() };
+        assert!(write_transcript(&s, &rec.to_string_lossy(), "Hello.", 1.0).is_err());
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+        let _ = (std::fs::remove_dir_all(&dir), std::fs::remove_dir_all(&elsewhere));
     }
 
     /// Real model: `say` voices a clip into a temp folder, which is then watched end to end.
