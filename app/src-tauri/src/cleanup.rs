@@ -1703,6 +1703,39 @@ mod tests {
         assert!(COMMAND_PROMPT.contains("<text>") && COMMAND_PROMPT.contains("<instruction>") && COMMAND_PROMPT.contains("Output only"));
     }
 
+    /// One llama-server, two models: a long cleanup is answering when an edit asks for Echotype
+    /// Writer. The swap must wait for the cleanup instead of killing it. Needs Echotype Tiny and
+    /// Echotype Writer downloaded: `cargo test --release -- --ignored --nocapture a_swap_waits`.
+    #[test]
+    #[ignore]
+    fn a_swap_waits_for_the_request_in_flight() {
+        assert!(llm::writer_installed(), "Echotype Writer is not downloaded");
+        let mut s = Settings::default();
+        s.cleanup.enabled = true;
+        s.cleanup.provider = "echotype".into();
+        let long = "um okay so for the launch update uh the release moved from Wednesday to Friday because the \
+            payment team found a bug in the refund flow, and they need two more days to test it properly. \
+            so what that means for us is the blog post goes out Friday morning instead, the email to the beta \
+            users goes out at noon, and um the app store screenshots still need the new pricing, which Maya \
+            said she would send by Thursday evening. also we should probably tell support before the email \
+            goes out so they are not surprised by the questions, and I think Sam wanted to record a short \
+            video walking through the new onboarding, so if anyone has notes on that send them to him today.";
+        let t = Instant::now();
+        let cleaner = {
+            let s = s.clone();
+            std::thread::spawn(move || (chat(&s, &system_prompt(&s), &long, Duration::from_secs(120)), t.elapsed()))
+        };
+        std::thread::sleep(Duration::from_millis(300)); // the cleaner is starting or answering by now
+        let asked = t.elapsed();
+        let edit = chat(&s, COMMAND_PROMPT, &command_input(Some("see u tmrw"), "make it formal"), Duration::from_secs(120));
+        let (cleaned, took) = cleaner.join().unwrap();
+        eprintln!("edit asked at {asked:?}, cleanup took {took:?}");
+        assert!(took > asked, "the cleanup ended before the edit asked, so this proved nothing");
+        assert!(cleaned.is_ok(), "the swap killed the cleanup: {cleaned:?}");
+        assert!(edit.is_ok_and(|e| !e.is_empty()));
+        llm::stop();
+    }
+
     /// Command Mode the way the app runs it, minus the keyboard: a spoken instruction (a wav per
     /// case) through the app's own transcription, then the edit through chat() with the built-in
     /// provider, so Echotype Writer. ECHOTYPE_TEST_WAVS=<dir with formal.wav, shorter.wav, spanish.wav,
