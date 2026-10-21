@@ -278,6 +278,26 @@ fn mac_paste_target() -> Target {
     }
 }
 
+/// The app in front (macOS), so learn.rs reads back only the app it pasted into.
+pub fn front_pid() -> Option<i32> {
+    #[cfg(target_os = "macos")]
+    return mac::front_pid();
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
+/// The text of app `pid`'s focused field while that app is still in front (learn.rs). None for a
+/// password field, a field over `max` characters, or focus that isn't text.
+pub fn focused_text(pid: i32, max: usize) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    return (mac::front_pid() == Some(pid)).then(|| mac::focused_text(pid, max)).flatten();
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (pid, max);
+        None
+    }
+}
+
 /// The trackpad's alignment click (macOS), as when a dragged object snaps into place.
 pub fn snap_feedback() {
     #[cfg(target_os = "macos")]
@@ -424,6 +444,7 @@ pub fn request(kind: &str) {
 mod mac {
     use core_foundation::base::{CFType, CFTypeRef, TCFType};
     use core_foundation::boolean::CFBoolean;
+    use core_foundation::number::CFNumber;
     use core_foundation::string::CFString;
     use std::ffi::{c_char, c_void};
 
@@ -473,7 +494,7 @@ mod mac {
     }
 
     /// [[NSWorkspace sharedWorkspace] frontmostApplication].processIdentifier, None without AppKit.
-    fn front_pid() -> Option<i32> {
+    pub fn front_pid() -> Option<i32> {
         // SAFETY: objc_msgSend cast to each signature: two methods returning objects, one returning
         // pid_t; a nil receiver answers nil/0, and a missing class is checked.
         unsafe {
@@ -557,6 +578,32 @@ mod mac {
                     && copy("AXValue").is_some_and(|v| v.instance_of::<CFString>());
             }
             Ok(Some(f))
+        }
+    }
+
+    /// See super::focused_text.
+    pub fn focused_text(pid: i32, max: usize) -> Option<String> {
+        let attr = |name: &'static str| CFString::from_static_string(name);
+        // SAFETY: as in focused(): owned results under the create rule, valid out-pointers.
+        unsafe {
+            let app = CFType::wrap_under_create_rule(AXUIElementCreateApplication(pid));
+            AXUIElementSetMessagingTimeout(app.as_CFTypeRef(), 0.25);
+            let copy = |el: &CFType, name: &'static str| {
+                let mut v: CFTypeRef = std::ptr::null();
+                (AXUIElementCopyAttributeValue(el.as_CFTypeRef(), attr(name).as_CFTypeRef(), &mut v) == 0 && !v.is_null()).then(|| CFType::wrap_under_create_rule(v))
+            };
+            let el = copy(&app, "AXFocusedUIElement")?;
+            let text = |name: &'static str| copy(&el, name).and_then(|v| v.downcast::<CFString>()).map(|s| s.to_string()).unwrap_or_default();
+            if text("AXRole") == "AXSecureTextField" || text("AXSubrole") == "AXSecureTextField" {
+                return None; // a password field is never read
+            }
+            // The length first, so a long document's text is never copied.
+            let len = copy(&el, "AXNumberOfCharacters").and_then(|n| n.downcast::<CFNumber>()).and_then(|n| n.to_i64());
+            if len.is_some_and(|n| n as usize > max) {
+                return None;
+            }
+            let v = copy(&el, "AXValue")?.downcast::<CFString>()?.to_string();
+            (v.chars().count() <= max).then_some(v)
         }
     }
 

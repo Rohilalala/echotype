@@ -5,6 +5,7 @@ mod capture;
 mod cleanup;
 mod cloud;
 mod hotkey;
+mod learn;
 mod llm;
 mod meeting;
 mod music;
@@ -450,6 +451,7 @@ fn show_later(app: &AppHandle, id: u64, locked: bool, after: Duration) {
 /// what can't be transcribed). The error is the state to show.
 fn start_recording(app: &AppHandle, s: &Settings, id: u64) -> Result<Live, DictationState> {
     platform::wake_accessibility(); // ready by the time the words are pasted
+    learn::interrupt(); // the last paste's field is read once more before these words land
     if notices::blocked() {
         return Err(hint("This version of Echotype is retired. Update it in Account to keep dictating.", Some("update")));
     }
@@ -688,6 +690,9 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
                 // Nothing focused takes text (the desktop, a list, Accessibility off): no ⌘V into nowhere.
                 let nowhere = paste && platform::paste_target() == platform::Target::Card;
                 let res = deliver(&app, &s, &out.text, paste, nowhere);
+                if res.is_ok() && paste && !nowhere && rerun.is_none() && s.learn_words {
+                    learn::watch(&app, out.text.clone());
+                }
                 // After the paste, not before: the disk writes took 15-20 ms off the time to text.
                 if rerun.is_none() {
                     record_stats(&app, &s, stats::Source::Dictation, &out.text, speaking_ms); // a re-run's words were counted once

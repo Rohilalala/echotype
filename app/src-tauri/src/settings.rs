@@ -53,6 +53,13 @@ pub struct Settings {
     pub cleanup: Cleanup,
     pub dictionary: Vec<String>,
     pub replacements: Vec<Replacement>,
+    /// "Learn words from my corrections": a while after a paste, the field is read back and the
+    /// names the user re-spelled are offered for the Dictionary (learn.rs). On for upgraders too.
+    pub learn_words: bool,
+    /// Words a correction taught, waiting for Keep or Undo. None is used until it is kept.
+    pub learned: Vec<String>,
+    /// Words removed from the Dictionary or undone from `learned`: never suggested again.
+    pub ignored_words: Vec<String>,
     pub restore_clipboard: bool,
     pub history_enabled: bool,
     /// Spoken "new line", "new paragraph", "bullet point" and "scratch that" act as commands in a
@@ -294,6 +301,9 @@ impl Default for Settings {
             cleanup: Cleanup::default(),
             dictionary: vec![],
             replacements: vec![],
+            learn_words: true,
+            learned: vec![],
+            ignored_words: vec![],
             restore_clipboard: true,
             history_enabled: true,
             voice_commands: true,

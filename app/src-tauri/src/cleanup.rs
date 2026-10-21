@@ -193,32 +193,44 @@ pub fn chat(s: &Settings, system: &str, text: &str, timeout: Duration) -> Result
     parse_reply(&v).ok_or_else(|| "its response had no message content".to_string())
 }
 
-/// Case-insensitive, whole-word (or whole-phrase) replacements.
+/// Case-insensitive, whole-word (or whole-phrase) replacements in one pass: the longest phrase
+/// wins where two start at the same word, and a replacement's own text is never replaced again.
+/// The text comes out exactly as the user typed it.
 pub fn apply_replacements(text: &str, reps: &[Replacement]) -> String {
-    let mut out = text.to_string();
-    for r in reps.iter().filter(|r| !r.from.trim().is_empty()) {
-        out = replace_word(&out, r.from.trim(), &r.to);
+    let mut reps: Vec<(Vec<char>, &str)> = reps.iter().map(|r| (r.from.trim().chars().collect(), r.to.as_str())).filter(|(f, _): &(Vec<char>, _)| !f.is_empty()).collect();
+    reps.sort_by_key(|(f, _)| std::cmp::Reverse(f.len()));
+    let t: Vec<char> = text.chars().collect();
+    let (mut out, mut i) = (String::new(), 0);
+    while i < t.len() {
+        match reps.iter().find(|(f, _)| word_at(&t, i, f)) {
+            Some((f, to)) => {
+                out.push_str(to);
+                i += f.len();
+            }
+            None => {
+                out.push(t[i]);
+                i += 1;
+            }
+        }
     }
     out
 }
 
-fn replace_word(text: &str, from: &str, to: &str) -> String {
-    replace_word_by(text, from, |_, _| Some(to.to_string()))
+/// `f` is at `t[i..]` as a whole word or phrase, in any case.
+fn word_at(t: &[char], i: usize, f: &[char]) -> bool {
+    let eq = |a: char, b: char| a == b || a.to_lowercase().eq(b.to_lowercase());
+    let boundary = |i: Option<&char>| i.is_none_or(|c| !c.is_alphanumeric());
+    i + f.len() <= t.len() && t[i..i + f.len()].iter().zip(f).all(|(a, b)| eq(*a, *b)) && boundary(if i == 0 { None } else { t.get(i - 1) }) && boundary(t.get(i + f.len()))
 }
 
-/// replace_word with the replacement chosen per hit from the matched text and what follows it
-/// (None keeps the hit as it was).
+/// Replaces `from` as a whole word, the replacement chosen per hit from the matched text and
+/// what follows it (None keeps the hit as it was).
 fn replace_word_by(text: &str, from: &str, to: impl Fn(&[char], &[char]) -> Option<String>) -> String {
     let t: Vec<char> = text.chars().collect();
     let f: Vec<char> = from.chars().collect();
-    let eq = |a: char, b: char| a == b || a.to_lowercase().eq(b.to_lowercase());
-    let boundary = |i: Option<&char>| i.is_none_or(|c| !c.is_alphanumeric());
     let (mut out, mut i) = (String::new(), 0);
     while i < t.len() {
-        let hit = i + f.len() <= t.len()
-            && t[i..i + f.len()].iter().zip(&f).all(|(a, b)| eq(*a, *b))
-            && boundary(if i == 0 { None } else { t.get(i - 1) })
-            && boundary(t.get(i + f.len()));
+        let hit = word_at(&t, i, &f);
         if let Some(r) = hit.then(|| to(&t[i..i + f.len()], &t[i + f.len()..])).flatten() {
             out.push_str(&r);
             i += f.len();
@@ -256,7 +268,7 @@ pub fn needs_cleanup(s: &Settings, text: &str) -> bool {
     s.dictionary.iter().map(|d| d.trim().to_lowercase()).any(|d| w.iter().copied().chain(bigrams.iter().map(String::as_str)).any(|x| near(x, &d)))
 }
 
-fn levenshtein(a: &str, b: &str) -> usize {
+pub(crate) fn levenshtein(a: &str, b: &str) -> usize {
     let b: Vec<char> = b.chars().collect();
     let mut row: Vec<usize> = (0..=b.len()).collect();
     for (i, ca) in a.chars().enumerate() {
@@ -863,6 +875,18 @@ mod tests {
         assert_eq!(apply_replacements("myemail stays", &reps), "myemail stays");
         assert_eq!(apply_replacements("Ünïcode ok", &[Replacement { from: "ünïcode".into(), to: "U".into() }]), "U ok");
         assert_eq!(apply_replacements("x", &[Replacement::default()]), "x");
+    }
+
+    #[test]
+    fn the_longest_replacement_wins_and_keeps_its_capitals() {
+        let r = |from: &str, to: &str| Replacement { from: from.into(), to: to.into() };
+        let reps = [r("new york", "NY"), r("new york city", "NYC"), r("our nav", "Arnav")];
+        assert_eq!(apply_replacements("New York City and new york", &reps), "NYC and NY");
+        assert_eq!(apply_replacements("ask OUR NAV", &reps), "ask Arnav", "written as typed, whatever was heard");
+        // A replacement's text is not replaced again.
+        let chain = [r("my email", "me@example.com"), r("me", "Aditya")];
+        assert_eq!(apply_replacements("send me my email", &chain), "send Aditya me@example.com");
+        assert_eq!(apply_replacements("zoxo day", &[r("  zoxo day ", "Xoxoday")]), "Xoxoday", "trimmed");
     }
 
     #[test]

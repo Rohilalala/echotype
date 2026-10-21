@@ -304,6 +304,7 @@ const ACTIONS = {
   automatic: ['Switch to automatic', () => { S.advanced = false; syncBound(); save(); changed('advanced'); }],
   settings: ['Open Settings', () => go('settings')],
   update: ['Update', () => { go('account'); checkUpdate(); }],
+  dictionary: ['Review', () => go('dictionary')],
 };
 const actionBtn = kind => ACTIONS[kind] && h('button', { className: 'btn', type: 'button', onclick: ACTIONS[kind][1] }, ACTIONS[kind][0]);
 let muted = false;
@@ -1039,10 +1040,10 @@ function renderLangNote() {
 
 // ---------- dictionary ----------
 // Placeholders only: what a snippet can be. Nothing is filled in for the user.
-const SNIPPET_EXAMPLES = [['my email address', 'you@example.com'], ['my phone number', '+91 98765 43210'], ['my home address', 'Street, city, postcode'], ['my sign-off', 'Thanks, talk soon']];
+const SNIPPET_EXAMPLES = [['my email address', 'you@example.com'], ['my sign-off', 'Thanks, talk soon'], ['what it hears', 'what you meant'], ['my phone number', '+91 98765 43210']];
 function renderDict() {
   $('#chips').replaceChildren(...S.dictionary.map((w, i) =>
-    h('span', { className: 'chip' }, w, h('button', { type: 'button', 'aria-label': `Remove ${w}`, onclick: () => { S.dictionary.splice(i, 1); save(); renderDict(); $('#newWord').focus(); } }, svg(CROSS)))));
+    h('span', { className: 'chip' }, w, h('button', { type: 'button', 'aria-label': `Remove ${w}`, onclick: () => { S.ignored_words.push(...S.dictionary.splice(i, 1)); save(); renderDict(); $('#newWord').focus(); } }, svg(CROSS))))); // removed: never suggested again
   $('#reps').replaceChildren(...S.replacements.map((r, i) => {
     const field = (k, label) => h('input', { type: 'text', value: r[k], 'aria-label': label, spellcheck: false, placeholder: SNIPPET_EXAMPLES[i % SNIPPET_EXAMPLES.length][k === 'from' ? 0 : 1], oninput: e => { S.replacements[i][k] = e.target.value; saveSoon(); } }); // S, not r: a save's echo replaces S without re-rendering
     return h('div', { className: 'row rep' }, field('from', 'When you say'), field('to', 'Type'),
@@ -1052,7 +1053,11 @@ function renderDict() {
 $('#addWord').addEventListener('submit', e => {
   e.preventDefault();
   const w = $('#newWord').value.trim();
-  if (w && !S.dictionary.some(x => x.toLowerCase() === w.toLowerCase())) { S.dictionary.push(w); save(); renderDict(); }
+  if (w && !S.dictionary.some(x => x.toLowerCase() === w.toLowerCase())) {
+    S.dictionary.push(w);
+    S.ignored_words = S.ignored_words.filter(x => x.toLowerCase() !== w.toLowerCase());
+    save(); renderDict();
+  }
   $('#newWord').value = '';
 });
 $('#addRep').addEventListener('click', () => {
@@ -1444,6 +1449,7 @@ function renderNotice() {
   const box = $('#sideNotice');
   const n = (notices.notices || []).find(x => !S.dismissed.includes(`notice:${x.id}`));
   $('#retired').hidden = !notices.blocked;
+  if (S.learned.length) return learnedNotice(box);
   box.hidden = !n;
   if (!n) return box.replaceChildren();
   box.replaceChildren(
@@ -1451,6 +1457,24 @@ function renderNotice() {
     h('b', {}, n.title),
     n.body && h('p', {}, n.body),
     n.action_label && n.action && h('button', { className: 'btn', type: 'button', onclick: () => noticeAction(n.action) }, n.action_label));
+}
+// Words learn.rs picked up from the user's own corrections: kept into the Dictionary or, on Undo,
+// never offered again. Shown before any app.json notice.
+function learnedNotice(box) {
+  const w = S.learned, one = w.length === 1;
+  const done = keep => {
+    if (keep) S.dictionary.push(...w.filter(x => !S.dictionary.some(d => d.toLowerCase() === x.toLowerCase())));
+    else S.ignored_words.push(...w);
+    S.learned = [];
+    save(); renderDict(); renderNotice();
+  };
+  box.hidden = false;
+  box.replaceChildren(
+    h('b', {}, `Echotype learned ${one ? 'a word' : `${w.length} words`}`),
+    h('p', {}, `${w.join(', ')}. Keep ${one ? 'it' : 'them'}?`),
+    h('div', { className: 'notice-btns' },
+      h('button', { className: 'btn', type: 'button', onclick: () => done(true) }, 'Keep'),
+      h('button', { className: 'btn quiet', type: 'button', onclick: () => done(false) }, 'Undo')));
 }
 // "update", "page:<page>" or an https link; anything else does nothing.
 function noticeAction(a) {
@@ -2286,6 +2310,8 @@ if (!isMac) for (const w = document.createTreeWalker(document.body, NodeFilter.S
 if (isMac && !preview) document.documentElement.dataset.vibrant = '';
 S.dictionary ??= [];
 S.replacements ??= [];
+S.learned ??= [];
+S.ignored_words ??= [];
 S.dismissed ??= [];
 base = clone(S);
 recent = await invoke('get_history', { limit: 3 }).catch(() => []);
@@ -2342,6 +2368,7 @@ function renderAll() {
   renderLanguages();
   renderDict();
   renderAdvanced();
+  renderNotice();
 }
 
 bindAll();

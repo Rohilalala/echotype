@@ -199,9 +199,13 @@
           <button class="btn" type="submit">Add</button>
         </form>
       </div>
+      <div class="group" id="learnWords">
+        <label class="row"><span class="row-text"><span class="row-title">Learn words from my corrections</span><span class="row-desc">When you fix a name Echotype got wrong just after it pastes, it offers to add your spelling here. It reads back only the box it pasted into, never a password field, and adds nothing until you keep it.</span></span>
+          <input type="checkbox" class="switch" data-bind="learn_words" /></label>
+      </div>
 
       <h2 class="group-title">Snippets</h2>
-      <p class="lede small">Your own shortcuts: say the phrase on the left and Echotype types the text on the right. Your email, phone number, address, a sign-off, anything. Matches whole words in any case.</p>
+      <p class="lede small">Say the phrase on the left and Echotype types the text on the right, exactly as you wrote it. Your email, a sign-off, or a word it keeps mishearing (“our nav” → “Arnav”). Matches whole words in any case; the longest phrase wins.</p>
       <div class="group">
         <div class="rep-head" aria-hidden="true"><span>When you say</span><span>Type</span><span></span></div>
         <div id="reps"></div>

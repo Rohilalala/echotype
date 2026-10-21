@@ -160,6 +160,8 @@ nav .nav-foot { margin-top: auto; }
 .side-notice p { margin: 2px 0 0; color: var(--fg-2); }
 .side-notice .btn { margin-top: 8px; }
 .side-notice .notice-x { position: absolute; top: 6px; right: 6px; }
+.side-notice .notice-btns { display: flex; gap: 6px; }
+#learnWords { margin-top: 12px; }
 .retired { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 16px; background: color-mix(in srgb, var(--pane) 82%, transparent); backdrop-filter: blur(8px); }
 .retired[hidden] { display: none; }
 .retired-card { max-width: 360px; padding: 24px; border-radius: var(--r-card); background: var(--pane); border: 1px solid var(--line-strong); text-align: center; }

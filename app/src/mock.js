@@ -13,7 +13,9 @@ const settings = {
   cleanup: { enabled: !q.has('nocleanup'), provider: 'ollama', model: 'gemma3:4b', base_url: '', style: 'default', custom_instructions: '',
     match_app: q.has('apps'), app_styles: q.has('apps') ? [{ id: 'com.apple.Terminal', name: 'Terminal', style: '' }, { id: 'com.google.Chrome', name: 'Google Chrome', style: 'casual' }] : [] },
   dictionary: ['Echotype', 'Tauri', 'Hinglish', 'Supabase'],
-  replacements: [{ from: 'my email', to: 'aditya@example.com' }],
+  replacements: [{ from: 'my email', to: 'aditya@example.com' }, { from: 'our nav', to: 'Arnav' }],
+  // ?learned previews the notice for words picked up from corrections (learn.rs).
+  learn_words: true, learned: q.has('learned') ? ['Midhun', 'Xoxoday'] : [], ignored_words: [],
   restore_clipboard: true, history_enabled: true, voice_commands: true,
   usage_stats: !q.has('statsoff'), share_telemetry: q.has('telemetry'), display_name: q.get('name') || '',
   onboarded: !q.has('onboarding'), onboard_step: 0,
