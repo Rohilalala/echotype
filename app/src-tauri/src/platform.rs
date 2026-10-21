@@ -706,6 +706,7 @@ mod tests {
         assert_eq!(paste_target(), Target::Paste);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn installed_apps_are_named_by_bundle_id_in_name_order() {
         let apps = installed_apps();
