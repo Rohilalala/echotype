@@ -770,7 +770,7 @@ fn command_ready(s: &Settings, command: bool) -> Result<(), DictationState> {
         return Err(hint("Command Mode needs Accessibility to read your selection", Some("accessibility")));
     }
     match cleanup::command_blocked(s, cleanup::keyless(s)) {
-        Some(why) => Err(hint(why, Some("cleanup"))),
+        Some(why) => Err(hint(why, Some(if s.cleanup.provider == "echotype" { "writer" } else { "cleanup" }))),
         None => Ok(()),
     }
 }
@@ -829,6 +829,11 @@ fn run_command(app: &AppHandle, s: &Settings, pcm: &[f32]) -> DictationState {
         Err(e) => return DictationState { action: Some("cleanup"), ..error(format!("Command failed: {provider}: {}. Your text is unchanged.", e.lines().next().unwrap_or_default().trim_end_matches('.'))) },
     };
     *lock(&state(app).last_output) = Some(text.clone());
+    if llm::wanted(s) {
+        // The edit swapped Echotype Writer in; have the cleaner back before the next dictation.
+        let s = s.clone();
+        std::thread::spawn(move || llm::apply(&s));
+    }
     match deliver(app, s, &text, paste, nowhere) {
         Ok(()) => DictationState { state: "done", text: Some(text), copied: !paste, ..Default::default() },
         Err((e, true)) => {
@@ -1360,6 +1365,8 @@ struct SystemInfo {
     echotype_model_mb: u64,
     /// The Echotype cleaners with their RAM, for the Cleanup page's picker (advanced settings).
     cleaners: Vec<llm::CleanerStatus>,
+    /// Echotype Writer, for the Models page (Command Mode with the built-in provider).
+    writer: llm::CleanerStatus,
     /// 8 GB or less: Automatic picks the light setup.
     low_ram: bool,
     /// Echotype Cloud is in this build (settings::CLOUD).
@@ -1380,6 +1387,7 @@ async fn get_system_info(app: AppHandle) -> R<SystemInfo> {
         echotype_model_installed,
         echotype_model_mb,
         cleaners: llm::cleaners(total),
+        writer: llm::writer(total),
         low_ram: stt::low_ram(total),
         cloud: settings::CLOUD,
     })
