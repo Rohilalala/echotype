@@ -914,6 +914,11 @@ pub fn recording() -> bool {
     lock(&LIVE).as_ref().is_some_and(|l| l.capture.is_some())
 }
 
+/// The recording meeting's id.
+pub fn recording_id() -> Option<String> {
+    lock(&LIVE).as_ref().filter(|l| l.capture.is_some()).map(|l| l.id.clone())
+}
+
 /// "Start notes · Zoom call" while a detected call is on offer (calls.rs).
 pub fn menu_label() -> String {
     match crate::calls::offered_title() {
@@ -941,7 +946,7 @@ fn emit(app: &AppHandle, id: &str, state: &str) {
 pub fn toggle(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
-        let res = if recording() { stop(&app) } else { start(&app, crate::calls::offered_title()).map(|_| ()) };
+        let res = if recording() { stop(&app) } else { crate::calls::start_offered(&app) };
         if let Err(e) = res {
             crate::emit_state(&app, crate::DictationState { state: "error", error: Some(e), ..Default::default() });
         }

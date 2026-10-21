@@ -179,7 +179,7 @@ $L/bin/llama-quantize out/echotype-clean-f16.gguf \
 
 Start meeting notes from the menu bar, the pill's right-click menu or the **Meetings** page. Your microphone is labelled **You**; everyone else is heard through the computer's audio and told apart as Speaker 1, Speaker 2 and so on, which you can rename. The transcript appears as people talk, a few seconds after each pause. With Echotype Pro, a finished meeting can be summarised on request, with decisions and action items. Copy or save any meeting as Markdown or text.
 
-When Zoom, Teams, Google Meet, a Slack huddle, FaceTime or another call app starts using the microphone, Echotype offers to take notes; it only checks which app has the microphone (and a browser's window title), never listens, and records nothing until you click Start. When that call ends it asks to stop them, or stops them by itself if you choose so under Settings → Meetings (macOS 14.2 or later).
+When Zoom, Teams, Google Meet, a Slack huddle, FaceTime or another call app starts using the microphone, Echotype offers to take notes; it only checks which app has the microphone (and a browser's window title) and never listens. Under Settings → Meetings each app can instead always start notes, which the pill says when it does, or never be offered. When the call ends, notes it started (or you started from its offer) stop by themselves, unless you turn that off; notes you start yourself are never stopped (macOS 14.2 or later).
 
 Let everyone know before you start. Everything runs on this Mac: the audio of each meeting is kept in Echotype's app data folder under `meetings/`, and delete removes it.
 

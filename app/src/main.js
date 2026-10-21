@@ -128,6 +128,7 @@ function changed(p) {
   if (p === 'pill_idle' || p === 'show_in') renderPill();
   if (p === 'pill_size' || p === 'ball_size') sizePreview();
   if (p === 'sounds') $('#soundPackRow').hidden = !S.sounds;
+  if (p === 'detect_meetings') renderStartup();
   if (p === 'greetings' || p === 'display_name') renderGreeting();
   if (p === 'sound_pack') invoke('preview_sounds', { pack: S.sound_pack }).catch(() => {}); // hear it as you pick it
   if (p === 'advanced' || p === 'cleaner_memory') { renderAdvanced(); renderStt(); fillRemote('cleanup'); renderLangNote(); renderHero(); }
@@ -1239,6 +1240,7 @@ function renderStartup() {
   $('#talkRow').hidden = $('#obTalkRow').hidden = !isMac; // talk keys are macOS-only; sounds play everywhere
   $('#pillTitle').hidden = $('#pillGroup').hidden = !isMac; // so is the idle pill
   $('#meetingsTitle').hidden = $('#meetingsGroup').hidden = !isMac; // and call detection (calls.rs)
+  $('#callAppsTitle').hidden = $('#callAppsGroup').hidden = $('#autoStopRow').hidden = !isMac || !S.detect_meetings;
   $('#preferBuiltinRow').hidden = $('#pauseMusicRow').hidden = !isMac; // and both (audio.rs pick_input, music.rs)
 }
 

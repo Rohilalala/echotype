@@ -363,15 +363,32 @@
 
       <h2 class="group-title" id="meetingsTitle">Meetings</h2>
       <div class="group" id="meetingsGroup">
-        <label class="row"><span class="row-text"><span class="row-title">Detect calls</span><span class="row-desc">When Zoom, Teams, Google Meet or another call app starts using the microphone, Echotype offers to take notes. It only checks which app is using the microphone and the browser's window title. It never listens, and nothing is recorded until you click Start.</span></span>
+        <label class="row"><span class="row-text"><span class="row-title">Detect calls</span><span class="row-desc">When Zoom, Teams, Google Meet or another call app starts using the microphone, Echotype offers to take notes. It only checks which app is using the microphone and the browser's window title. It never listens, and records nothing unless you start notes or set an app to Always start.</span></span>
           <input type="checkbox" class="switch" data-bind="detect_meetings" /></label>
-        <div class="row"><span class="row-text"><span class="row-title" id="meetingEndLabel">When the call ends</span><span class="row-desc">For notes started during a detected call. A call has ended 20 seconds after its app stops using the microphone and speakers.</span></span>
-          <span class="seg" role="radiogroup" aria-labelledby="meetingEndLabel">
-            <label><input type="radio" name="meeting_end" value="ask" data-bind="meeting_end" /><span>Ask</span></label>
-            <label><input type="radio" name="meeting_end" value="auto" data-bind="meeting_end" /><span>Stop notes</span></label>
-          </span></div>
+        <label class="row" id="autoStopRow"><span class="row-text"><span class="row-title">Stop notes when the call ends</span><span class="row-desc">For notes started by a call or its offer, 45 seconds after the call app stops using the microphone and speakers. Off, Echotype asks. Notes you start yourself are never stopped.</span></span>
+          <input type="checkbox" class="switch" data-bind="meeting_auto_stop" /></label>
         <label class="row"><span class="row-text"><span class="row-title">Keep meeting audio</span><span class="row-desc">Older recordings are deleted to save space. Transcripts and notes stay.</span></span>
           <select data-bind="meeting_audio_days" data-num><option value="7">7 days</option><option value="30">30 days</option><option value="0">Forever</option></select></label>
+      </div>
+
+      <h2 class="group-title" id="callAppsTitle">When a call starts</h2>
+      <div class="group" id="callAppsGroup">
+        <label class="row"><span class="row-text"><span class="row-title">Google Meet</span><span class="row-desc">In a browser, while the Meet tab is in front.</span></span>
+          <select data-bind="call_start.meet"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">Microsoft Teams</span><span class="row-desc">The app, or Teams in a browser.</span></span>
+          <select data-bind="call_start.teams"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">Zoom</span><span class="row-desc">The app, or Zoom in a browser.</span></span>
+          <select data-bind="call_start.zoom"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">Slack huddles</span></span>
+          <select data-bind="call_start.slack"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">FaceTime</span></span>
+          <select data-bind="call_start.facetime"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">Webex</span></span>
+          <select data-bind="call_start.webex"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">Discord</span></span>
+          <select data-bind="call_start.discord"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
+        <label class="row"><span class="row-text"><span class="row-title">Other calls</span><span class="row-desc">WhatsApp, Skype, Signal, Telegram and the like, and any other browser tab using the microphone.</span></span>
+          <select data-bind="call_start.other"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
       </div>
 
       <h2 class="group-title">Appearance</h2>
