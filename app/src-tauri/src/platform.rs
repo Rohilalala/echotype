@@ -30,7 +30,7 @@ pub fn paste(app: &AppHandle, text: &str, restore: bool) -> Result<(), (String, 
     let (tx, rx) = std::sync::mpsc::channel();
     // Keyboard-layout lookups (TIS) must run on the macOS main thread.
     app.run_on_main_thread(move || {
-        let _ = tx.send(send_paste_keys());
+        let _ = tx.send(send_command_key('v'));
     })
     .map_err(|e| (e.to_string(), true))?;
     rx.recv().map_err(|e| (e.to_string(), true))?.map_err(|e| (format!("{e}. The text is on your clipboard"), true))?;
@@ -40,6 +40,41 @@ pub fn paste(app: &AppHandle, text: &str, restore: bool) -> Result<(), (String, 
     }
     // ponytail: restores text only; an image on the clipboard is replaced by the transcript. Handy's image path is the upgrade.
     Ok(())
+}
+
+/// The text selected in the app in front, read with ⌘C; the clipboard is put back afterwards.
+/// None when nothing is selected (the app copied nothing). Needs Accessibility, like paste.
+// ponytail: some editors (VS Code, JetBrains) copy the whole line on ⌘C with no selection, so that
+// line is edited; read AXSelectedText first if that surprises people. Text only, like paste().
+pub fn copy_selection(app: &AppHandle) -> Result<Option<String>, String> {
+    let mut slot = clipboard()?;
+    let cb = slot.as_mut().expect("set by clipboard()");
+    let saved = cb.get_text().ok();
+    // Cleared first, so "nothing selected" is an empty clipboard, not what was copied before.
+    cb.clear().map_err(|e| format!("Clipboard write failed: {e}"))?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let _ = tx.send(send_command_key('c'));
+    })
+    .map_err(|e| e.to_string())?;
+    let sent = rx.recv().map_err(|e| e.to_string()).and_then(|r| r);
+    // Apps write the pasteboard in their own time: give the copy up to 300 ms to land.
+    let mut got = None;
+    for _ in 0..15 {
+        if sent.is_err() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        got = cb.get_text().ok().filter(|t| !t.is_empty());
+        if got.is_some() {
+            break;
+        }
+    }
+    let _ = match saved {
+        Some(prev) => set_private(cb, &prev),
+        None => cb.clear(),
+    };
+    sent.map(|()| got)
 }
 
 /// Waits (up to `max`) until Control, Option and Shift are up, so a ⌘V sent now is not ⌘⌃V.
@@ -123,11 +158,13 @@ pub fn paste_tool() -> Option<&'static str> {
     ["wtype", "ydotool"].into_iter().find(|t| wayland() && on_path(t))
 }
 
-/// Ctrl+V through wtype or ydotool. Without either, the text stays on the clipboard and the card says so.
-fn wayland_paste() -> Result<(), String> {
+/// Ctrl+V (or Ctrl+C) through wtype or ydotool. Without either, the text stays on the clipboard and the card says so.
+fn wayland_key(key: char) -> Result<(), String> {
     let tool = paste_tool().ok_or("On Wayland, Echotype needs wtype or ydotool to paste")?;
-    // ydotool takes Linux input event codes: 29 Left Ctrl, 47 V; :1 press, :0 release.
-    let args: &[&str] = if tool == "wtype" { &["-M", "ctrl", "-k", "v", "-m", "ctrl"] } else { &["key", "29:1", "47:1", "47:0", "29:0"] };
+    // ydotool takes Linux input event codes: 29 Left Ctrl, 47 V, 46 C; :1 press, :0 release.
+    let (k, code) = if key == 'c' { ("c", 46) } else { ("v", 47) };
+    let (down, up) = (format!("{code}:1"), format!("{code}:0"));
+    let args: Vec<&str> = if tool == "wtype" { vec!["-M", "ctrl", "-k", k, "-m", "ctrl"] } else { vec!["key", "29:1", &down, &up, "29:0"] };
     match std::process::Command::new(tool).args(args).output() {
         Ok(o) if o.status.success() => Ok(()),
         Ok(o) => Err(format!("{tool} could not paste: {}", String::from_utf8_lossy(&o.stderr).trim())),
@@ -135,19 +172,20 @@ fn wayland_paste() -> Result<(), String> {
     }
 }
 
-fn send_paste_keys() -> Result<(), String> {
+/// ⌘ (Ctrl elsewhere) plus `key` ('v' or 'c'), as the user's keyboard layout types it.
+fn send_command_key(key: char) -> Result<(), String> {
     if wayland() {
-        return wayland_paste();
+        return wayland_key(key);
     }
     use enigo::{Direction, Enigo, Key, Keyboard, Settings};
     let mut e = Enigo::new(&Settings::default()).map_err(|e| format!("Keyboard injection unavailable: {e}"))?;
     #[cfg(target_os = "macos")]
-    let (modifier, v) = (Key::Meta, Key::Other(mac::command_v_keycode() as u32));
+    let (modifier, v) = (Key::Meta, Key::Other(mac::command_keycode(key) as u32));
     #[cfg(target_os = "windows")]
-    let (modifier, v) = (Key::Control, Key::Other(0x56)); // VK_V
+    let (modifier, v) = (Key::Control, Key::Other(key.to_ascii_uppercase() as u32)); // VK_V, VK_C
     #[cfg(target_os = "linux")]
-    let (modifier, v) = (Key::Control, Key::Unicode('v'));
-    let err = |e: enigo::InputError| format!("Paste keystroke failed: {e}");
+    let (modifier, v) = (Key::Control, Key::Unicode(key));
+    let err = |e: enigo::InputError| format!("Keystroke failed: {e}");
     e.key(modifier, Direction::Press).map_err(err)?;
     let clicked = e.key(v, Direction::Click).map_err(err);
     std::thread::sleep(Duration::from_millis(100));
@@ -195,6 +233,13 @@ fn unsure(f: &Focused) -> bool {
 }
 /// kAXErrorAPIDisabled: Accessibility is off for Echotype.
 pub const AX_DISABLED: i32 = -25211;
+
+/// Asks the frontmost app to build its accessibility tree (Electron and Chromium apps), so the
+/// paste check can see its text box. Call when a recording starts.
+pub fn wake_accessibility() {
+    #[cfg(target_os = "macos")]
+    mac::wake_accessibility();
+}
 
 /// The paste decision. `focus`: Ok(None) when nothing has focus, Err(AXError) when the API
 /// could not tell, in which case Echotype pastes as it always has. Without Accessibility there
@@ -299,6 +344,33 @@ pub fn frontmost_app(app: &AppHandle) -> Option<FrontApp> {
 }
 
 /// `tccutil reset <service> <bundle id>`.
+/// Apps a style can be picked for without dictating into them first: the bundles in the
+/// Applications folders, by name. Other platforms: none, so the list grows by dictating.
+pub fn installed_apps() -> Vec<FrontApp> {
+    #[cfg(target_os = "macos")]
+    {
+        use core_foundation::{bundle::CFBundle, string::CFString, url::CFURL};
+        let home = dirs::home_dir().unwrap_or_default().join("Applications");
+        let roots = ["/Applications", "/Applications/Utilities", "/System/Applications", "/System/Applications/Utilities"].map(std::path::PathBuf::from).into_iter().chain([home]);
+        let mut apps: Vec<FrontApp> = roots
+            .filter_map(|d| std::fs::read_dir(d).ok())
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "app"))
+            .filter_map(|p| {
+                let info = CFBundle::new(CFURL::from_path(&p, true)?)?.info_dictionary();
+                let id = info.find(&CFString::from_static_string("CFBundleIdentifier"))?.downcast::<CFString>()?.to_string();
+                Some(FrontApp { id, name: p.file_stem()?.to_string_lossy().into() })
+            })
+            .collect();
+        apps.sort_by_key(|a| a.name.to_lowercase());
+        apps
+    }
+    #[cfg(not(target_os = "macos"))]
+    Vec::new()
+}
+
 fn tcc_reset_args<'a>(service: &'a str, bundle_id: &'a str) -> [&'a str; 3] {
     ["reset", service, bundle_id]
 }
@@ -375,13 +447,64 @@ mod mac {
     #[link(name = "ApplicationServices", kind = "framework")]
     unsafe extern "C" {
         fn AXUIElementCreateSystemWide() -> CFTypeRef;
+        fn AXUIElementCreateApplication(pid: i32) -> CFTypeRef;
         fn AXUIElementSetMessagingTimeout(el: CFTypeRef, seconds: f32) -> i32;
         fn AXUIElementCopyAttributeValue(el: CFTypeRef, attr: CFTypeRef, out: *mut CFTypeRef) -> i32;
         fn AXUIElementIsAttributeSettable(el: CFTypeRef, attr: CFTypeRef, out: *mut u8) -> i32;
+        fn AXUIElementSetAttributeValue(el: CFTypeRef, attr: CFTypeRef, value: CFTypeRef) -> i32;
     }
 
     /// kAXErrorNoValue: nothing is focused.
     const AX_NO_VALUE: i32 = -25212;
+    /// kAXErrorCannotComplete: "can't tell", which pastes as Echotype always has.
+    const AX_CANNOT_TELL: i32 = -25204;
+
+    /// The app with keyboard focus (system-wide AXFocusedApplication), owned. Chrome can leave
+    /// that question unanswered (-25204) while answering on its own element, so the frontmost
+    /// app stands in.
+    unsafe fn focused_app(sys: &CFType) -> Option<CFType> {
+        let mut out: CFTypeRef = std::ptr::null();
+        // SAFETY: as in focused(): an owned result under the create rule, a valid out-pointer.
+        unsafe {
+            (AXUIElementCopyAttributeValue(sys.as_CFTypeRef(), CFString::from_static_string("AXFocusedApplication").as_CFTypeRef(), &mut out) == 0 && !out.is_null())
+                .then(|| CFType::wrap_under_create_rule(out))
+                .or_else(|| front_pid().map(|pid| CFType::wrap_under_create_rule(AXUIElementCreateApplication(pid))))
+        }
+    }
+
+    /// [[NSWorkspace sharedWorkspace] frontmostApplication].processIdentifier, None without AppKit.
+    fn front_pid() -> Option<i32> {
+        // SAFETY: objc_msgSend cast to each signature: two methods returning objects, one returning
+        // pid_t; a nil receiver answers nil/0, and a missing class is checked.
+        unsafe {
+            let cls = objc_getClass(c"NSWorkspace".as_ptr());
+            if cls.is_null() {
+                return None;
+            }
+            let get: extern "C" fn(*const c_void, *const c_void) -> *const c_void = std::mem::transmute(objc_msgSend as *const ());
+            let app = get(get(cls, sel_registerName(c"sharedWorkspace".as_ptr())), sel_registerName(c"frontmostApplication".as_ptr()));
+            if app.is_null() {
+                return None;
+            }
+            let pid: extern "C" fn(*const c_void, *const c_void) -> i32 = std::mem::transmute(objc_msgSend as *const ());
+            Some(pid(app, sel_registerName(c"processIdentifier".as_ptr()))).filter(|p| *p > 0)
+        }
+    }
+
+    /// Chromium and Electron apps (VS Code, Slack, Chrome, Claude...) keep their accessibility tree
+    /// off until something asks: until then they report no focused element, and Echotype took
+    /// their text boxes for nowhere to paste. AXManualAccessibility turns the tree on; it takes about
+    /// a second to build, so this runs when a recording starts. Harmless for other apps.
+    pub fn wake_accessibility() {
+        // SAFETY: owned CF objects kept alive across the calls; the value is a static CFBoolean.
+        unsafe {
+            let sys = CFType::wrap_under_create_rule(AXUIElementCreateSystemWide());
+            AXUIElementSetMessagingTimeout(sys.as_CFTypeRef(), 0.25);
+            if let Some(app) = focused_app(&sys) {
+                AXUIElementSetAttributeValue(app.as_CFTypeRef(), CFString::from_static_string("AXManualAccessibility").as_CFTypeRef(), core_foundation::boolean::CFBoolean::true_value().as_CFTypeRef());
+            }
+        }
+    }
 
     /// The focused element system-wide, or the AXError that stopped the question. A hung app
     /// answers within 250 ms or counts as "can't tell".
@@ -393,12 +516,26 @@ mod mac {
             let sys = CFType::wrap_under_create_rule(AXUIElementCreateSystemWide());
             AXUIElementSetMessagingTimeout(sys.as_CFTypeRef(), 0.25);
             let mut out: CFTypeRef = std::ptr::null();
-            match AXUIElementCopyAttributeValue(sys.as_CFTypeRef(), attr("AXFocusedUIElement").as_CFTypeRef(), &mut out) {
-                0 if !out.is_null() => {}
-                0 | AX_NO_VALUE => return Ok(None),
+            let el = match AXUIElementCopyAttributeValue(sys.as_CFTypeRef(), attr("AXFocusedUIElement").as_CFTypeRef(), &mut out) {
+                0 if !out.is_null() => CFType::wrap_under_create_rule(out),
+                0 | AX_NO_VALUE => {
+                    // Electron apps answer only on their own element (and system-wide stays empty
+                    // even with their tree on): ask the focused app. One with a window but no answer
+                    // can't tell; no app or no window is nowhere to paste.
+                    let Some(app) = focused_app(&sys) else { return Ok(None) };
+                    AXUIElementSetMessagingTimeout(app.as_CFTypeRef(), 0.25);
+                    let ask = |name: &'static str| {
+                        let mut v: CFTypeRef = std::ptr::null();
+                        (AXUIElementCopyAttributeValue(app.as_CFTypeRef(), attr(name).as_CFTypeRef(), &mut v) == 0 && !v.is_null()).then(|| CFType::wrap_under_create_rule(v))
+                    };
+                    match ask("AXFocusedUIElement") {
+                        Some(el) => el,
+                        None if ask("AXFocusedWindow").is_some() => return Err(AX_CANNOT_TELL),
+                        None => return Ok(None),
+                    }
+                }
                 e => return Err(e),
-            }
-            let el = CFType::wrap_under_create_rule(out);
+            };
             let copy = |name: &'static str| {
                 let mut v: CFTypeRef = std::ptr::null();
                 (AXUIElementCopyAttributeValue(el.as_CFTypeRef(), attr(name).as_CFTypeRef(), &mut v) == 0 && !v.is_null()).then(|| CFType::wrap_under_create_rule(v))
@@ -575,27 +712,26 @@ mod mac {
         }
     }
 
-    const ANSI_V: u16 = 9;
-
-    /// Must run on the main thread.
-    pub fn command_v_keycode() -> u16 {
+    /// The keycode for ⌘`key` ('v' or 'c'). Must run on the main thread.
+    pub fn command_keycode(key: char) -> u16 {
+        let ansi = if key == 'c' { 8 } else { 9 }; // ANSI C and V
         // SAFETY: the input source is retained until CFRelease below; layout bytes live as long as it does;
         // all out-pointers are valid locals of the declared sizes.
         unsafe {
             let src = TISCopyCurrentKeyboardLayoutInputSource();
             if src.is_null() {
-                return ANSI_V;
+                return ansi;
             }
             let data = TISGetInputSourceProperty(src, kTISPropertyUnicodeKeyLayoutData);
             let layout = if data.is_null() { std::ptr::null() } else { CFDataGetBytePtr(data) };
-            let mut found = ANSI_V;
+            let mut found = ansi;
             if !layout.is_null() {
                 let kbd = LMGetKbdType() as u32;
                 for code in 0..128u16 {
                     let (mut dead, mut len, mut out) = (0u32, 0usize, [0u16; 4]);
                     // Modifier state 1 = Command (Carbon cmdKey >> 8): non-Latin layouts map Cmd shortcuts to ANSI keys.
                     let st = UCKeyTranslate(layout, code, 3, 1, kbd, 1, &mut dead, out.len(), &mut len, out.as_mut_ptr());
-                    if st == 0 && len == 1 && out[0] == b'v' as u16 {
+                    if st == 0 && len == 1 && out[0] == key as u16 {
                         found = code;
                         break;
                     }
@@ -613,6 +749,29 @@ mod tests {
 
     fn el(role: &str) -> Focused {
         Focused { role: role.into(), ..Default::default() }
+    }
+
+    #[cfg(target_os = "macos")]
+    /// The app in front (run from a terminal in VS Code: an Electron app) after its tree is woken:
+    /// `cargo test -- --ignored --nocapture electron_focus`. Needs Accessibility for the terminal.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn electron_focus_is_seen_once_woken() {
+        let before = mac::focused();
+        wake_accessibility();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let after = mac::focused();
+        eprintln!("before: {before:?}\nafter: {after:?}\ntarget: {:?}", paste_target());
+        assert_eq!(paste_target(), Target::Paste);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn installed_apps_are_named_by_bundle_id_in_name_order() {
+        let apps = installed_apps();
+        assert!(apps.iter().any(|a| a.id == "com.apple.TextEdit" && a.name == "TextEdit"), "TextEdit ships with macOS");
+        assert!(apps.windows(2).all(|w| w[0].name.to_lowercase() <= w[1].name.to_lowercase()));
     }
 
     #[test]

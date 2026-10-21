@@ -20,19 +20,48 @@ pub struct Cleaner {
     pub label: &'static str,
     pub file: &'static str,
     pub size_mb: u64,
+    pub sha256: &'static str,
+    /// One line for the Models page.
+    pub note: &'static str,
 }
 
-/// The Echotype cleanup models. A smaller one (a 0.5B) slots in with an entry here and its
-/// measured row in stt::RAM_MB; Automatic gives low-memory Macs the smallest one installed.
+/// The Echotype cleanup models (Qwen2.5 Instruct fine-tunes, Apache-2.0), from the 2026-10-16
+/// distillation: on 12,198 real clips they add 0.31 (Tiny) and 0.51 (Medium) points of WER over raw
+/// whisper, against 5.23 for the first 1.5B they replace. Automatic uses Tiny, the first.
 pub const CLEANERS: &[Cleaner] = &[
-    // Q4_K_M of the fine-tuned Qwen2.5-1.5B: same exact-match score as the MLX 4-bit build on
-    // model/eval/handwritten.jsonl (70.7%), ~100 ms a dictation on Apple silicon.
-    Cleaner { id: "echotype-clean", label: "Echotype 1.5B", file: "echotype-clean-q4_k_m.gguf", size_mb: 940 },
+    Cleaner { id: "echotype-tiny", label: "Echotype Tiny", file: "echotype-tiny-q5_k_m.gguf", size_mb: 401, sha256: "5b6faf7e64f41d34569413409bc0628e4c48d2893ad95ace9b51192b6bee2be9", note: "0.5B. Light and quick; best for English." },
+    Cleaner { id: "echotype-medium", label: "Echotype Medium", file: "echotype-medium-q4_k_m.gguf", size_mb: 940, sha256: "944fa5a9221b7a1c0e8b8617392df071ef57323a64dc3e99f5a563e02ace6f37", note: "1.5B. Catches more; uses about twice the memory." },
 ];
-// ponytail: not downloadable yet. Once the GGUF is published at a pinned Hugging Face revision
-// (like stt::HF_COMMIT), add its URL and fetch it with stt::fetch(url, &model_path(c), sha256, ..)
-// the way stt::download does; the 1.5B's SHA-256 is
-// 95481186c2dc0197833e3c4e5759c09f30a29f172c4035b3602666651a73b798
+
+/// Where the cleaner files are served from: the echotype-models Cloudflare R2 bucket (uploaded with
+/// app/scripts/r2-put.sh, beside Qwen's LICENSE and a NOTICE), `{DOWNLOAD_URL}/{file}`.
+// ponytail: the bucket's r2.dev address, which Cloudflare rate-limits; a custom domain for launch.
+pub const DOWNLOAD_URL: Option<&str> = Some("https://pub-da62fbe34de644598313554b0a5ccc51.r2.dev");
+
+pub fn find(id: &str) -> Option<&'static Cleaner> {
+    CLEANERS.iter().find(|c| c.id == id)
+}
+
+/// Downloads cleaner `id`, kept only if its SHA-256 matches.
+pub fn download(id: &str, progress: impl FnMut(u64, Option<u64>)) -> Result<(), String> {
+    let c = find(id).ok_or_else(|| format!("Unknown cleanup model '{id}'"))?;
+    let base = DOWNLOAD_URL.ok_or("Downloads of the Echotype models are coming soon.")?;
+    stt::fetch(&format!("{}/{}", base.trim_end_matches('/'), c.file), &model_path(c), c.sha256, progress)
+}
+
+/// Deletes cleaner `id`'s file, stopping the server first if it is running on it.
+pub fn delete(id: &str) -> Result<(), String> {
+    let c = find(id).ok_or_else(|| format!("Unknown cleanup model '{id}'"))?;
+    if !installed(c) {
+        return Err(format!("{} is not downloaded", c.label));
+    }
+    let mut g = SERVER.lock().unwrap_or_else(|e| e.into_inner());
+    if g.as_ref().is_some_and(|s| s.opts.model == model_path(c)) {
+        *g = None;
+    }
+    drop(g);
+    std::fs::remove_file(model_path(c)).map_err(|e| e.to_string())
+}
 
 /// Tokens of context the cleaner is served with (prompt, transcript and answer together):
 /// cleanup::cleanup splits longer dictations to fit. Advanced settings can change it.
@@ -47,12 +76,11 @@ fn installed(c: &Cleaner) -> bool {
     model_path(c).is_file()
 }
 
-/// The cleaner Automatic uses on a Mac with this much memory: the 1.5B, or on a low-memory Mac
-/// the smallest one; the closest installed one until that is installed.
-fn auto_cleaner(total_mb: u64, installed: impl Fn(&str) -> bool) -> &'static Cleaner {
-    let by_ram = |c: &&Cleaner| stt::ram_of(c.id);
-    let want = if stt::low_ram(total_mb) { CLEANERS.iter().min_by_key(by_ram) } else { CLEANERS.iter().max_by_key(by_ram) };
-    let want = want.expect("CLEANERS is not empty").id;
+/// The cleaner Automatic uses: Echotype Tiny on every Mac (71 of 100 benchmark dictations exact
+/// against Medium's 74, at half the size and twice the speed); the closest installed one until
+/// Tiny is, so a Mac with only Medium keeps cleaning up.
+fn auto_cleaner(installed: impl Fn(&str) -> bool) -> &'static Cleaner {
+    let want = CLEANERS[0].id;
     let id = stt::closest(CLEANERS.iter().map(|c| c.id), want, installed).unwrap_or(want);
     CLEANERS.iter().find(|c| c.id == id).expect("an id from CLEANERS")
 }
@@ -60,7 +88,7 @@ fn auto_cleaner(total_mb: u64, installed: impl Fn(&str) -> bool) -> &'static Cle
 /// The cleaner these settings use: the manual pick (`cleanup.model`) with advanced settings on, else Automatic's.
 pub fn cleaner(s: &Settings) -> &'static Cleaner {
     let manual = CLEANERS.iter().find(|c| s.advanced && c.id == s.cleanup.model);
-    manual.unwrap_or_else(|| auto_cleaner(stt::ram_mb().0, |id| CLEANERS.iter().any(|c| c.id == id && installed(c))))
+    manual.unwrap_or_else(|| auto_cleaner(|id| CLEANERS.iter().any(|c| c.id == id && installed(c))))
 }
 
 /// "save" (macOS may page the mapped model out under pressure) or "ready" (locked in RAM):
@@ -89,25 +117,34 @@ fn idle(s: &Settings) -> Option<Duration> {
 pub struct CleanerStatus {
     pub id: &'static str,
     pub label: &'static str,
+    pub note: &'static str,
+    /// Whether it can be downloaded yet (DOWNLOAD_URL is set).
+    pub downloadable: bool,
     pub size_mb: u64,
     pub ram_mb: u64,
     pub installed: bool,
+    /// What Automatic uses now.
     pub automatic: bool,
+    /// What Automatic wants (Tiny), installed or not.
+    pub recommended: bool,
     pub warning: Option<String>,
 }
 
 /// Every cleaner for the Cleanup page, with the same RAM labels and warnings as the speech models.
 pub fn cleaners(total_mb: u64) -> Vec<CleanerStatus> {
-    let auto = auto_cleaner(total_mb, |id| CLEANERS.iter().any(|c| c.id == id && installed(c)));
+    let auto = auto_cleaner(|id| CLEANERS.iter().any(|c| c.id == id && installed(c)));
     CLEANERS
         .iter()
         .map(|c| CleanerStatus {
             id: c.id,
             label: c.label,
+            note: c.note,
+            downloadable: DOWNLOAD_URL.is_some(),
             size_mb: model_path(c).metadata().ok().filter(|m| m.is_file()).map_or(c.size_mb, |m| m.len() / 1_048_576),
             ram_mb: stt::ram_of(c.id),
             installed: installed(c),
             automatic: c.id == auto.id,
+            recommended: c.id == CLEANERS[0].id,
             warning: stt::ram_warning(stt::ram_of(c.id), stt::ram_of(auto.id), total_mb),
         })
         .collect()
@@ -233,8 +270,11 @@ fn reap_when_idle() {
 /// or is not running, it answers one short request with the same system prompt (llama-server
 /// keeps that prefix cached), so it is warm by the time the speech is transcribed.
 pub fn prewarm(s: &Settings) {
-    if !(s.cleanup.enabled && s.cleanup.provider == "echotype") {
+    if !s.cleanup.enabled {
         return;
+    }
+    if s.cleanup.provider != "echotype" {
+        return prewarm_local_server(s);
     }
     let cold = SERVER.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_none_or(|v| v.last_used.elapsed() >= Duration::from_secs(20));
     if cold {
@@ -243,6 +283,27 @@ pub fn prewarm(s: &Settings) {
             let _ = crate::cleanup::chat(&s, &crate::cleanup::system_prompt(&s), "Okay.", Duration::from_secs(20));
         });
     }
+}
+
+/// Ollama and LM Studio unload an idle model (Ollama after 5 minutes), and the first cleanup after
+/// that waited on loading it: 7.1 s for gemma4:e4b against 244 ms warm. When a recording starts
+/// after a minute or more without one, a short request loads it while the user talks. API
+/// providers are never pinged: that would cost the user money.
+fn prewarm_local_server(s: &Settings) {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    let local = crate::settings::preset(&s.cleanup.provider).is_some_and(|p| !p.needs_key && p.id != "custom");
+    if !local || s.cleanup.model.trim().is_empty() {
+        return;
+    }
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if last.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+        return;
+    }
+    *last = Some(Instant::now());
+    let s = s.clone();
+    std::thread::spawn(move || {
+        let _ = crate::cleanup::chat(&s, &crate::cleanup::system_prompt(&s), "Okay.", Duration::from_secs(60));
+    });
 }
 
 /// After a cleanup: counts as use, so "Unload when idle" waits from the end of a long request.
@@ -423,18 +484,23 @@ mod tests {
 
     #[test]
     fn automatic_cleaner_memory_and_context_follow_the_mac() {
-        assert_eq!(auto_cleaner(8192, |_| true).id, "echotype-clean", "the smallest one (the only one so far)");
-        assert_eq!(auto_cleaner(24_576, |_| false).id, "echotype-clean");
+        assert_eq!(auto_cleaner(|_| true).id, "echotype-tiny", "Tiny on every Mac");
+        assert_eq!(auto_cleaner(|_| false).id, "echotype-tiny", "and to download when none is");
+        assert_eq!(auto_cleaner(|id| id == "echotype-medium").id, "echotype-medium", "a Medium-only Mac keeps Medium until Tiny is in");
+        let mut s = Settings { advanced: true, ..Default::default() };
+        s.cleanup.model = "echotype-medium".into();
+        assert_eq!(cleaner(&s).id, "echotype-medium", "a hand-picked Medium stays");
         let mut s = Settings { cleaner_memory: "save".into(), cleaner_context: 4096, cleaner_idle_unload: true, cleaner_idle_minutes: 1, ..Default::default() };
         assert_eq!(context(&s), CONTEXT, "advanced off: the one constant");
         assert_eq!(idle(&s), None);
         s.advanced = true;
         assert_eq!((memory(&s), context(&s)), ("save", 4096));
         assert_eq!(idle(&s), Some(Duration::from_secs(300)), "at least 5 minutes, longer than any request");
-        s.cleanup.model = "not-a-cleaner".into();
-        assert_eq!(cleaner(&s).id, "echotype-clean");
+        s.cleanup.model = "echotype-clean".into(); // the first 1.5B, no longer offered
+        assert!(find(cleaner(&s).id).is_some(), "an unknown pick falls back to Automatic's");
         let st = cleaners(8192);
-        assert!(st.iter().all(|c| c.ram_mb > 0 && c.warning.is_none()), "one cleaner: nothing larger to warn about");
+        assert!(st.iter().all(|c| c.ram_mb > 0));
+        assert!(st.iter().find(|c| c.id == "echotype-medium").unwrap().warning.is_some(), "Medium on an 8 GB Mac");
     }
 
     #[test]
@@ -470,7 +536,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let (model, bin) = (dir.join(CLEANERS[0].file), dir.join("llama-server"));
         let err = preflight(Some(&bin), &model, 1113, 64_000).unwrap_err();
-        assert!(err.starts_with("The Echotype model isn't installed. Put echotype-clean-q4_k_m.gguf in "), "{err}");
+        assert!(err.starts_with(&format!("The Echotype model isn't installed. Put {} in ", CLEANERS[0].file)), "{err}");
         std::fs::write(&model, b"x").unwrap();
         assert!(preflight(None, &model, 1113, 64_000).unwrap_err().contains("runner (llama-server) is missing"));
         let err = preflight(Some(&bin), &model, 1113, 1000).unwrap_err();
@@ -571,5 +637,21 @@ mod tests {
         assert_ne!(first, second);
         stop();
         assert!(!kill("-0", second), "stop() ended the server");
+    }
+
+    /// The real download from the bucket into a scratch data folder: URL, SHA-256 and file name.
+    /// `cargo test -- --ignored downloads_a_cleaner` (401 MB).
+    #[test]
+    #[ignore]
+    fn downloads_a_cleaner_from_the_bucket() {
+        let dir = std::env::temp_dir().join(format!("echotype-dl-test-{}", std::process::id()));
+        // SAFETY: an ignored test run on its own; nothing else reads the environment meanwhile.
+        unsafe { std::env::set_var("ECHOTYPE_CONFIG_DIR", &dir) };
+        let mut seen = 0;
+        download("echotype-tiny", |d, _| seen = d).unwrap();
+        let c = find("echotype-tiny").unwrap();
+        assert!(installed(c) && model_path(c).starts_with(&dir), "{}", model_path(c).display());
+        assert_eq!(seen, 420_086_208);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

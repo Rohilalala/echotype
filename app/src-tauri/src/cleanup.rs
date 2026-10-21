@@ -155,7 +155,13 @@ pub fn chat(s: &Settings, system: &str, text: &str, timeout: Duration) -> Result
     } else {
         (settings::base_url(&c.provider, &c.base_url)?, settings::provider_key("llm", &c.provider))
     };
-    let model = if c.model.trim().is_empty() { settings::preset(&c.provider).map(|p| p.default_cleanup_model).unwrap_or_default() } else { c.model.trim() };
+    let preset = settings::preset(&c.provider);
+    // A local server (Ollama, LM Studio) runs whatever the user pulled: never guess a model it may not have.
+    if c.model.trim().is_empty() && c.provider != "echotype" && preset.as_ref().is_some_and(|p| !p.needs_key) {
+        let eg = preset.as_ref().map(|p| p.default_cleanup_model).filter(|m| !m.is_empty()).map(|m| format!(", for example {m}")).unwrap_or_default();
+        return Err(format!("Enter the model to use in Settings → Cleanup{eg}"));
+    }
+    let model = if c.model.trim().is_empty() { preset.map(|p| p.default_cleanup_model).unwrap_or_default() } else { c.model.trim() };
     let client = reqwest::blocking::Client::builder().timeout(timeout).build().map_err(|e| e.to_string())?;
     let send = |off: bool| {
         let mut req = client.post(format!("{base}/chat/completions")).json(&request_body(model, system, text, off));
@@ -321,6 +327,35 @@ pub fn restyle(text: &str, style: &str) -> String {
     out
 }
 
+// ---------- Command Mode: edit the selection by voice ----------
+
+/// System prompt for Command Mode. chat() wraps the message in <transcript>, so the prompt names
+/// the two parts inside it.
+pub const COMMAND_PROMPT: &str = "You edit text on the user's instruction. Inside <transcript> you get the user's selected text in <text> and their spoken instruction in <instruction>. Apply the instruction to the text. If there is no <text>, write what the instruction asks for. Output only the resulting text, ready to paste: no preamble, no explanation, no quotes around it, no code fences.";
+
+/// The message for Command Mode: the selection (if any, and not blank) and the instruction.
+pub fn command_input(selection: Option<&str>, instruction: &str) -> String {
+    let instruction = format!("<instruction>{}</instruction>", instruction.trim());
+    match selection.filter(|t| !t.trim().is_empty()) {
+        Some(t) => format!("<text>{t}</text>\n{instruction}"),
+        None => instruction,
+    }
+}
+
+/// Why Command Mode can't run with this cleanup provider, if it can't. The built-in Echotype
+/// models are trained only to clean dictation and would garble an instruction.
+pub fn command_blocked(s: &Settings, keyless: bool) -> Option<String> {
+    let label = settings::preset(&s.cleanup.provider).map_or(s.cleanup.provider.clone(), |p| p.label.to_string());
+    if s.cleanup.provider == "echotype" {
+        // Cloud is named only in builds that offer it.
+        Some(format!("Command Mode needs a general model: Ollama, LM Studio{}", if settings::CLOUD { ", an API key or Echotype Cloud" } else { " or an API key" }))
+    } else if keyless {
+        Some(format!("Command Mode needs your {label} API key"))
+    } else {
+        None
+    }
+}
+
 // ---------- the pipeline (shared by dictation, file drop, CLI and local API) ----------
 
 #[derive(Serialize, Debug, Clone)]
@@ -481,37 +516,100 @@ pub fn only_filler(text: &str) -> bool {
     text.split(|c: char| !c.is_alphanumeric() && c != '\'').filter(|w| !w.is_empty()).all(|w| FILLER.contains(&w.to_lowercase().as_str()))
 }
 
-/// Spoken "new line" / "new paragraph" become line breaks without the LLM. Whole phrase, any case;
-/// the spaces around it and the punctuation Whisper adds after it ("New line.") are absorbed.
-pub fn spoken_breaks(text: &str) -> String {
+/// Spoken commands in a live dictation, applied here so the cleanup model never sees them:
+/// "new line", "new paragraph", "bullet point" / "next bullet" (a "- " item on its own line) and
+/// "scratch that" (drops the sentence before it). Any case, and only as a clause of its own: at
+/// the start or after . , ; : ! ? or a line break, and followed by one of those or the end, so
+/// "our new line of products" stays words. "Bullet point" may run straight into its item
+/// ("Bullet point eggs."). The punctuation and spaces Whisper puts around a command are absorbed,
+/// and the word after one gets a capital.
+// ponytail: English phrases only; add a language's own when it gets tested.
+pub fn voice_commands(text: &str) -> String {
+    const COMMANDS: [&str; 5] = ["new paragraph", "new line", "bullet point", "next bullet", "scratch that"];
+    const STOPS: &str = ".,;:!?…";
     let t: Vec<char> = text.chars().collect();
-    let boundary = |i: Option<&char>| i.is_none_or(|c| !c.is_alphanumeric());
     let at = |i: usize, p: &str| {
         let p: Vec<char> = p.chars().collect();
-        i + p.len() <= t.len()
-            && t[i..i + p.len()].iter().zip(&p).all(|(a, b)| a.to_lowercase().eq(b.to_lowercase()))
-            && boundary(if i == 0 { None } else { t.get(i - 1) })
-            && boundary(t.get(i + p.len()))
+        i + p.len() <= t.len() && t[i..i + p.len()].iter().zip(&p).all(|(a, b)| a.to_lowercase().eq(b.to_lowercase())) && t.get(i + p.len()).is_none_or(|c| !c.is_alphanumeric())
     };
-    let (mut out, mut i) = (String::new(), 0);
+    let trim_spaces = |s: &mut String| s.truncate(s.trim_end_matches([' ', '\t']).len());
+    let bare_bullet = |s: &str| s == "-" || s.ends_with("\n-");
+    let (mut out, mut i, mut cap) = (String::new(), 0, false);
     while i < t.len() {
-        let hit = [("new paragraph", "\n\n"), ("new line", "\n")].into_iter().find(|(p, _)| at(i, p));
-        let Some((phrase, br)) = hit else {
-            out.push(t[i]);
+        let before = out.trim_end_matches([' ', '\t']);
+        let starts = before.chars().last().is_none_or(|c| c == '\n' || STOPS.contains(c)) || bare_bullet(before);
+        let hit = COMMANDS.into_iter().filter(|_| starts).find(|p| at(i, p)).filter(|p| {
+            let rest = t[i + p.chars().count()..].iter().find(|c| !matches!(c, ' ' | '\t'));
+            *p == "bullet point" || rest.is_none_or(|c| STOPS.contains(*c))
+        });
+        let Some(phrase) = hit else {
+            if cap && t[i].is_alphanumeric() {
+                out.extend(t[i].to_uppercase());
+            } else {
+                out.push(t[i]);
+            }
+            cap &= !t[i].is_alphanumeric();
             i += 1;
             continue;
         };
-        out.truncate(out.trim_end_matches([' ', '\t']).len());
-        out.push_str(br);
+        trim_spaces(&mut out);
+        match phrase {
+            "new paragraph" => out.push_str("\n\n"),
+            "new line" => out.push('\n'),
+            "scratch that" => {
+                // Back to the end of the sentence before the one said last (a stop and a space, as
+                // in pieces(), so "3.5" is no end). An item keeps its "- " for the words that follow.
+                let said = out.trim_end_matches(|c: char| c == ' ' || STOPS.contains(c));
+                let ends = |k: usize, c: char| c == '\n' || (".!?…".contains(c) && said[k + c.len_utf8()..].starts_with(char::is_whitespace));
+                let mut cut = said.char_indices().rfind(|&(k, c)| ends(k, c)).map_or(0, |(k, c)| k + c.len_utf8());
+                if said[cut..].starts_with("- ") {
+                    cut += 2;
+                }
+                out.truncate(cut);
+            }
+            _ if bare_bullet(&out) => out.push(' '),
+            _ if out.is_empty() || out.ends_with('\n') => out.push_str("- "),
+            _ => out.push_str("\n- "),
+        }
         i += phrase.chars().count();
-        while i < t.len() && matches!(t[i], '.' | ',' | ';' | ':' | '!' | '?') {
+        while i < t.len() && STOPS.contains(t[i]) {
             i += 1;
         }
         while i < t.len() && matches!(t[i], ' ' | '\t') {
             i += 1;
         }
+        if i < t.len() && !out.is_empty() && !out.ends_with(['\n', ' ']) {
+            out.push(' '); // what follows a scratched sentence
+        }
+        cap = true;
+    }
+    trim_spaces(&mut out);
+    // A bullet or a scratched item with nothing after it.
+    if bare_bullet(&out) {
+        out.truncate(out.len() - 1);
+        out.truncate(out.trim_end_matches('\n').len());
     }
     out
+}
+
+/// Cleanup one line at a time, once voice commands (or a snippet) put line breaks in the text:
+/// the model then cannot merge, reorder or re-bullet them. A bullet's "- " stays outside the call.
+fn by_line(s: &Settings, text: &str, llm: impl Fn(&Settings, &str) -> Result<String, String>) -> Result<String, String> {
+    let mut out = vec![];
+    for line in text.split('\n') {
+        let (mark, body) = line.strip_prefix("- ").map_or(("", line), |b| ("- ", b));
+        if body.trim().is_empty() {
+            out.push(line.to_string());
+            continue;
+        }
+        let c = llm(s, body)?;
+        // As in cleanup(): a line of filler is rightly nothing; a short answer the model dropped is kept.
+        let c = if c.is_empty() && !only_filler(body) { body.trim().to_string() } else { c };
+        if !c.is_empty() {
+            out.push(format!("{mark}{c}"));
+        }
+    }
+    Ok(out.join("\n"))
 }
 
 /// Whether cleanup is wanted but cannot run because its provider needs a key that is not saved.
@@ -522,7 +620,8 @@ pub fn keyless(s: &Settings) -> bool {
 
 /// STT → replacements → cleanup. Cleanup failure never loses text: the raw (replaced)
 /// transcript is returned with a warning. `on_cleaning` fires before the LLM call. `dictated`:
-/// live dictation, where spoken "new line" is a command; a voice note or API upload keeps its words.
+/// live dictation, where spoken "new line" is a command (Settings: Voice commands); a voice note
+/// or API upload keeps its words.
 pub fn run(s: &Settings, pcm: &[f32], dictated: bool, on_cleaning: impl FnOnce()) -> Result<Output, String> {
     let t = Instant::now();
     let prompt = stt::prompt(&s.dictionary);
@@ -545,14 +644,15 @@ fn after_stt(s: &Settings, raw: String, stt_ms: u64, mut warning: Option<String>
     }
     let raw = stt::collapse_loops(&raw);
     let replaced = apply_replacements(&raw, &s.replacements);
-    let mut text = if dictated { spoken_breaks(&replaced) } else { replaced };
+    let mut text = if dictated && s.voice_commands { voice_commands(&replaced) } else { replaced };
     let (mut cleanup_ms, mut cleaned) = (0, None);
     // "No cleanup": switched off, or on with no key to call the provider. Verbatim is a choice, not raw.
     let no_cleanup = !s.cleanup.enabled || keyless;
     if !keyless && wants_cleanup(s, &text) {
         on_cleaning();
         let t = Instant::now();
-        match llm(s, &text) {
+        let res = if text.contains('\n') { by_line(s, &text, &llm) } else { llm(s, &text) };
+        match res {
             Ok(c) if !c.is_empty() => match rejected(s, &text, &c) {
                 Some(w) => (warning, cleaned) = (Some(w.into()), Some(c)),
                 // The built-in model ignores the style in its prompt (see restyle); others follow it.
@@ -924,29 +1024,86 @@ mod tests {
         stt::unload();
     }
 
+    // Whisper's own punctuation around the commands, as it writes a pause.
     #[test]
-    fn spoken_new_line_and_paragraph_become_breaks() {
-        assert_eq!(spoken_breaks("a new line b"), "a\nb");
-        assert_eq!(spoken_breaks("A. New line. B"), "A.\nB");
-        assert_eq!(spoken_breaks("one new paragraph two"), "one\n\ntwo");
-        assert_eq!(spoken_breaks("New Paragraph, next"), "\n\nnext");
-        assert_eq!(spoken_breaks("renewal linen"), "renewal linen");
-        assert_eq!(spoken_breaks("a newline b"), "a newline b");
-        // Replacements run first (so a replacement can produce the phrase), then the break rule,
-        // and the LLM receives the breaks.
+    fn voice_commands_act_as_their_own_clause() {
+        let said = [
+            ("Hi team. New line. The build is green.", "Hi team.\nThe build is green."),
+            ("Hi team, new line, the build is green.", "Hi team,\nThe build is green."),
+            ("Dear Priya, new paragraph, thanks for the notes.", "Dear Priya,\n\nThanks for the notes."),
+            ("First draft attached. NEW PARAGRAPH. Let me know.", "First draft attached.\n\nLet me know."),
+            ("Thanks. New line... Aditya", "Thanks.\nAditya"),
+            ("New Paragraph, next", "\n\nNext"),
+            ("Sign it off. New line.", "Sign it off.\n"),
+            ("Things to buy. Bullet point eggs. Bullet point milk. Bullet point two loaves of bread.", "Things to buy.\n- Eggs.\n- Milk.\n- Two loaves of bread."),
+            ("Agenda: next bullet, budget. Next bullet, hiring.", "Agenda:\n- Budget.\n- Hiring."),
+            ("Bullet point: call Arnav", "- Call Arnav"),
+            ("Bullet point 12 eggs, bullet point 3 apples", "- 12 eggs,\n- 3 apples"),
+            ("Packing list. Bullet point. Bullet point passport.", "Packing list.\n- Passport."),
+            ("Groceries, bullet point.", "Groceries,"),
+            ("Let's meet Tuesday. Scratch that. Let's meet Thursday.", "Let's meet Thursday."),
+            ("Send it to Priya, scratch that, send it to Arnav.", "Send it to Arnav."),
+            ("Call Priya at five. Then email Arnav, scratch that, then text Arnav.", "Call Priya at five. Then text Arnav."),
+            ("Ship it today! Actually wait. Scratch that.", "Ship it today!"),
+            ("It costs 3.5 dollars, scratch that.", ""),
+            ("Bullet point eggs. Bullet point milk, scratch that, bread.", "- Eggs.\n- Bread."),
+            ("Bullet point eggs. Bullet point milk. Scratch that.", "- Eggs."),
+            ("Hi team. New line. Wrong thing. Scratch that. Right thing.", "Hi team.\nRight thing."),
+            ("Scratch that.", ""),
+        ];
+        for (raw, typed) in said {
+            assert_eq!(voice_commands(raw), typed, "{raw:?}");
+        }
+        // The words in an ordinary sentence, where nobody means a command.
+        for raw in [
+            "We launched a new line of products.",
+            "New line of credit approved.",
+            "The new line manager starts Monday.",
+            "Start a new paragraph when the topic changes.",
+            "Is there a new line?",
+            "Put a bullet point before each item.",
+            "Bullet points are overrated.",
+            "The next bullet train leaves at five.",
+            "Next bullet train leaves at five.",
+            "Don't scratch that, it will scar.",
+            "Scratch that itch later.",
+            "I'll scratch that off the list.",
+            "He said scratch that was a joke.",
+            "renewal linen",
+            "a newline b",
+            "कल मीटिंग नहीं होगी",
+        ] {
+            assert_eq!(voice_commands(raw), raw);
+        }
+    }
+
+    #[test]
+    fn voice_commands_run_before_cleanup_which_then_goes_line_by_line() {
         let mut s = Settings::default();
         s.cleanup.enabled = true;
-        s.replacements = vec![Replacement { from: "next".into(), to: "new line".into() }];
-        let seen = std::cell::RefCell::new(String::new());
-        let out = after_stt(&s, "Hi next there".into(), 1, None, false, true, || {}, |_, t| {
-            *seen.borrow_mut() = t.to_string();
-            Ok(t.to_string())
+        let seen = std::cell::RefCell::new(vec![]);
+        let raw = "Things to buy. Bullet point um eggs. Bullet point milk. Scratch that. Bullet point bread.";
+        let out = after_stt(&s, raw.into(), 1, None, false, true, || {}, |_, t| {
+            seen.borrow_mut().push(t.to_string());
+            Ok(t.replace("Um ", ""))
         });
-        assert_eq!(seen.into_inner(), "Hi\nthere");
-        assert_eq!(out.text, "Hi\nthere");
-        // A voice note or API upload keeps "new line" as words.
-        let file = after_stt(&Settings::default(), "our new line of products".into(), 1, None, false, false, || {}, |_, t| Ok(t.into()));
-        assert_eq!(file.text, "our new line of products");
+        assert_eq!(seen.into_inner(), ["Things to buy.", "Um eggs.", "Bread."], "each line alone, never the bullets or breaks");
+        assert_eq!((out.text.as_str(), out.warning, out.cleaned), ("Things to buy.\n- eggs.\n- Bread.", None, None), "the guard keeps it");
+        assert_eq!(out.raw, raw, "History still shows what was heard");
+        // The built-in model answers a line of filler with nothing: the line goes.
+        s.cleanup.provider = "echotype".into();
+        let o = after_stt(&s, "Notes. New line. Um. New line. Ship it.".into(), 1, None, false, true, || {}, |_, t| Ok(if only_filler(t) { String::new() } else { t.into() }));
+        assert_eq!(o.text, "Notes.\nShip it.");
+        // Replacements run first, so a replacement can produce a command.
+        s.cleanup.provider = "ollama".into();
+        s.replacements = vec![Replacement { from: "next".into(), to: "new line".into() }];
+        assert_eq!(post(&s, "Hi. Next. There.").text, "«Hi.»\n«There.»");
+        // Off, or a voice note or API upload: the words stay words, and the model gets them whole.
+        s.replacements.clear();
+        s.voice_commands = false;
+        assert_eq!(post(&s, "Agenda. New line. Budget.").text, "«Agenda. New line. Budget.»");
+        let file = after_stt(&Settings::default(), "Agenda. New line. Budget.".into(), 1, None, false, false, || {}, |_, t| Ok(t.into()));
+        assert_eq!(file.text, "Agenda. New line. Budget.");
     }
 
     #[test]
@@ -964,5 +1121,75 @@ mod tests {
         let failed = after_stt(&s, "hello".into(), 1, None, false, true, || {}, |_, _| Err("401 Unauthorized: bad key\nmore".into()));
         assert!(!failed.no_cleanup && failed.text == "hello");
         assert_eq!(failed.warning.unwrap(), "Cleanup failed: Groq: 401 Unauthorized: bad key. Pasted the raw transcript instead.");
+    }
+
+    #[test]
+    fn command_input_holds_the_selection_and_the_instruction() {
+        assert_eq!(command_input(Some("hey can u send it"), " make this more formal "), "<text>hey can u send it</text>\n<instruction>make this more formal</instruction>");
+        // Nothing selected (or only whitespace): the instruction is the text to write.
+        assert_eq!(command_input(None, "write a polite decline"), "<instruction>write a polite decline</instruction>");
+        assert_eq!(command_input(Some(" \n"), "write a polite decline"), "<instruction>write a polite decline</instruction>");
+        assert!(COMMAND_PROMPT.contains("<text>") && COMMAND_PROMPT.contains("<instruction>") && COMMAND_PROMPT.contains("Output only"));
+    }
+
+    #[test]
+    fn command_mode_needs_a_general_model_with_its_key() {
+        let mut s = Settings::default();
+        s.cleanup.provider = "echotype".into();
+        assert!(command_blocked(&s, false).unwrap().contains("general model"));
+        for p in ["ollama", "lmstudio", "custom", "groq"] {
+            s.cleanup.provider = p.into();
+            assert_eq!(command_blocked(&s, false), None, "{p}");
+        }
+        assert_eq!(command_blocked(&s, true).unwrap(), "Command Mode needs your Groq API key");
+    }
+
+    /// The real instruction prompt through chat() against a local Ollama:
+    /// `ECHOTYPE_TEST_OLLAMA=gemma4:e4b cargo test -- --ignored --nocapture command_mode_with_ollama`.
+    #[test]
+    #[ignore]
+    fn command_mode_with_ollama() {
+        let Ok(model) = std::env::var("ECHOTYPE_TEST_OLLAMA") else { return eprintln!("skipped: no ECHOTYPE_TEST_OLLAMA") };
+        let mut s = Settings::default();
+        s.cleanup.provider = "ollama".into();
+        s.cleanup.model = model;
+        let cases = [
+            (Some("hey can u send me the report by friday thx"), "make this more formal"),
+            (Some("We should probably think about maybe moving the launch to next week because the build is not ready yet and QA has not signed off."), "shorter"),
+            (Some("Where is the train station?"), "translate to Spanish"),
+            (Some("We need milk, eggs, bread and coffee."), "turn into bullet points"),
+            (None, "write a polite decline to a meeting invite"),
+        ];
+        for (sel, instr) in cases {
+            let t = Instant::now();
+            let out = chat(&s, COMMAND_PROMPT, &command_input(sel, instr), Duration::from_secs(60)).unwrap();
+            eprintln!("--- {instr:?} ({} ms)\n{sel:?}\n=> {out}\n", t.elapsed().as_millis());
+            assert!(!out.trim().is_empty() && !out.contains("<text>") && !out.contains("<instruction>"), "{out}");
+        }
+    }
+
+    /// Real local servers through the app's own cleanup path: `ECHOTYPE_TEST_LOCAL` is
+    /// provider=model pairs, comma-separated (ollama=gemma4:e4b,lmstudio=qwen2.5-1.5b-instruct).
+    #[test]
+    #[ignore]
+    fn local_servers_clean_up() {
+        let Ok(spec) = std::env::var("ECHOTYPE_TEST_LOCAL") else { return eprintln!("skipped") };
+        for pair in spec.split(',') {
+            let (provider, model) = pair.split_once('=').unwrap();
+            let mut s = Settings::default();
+            s.cleanup.enabled = true;
+            s.cleanup.provider = provider.into();
+            s.cleanup.model = String::new();
+            let err = cleanup(&s, "um so i think we should uh ship it on friday").unwrap_err();
+            assert!(err.starts_with("Enter the model to use in Settings"), "{provider}, no model: {err}");
+            s.cleanup.model = model.into();
+            // The connection and the app's handling, not the model's quality (printed to compare).
+            for said in ["um so i think we should uh ship it on friday", "send it to priya no wait to arnav by five"] {
+                let t = std::time::Instant::now();
+                let out = cleanup(&s, said).unwrap_or_else(|e| panic!("{provider}: {e}"));
+                eprintln!("{provider} {model} {:>5} ms: {said:?} -> {out:?}", t.elapsed().as_millis());
+                assert!(!out.trim().is_empty(), "{provider}: an answer");
+            }
+        }
     }
 }

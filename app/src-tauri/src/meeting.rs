@@ -15,12 +15,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const RATE: usize = audio::RATE as usize;
-/// A chunk is transcribed once this much audio waits (whisper reads 30 s windows).
+/// Live lines: a chunk is transcribed at the first pause once this much audio waits...
+const MIN_CHUNK_S: usize = 4;
+/// ...or, with no pause, once this much waits (whisper reads 30 s windows).
 const CHUNK_S: usize = 25;
-/// It ends at the quietest 300 ms of its last LOOK_S seconds when that is a pause...
+/// That one ends at the quietest 300 ms of its last LOOK_S seconds when that is a pause...
 const LOOK_S: usize = 8;
 /// ...else hard at CHUNK_S, and the next chunk starts OVERLAP_S earlier; each side keeps the
 /// words whose middle falls on its side of the overlap's midpoint.
@@ -60,6 +62,9 @@ pub struct Meeting {
     pub summary: Option<String>,
     /// Shown above the transcript: mic-only, summary skipped, speaker models missing...
     pub notices: Vec<String>,
+    /// Names heard for speakers still called "Speaker N" (name_hints), offered to the user.
+    #[serde(skip_deserializing, skip_serializing_if = "BTreeMap::is_empty")]
+    pub name_hints: BTreeMap<String, String>,
 }
 
 pub fn default_name(id: &str) -> String {
@@ -72,19 +77,29 @@ pub fn default_name(id: &str) -> String {
 
 // ---------- chunking ----------
 
-/// Where the next chunk of `pcm` (16 kHz) ends and whether it ends in a pause. None until a
-/// chunk's worth is waiting; with `flush`, whatever is left is the last chunk.
+/// Where the next chunk of `pcm` (16 kHz) ends and whether it ends in a pause: at the last pause
+/// after MIN_CHUNK_S, so lines show up as people pause; else once CHUNK_S waits. None until then;
+/// with `flush`, whatever is left is the last chunk.
+// ponytail: each chunk is a whisper call with a 30 s encoder pass, so short chunks cost more GPU
+// (two tracks, a call every few seconds: ~10% of an M5); a final full-audio pass would read better.
 pub fn next_cut(pcm: &[f32], flush: bool) -> Option<(usize, bool)> {
-    if pcm.len() < CHUNK_S * RATE {
-        return (flush && !pcm.is_empty()).then_some((pcm.len(), true));
+    let rest = (flush && !pcm.is_empty()).then_some((pcm.len(), true));
+    if pcm.len() < MIN_CHUNK_S * RATE {
+        return rest;
     }
+    let full = pcm.len() >= CHUNK_S * RATE;
     let win = RATE / 20;
-    let db: Vec<f32> = pcm[..CHUNK_S * RATE].chunks(win).map(audio::dbfs).collect();
+    let db: Vec<f32> = pcm[..pcm.len().min(CHUNK_S * RATE)].chunks(win).map(audio::dbfs).collect();
     let mut sorted = db.clone();
     sorted.sort_by(f32::total_cmp);
     // A pause: within 8 dB of the chunk's quiet floor and 15 dB under its speech.
     let pause = (sorted[sorted.len() / 10] + 8.0).max(-55.0).min(sorted[sorted.len() * 9 / 10] - 15.0);
     let span = 6; // 300 ms
+    if !full {
+        let first = MIN_CHUNK_S * 20 - span / 2;
+        let last = (first..=db.len().saturating_sub(span)).rev().find(|&i| db[i..i + span].iter().all(|&d| d <= pause));
+        return last.map(|i| ((i + span / 2) * win, true)).or(rest);
+    }
     let quietest = ((CHUNK_S - LOOK_S) * 20..=db.len() - span)
         .map(|i| (i, db[i..i + span].iter().copied().fold(f32::MIN, f32::max)))
         .min_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0))); // latest of equals: longer chunks
@@ -469,38 +484,21 @@ impl Session {
 
 // ---------- notes and export ----------
 
-const SUMMARY_PROMPT: &str = "You write meeting notes from a transcript. Use only what the transcript says. Never add facts, names, numbers, dates, decisions or tasks that are not in it, and never guess. If the transcript does not say something, leave it out.
-
-Write Markdown with exactly these three sections and nothing else:
-## Summary
-A few sentences on what was discussed.
-## Decisions
-One bullet per decision the speakers clearly agreed on. If there were none, write \"None recorded.\"
-## Action items
-One bullet per task someone agreed to do. Start with the owner's name only when the transcript says who will do it (\"Priya: send the deck\"). If there were none, write \"None recorded.\"
-
-Speaker names such as \"Speaker 1\" are labels; use them as written. Write in the language of the transcript.";
-
 /// "Speaker: text" lines, what the summary model reads.
 pub fn transcript_lines(m: &Meeting) -> String {
-    m.segments.iter().map(|s| format!("{}: {}", name(m, &s.speaker), s.text)).collect::<Vec<_>>().join("\n")
+    for_notes(m, "")
+}
+
+/// transcript_lines with You under the user's own name (`me`, Settings → display name), so the
+/// notes say "(Aditya) Send the questions" rather than "(You)".
+fn for_notes(m: &Meeting, me: &str) -> String {
+    let me = me.trim();
+    let line = |s: &Segment| format!("{}: {}", if s.speaker == ME && !me.is_empty() { me } else { name(m, &s.speaker) }, s.text);
+    m.segments.iter().map(line).collect::<Vec<_>>().join("\n")
 }
 
 fn name<'a>(m: &'a Meeting, id: &'a str) -> &'a str {
     m.speakers.get(id).map_or(id, String::as_str)
-}
-
-/// Why a finished meeting gets no summary, or None to write one. The Echotype model only knows cleanup.
-fn no_summary_reason(s: &Settings) -> Option<&'static str> {
-    if !s.cleanup.enabled || crate::cleanup::keyless(s) {
-        Some("Set up cleanup to get summaries")
-    } else if s.cleanup.provider == "echotype" && crate::settings::CLOUD {
-        Some("Summaries need a general model, such as Echotype Cloud or Ollama, as the cleanup provider")
-    } else if s.cleanup.provider == "echotype" {
-        Some("Summaries need a general model, such as Ollama or an API key, as the cleanup provider")
-    } else {
-        None
-    }
 }
 
 /// About 12k tokens, roughly 80 minutes of talk; the rest of a longer meeting is not summarised.
@@ -508,9 +506,10 @@ fn no_summary_reason(s: &Settings) -> Option<&'static str> {
 pub const SUMMARY_MAX_CHARS: usize = 48_000;
 
 /// The notes, or None when nobody said anything (the model is then never asked: with nothing to
-/// go on it would only make something up). `llm(system, transcript)`.
-pub fn summarize(m: &Meeting, llm: impl FnOnce(&str, &str) -> Result<String, String>) -> Result<Option<String>, String> {
-    let mut text = transcript_lines(m);
+/// go on it would only make something up). `llm(transcript)`: Echotype Cloud's /v1/summary, which
+/// holds the prompt.
+pub fn summarize(m: &Meeting, me: &str, llm: impl FnOnce(&str) -> Result<String, String>) -> Result<Option<String>, String> {
+    let mut text = for_notes(m, me);
     if !m.segments.iter().any(|s| crate::cleanup::has_speech(&s.text)) {
         return Ok(None);
     }
@@ -521,7 +520,7 @@ pub fn summarize(m: &Meeting, llm: impl FnOnce(&str, &str) -> Result<String, Str
         }
         text.truncate(text[..cut].rfind('\n').unwrap_or(cut));
     }
-    let notes = llm(SUMMARY_PROMPT, &text)?;
+    let notes = llm(&text)?;
     Ok((!notes.trim().is_empty()).then(|| notes.trim().to_string()))
 }
 
@@ -545,6 +544,110 @@ pub fn markdown(m: &Meeting) -> String {
 pub fn plain(m: &Meeting) -> String {
     let lines: Vec<String> = m.segments.iter().map(|s| format!("[{}] {}: {}", clock(s.start), name(m, &s.speaker), s.text)).collect();
     format!("{}\n\n{}\n", m.title, lines.join("\n"))
+}
+
+/// "00:01:02,345" (SRT, `sep` ',') or "00:01:02.345" (WebVTT, '.').
+fn timecode(secs: f32, sep: char) -> String {
+    let ms = (secs.max(0.0) * 1000.0).round() as u64;
+    format!("{:02}:{:02}:{:02}{sep}{:03}", ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000)
+}
+
+/// The transcript as subtitles, one cue a line, "Name: text".
+pub fn srt(m: &Meeting) -> String {
+    let cues: Vec<String> = m.segments.iter().enumerate().map(|(i, s)| format!("{}\n{} --> {}\n{}: {}\n", i + 1, timecode(s.start, ','), timecode(s.end, ','), name(m, &s.speaker), s.text)).collect();
+    cues.join("\n")
+}
+
+/// WebVTT with voice tags, which players and agents read as speakers.
+pub fn vtt(m: &Meeting) -> String {
+    let cues: Vec<String> = m.segments.iter().map(|s| format!("{} --> {}\n<v {}>{}\n", timecode(s.start, '.'), timecode(s.end, '.'), name(m, &s.speaker), s.text)).collect();
+    format!("WEBVTT\n\n{}", cues.join("\n"))
+}
+
+/// Everything an agent needs, speaker names resolved.
+pub fn json(m: &Meeting) -> String {
+    let segments: Vec<_> = m.segments.iter().map(|s| serde_json::json!({ "start": s.start, "end": s.end, "speaker": name(m, &s.speaker), "text": s.text })).collect();
+    let v = serde_json::json!({ "title": m.title, "started_ms": m.started_ms, "duration_s": m.duration_s, "summary": m.summary, "segments": segments });
+    serde_json::to_string_pretty(&v).unwrap_or_default() + "\n"
+}
+
+/// The meeting in `format` (md, txt, json, srt, vtt) and its file extension. Exports are free.
+pub fn export(m: &Meeting, format: &str) -> Result<(String, &'static str), String> {
+    Ok(match format {
+        "md" => (markdown(m), "md"),
+        "txt" => (plain(m), "txt"),
+        "json" => (json(m), "json"),
+        "srt" => (srt(m), "srt"),
+        "vtt" => (vtt(m), "vtt"),
+        other => return Err(format!("Unknown export format '{other}'")),
+    })
+}
+
+// ---------- names ----------
+
+/// Capitalised words that open sentences or follow "I'm" without being anyone's name.
+const NOT_NAMES: &[&str] = &[
+    "I", "So", "Yeah", "Yes", "No", "Okay", "Ok", "Sure", "Sir", "Madam", "Guys", "Everyone", "All", "Team", "Bro", "Dude", "Man", "God", "Sorry", "Fine", "Good",
+    "Great", "Here", "There", "Just", "Not", "Going", "Done", "Back", "Ready", "Also", "Well", "Hello", "Hi", "Hey", "Thanks", "Thank", "Right", "Cool", "Perfect", "The",
+    "This", "That", "It", "We", "You", "He", "She", "They", "My", "Your", "Mr", "Mrs", "Ms", "Dr", "Doctor", "Today", "Monday", "Tuesday", "Wednesday", "Thursday",
+    "Friday", "Saturday", "Sunday", "Again", "Now", "Then", "Sounds", "Exactly", "Absolutely", "Totally", "Really", "Very", "Everybody", "Folks", "Mate", "Boss",
+];
+
+/// A name at words[i]: one capitalised word of letters, not a sentence opener.
+fn name_at(words: &[&str], i: usize) -> Option<String> {
+    let w = words.get(i)?.trim_matches(|c: char| !c.is_alphanumeric());
+    let mut cs = w.chars();
+    let ok = w.len() >= 2 && cs.next().is_some_and(char::is_uppercase) && cs.all(char::is_lowercase) && !NOT_NAMES.contains(&w);
+    ok.then(|| w.to_string())
+}
+
+/// Names for the speakers, from what was said: "I'm Priya" or "my name is Priya" names who said
+/// it; "Thanks, Priya" names the last other voice; "Priya, can you…" the next one. Suggestions
+/// only (the user confirms each), never for You, and each name goes to one speaker.
+// ponytail: English phrasings only; a calendar invite's attendees would catch the rest.
+pub fn name_hints(m: &Meeting) -> BTreeMap<String, String> {
+    let mut votes: BTreeMap<(String, String), u32> = BTreeMap::new();
+    let mut vote = |speaker: Option<&str>, name: Option<String>, w: u32| {
+        if let (Some(sp), Some(n)) = (speaker.filter(|s| *s != ME), name) {
+            *votes.entry((sp.to_string(), n)).or_default() += w;
+        }
+    };
+    let other = |i: usize, back: bool| -> Option<&str> {
+        let me = &m.segments[i].speaker;
+        let found = if back { m.segments[..i].iter().rev().find(|s| &s.speaker != me) } else { m.segments[i + 1..].iter().find(|s| &s.speaker != me) };
+        found.map(|s| s.speaker.as_str())
+    };
+    for (i, seg) in m.segments.iter().enumerate() {
+        let words: Vec<&str> = seg.text.split_whitespace().collect();
+        let low: Vec<String> = words.iter().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'').to_lowercase()).collect();
+        let at = |j: usize, s: &str| low.get(j).is_some_and(|w| w == s);
+        for j in 0..low.len() {
+            if at(j, "i'm") || (at(j, "i") && at(j + 1, "am")) {
+                vote(Some(&seg.speaker), name_at(&words, j + if at(j, "i") { 2 } else { 1 }), 3);
+            }
+            if at(j, "my") && at(j + 1, "name") && at(j + 2, "is") {
+                vote(Some(&seg.speaker), name_at(&words, j + 3), 3);
+            }
+            if at(j, "thanks") || (at(j, "thank") && at(j + 1, "you")) {
+                vote(other(i, true), name_at(&words, j + if at(j, "thanks") { 1 } else { 2 }), 1);
+            }
+        }
+        // "Priya, can you…": a name opening the line, then a comma and a question.
+        let asks = ["can", "could", "what", "how", "do", "would", "will", "are", "did", "is"];
+        if words.first().is_some_and(|w| w.ends_with(',')) && low.get(1).is_some_and(|w| asks.contains(&w.as_str())) {
+            vote(other(i, false), name_at(&words, 0), 1);
+        }
+    }
+    let mut best: Vec<((String, String), u32)> = votes.into_iter().collect();
+    best.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut out = BTreeMap::new();
+    let mut taken = HashSet::new();
+    for ((speaker, name), _) in best {
+        if !out.contains_key(&speaker) && taken.insert(name.clone()) {
+            out.insert(speaker, name);
+        }
+    }
+    out
 }
 
 // ---------- storage ----------
@@ -631,6 +734,112 @@ pub fn delete(id: &str) -> Result<(), String> {
     std::fs::remove_dir_all(dir_of(id)?).map_err(|e| format!("Could not delete the meeting: {e}"))
 }
 
+// ---------- old audio ----------
+
+const AUDIO: [&str; 2] = ["audio-mic.wav", "audio-system.wav"];
+
+/// Whether meeting `m`'s audio is due to go: `days` (0 = never) after the meeting ended. A meeting
+/// still recording or being written up is never touched.
+pub fn audio_expired(m: &Meeting, days: u32, now_ms: u64) -> bool {
+    let ended = m.started_ms + (m.duration_s.max(0.0) * 1000.0) as u64;
+    days > 0 && !matches!(m.state.as_str(), "recording" | "processing") && now_ms.saturating_sub(ended) > u64::from(days) * 86_400_000
+}
+
+/// Deletes the WAVs of meetings that ended more than `days` ago (about 52 MB a track an hour) and
+/// says so on the meeting. meeting.json stays: the transcript, speakers and summary are kept.
+pub fn prune_audio(days: u32) {
+    let Ok(rd) = std::fs::read_dir(meetings_dir()) else { return };
+    let now = now_ms();
+    for e in rd.flatten() {
+        let dir = e.path();
+        if !AUDIO.iter().any(|f| dir.join(f).is_file()) {
+            continue; // already pruned: skip reading its transcript
+        }
+        let Ok(mut m) = load(&e.file_name().to_string_lossy()) else { continue };
+        if !audio_expired(&m, days, now) {
+            continue;
+        }
+        for f in AUDIO {
+            let _ = std::fs::remove_file(dir.join(f));
+        }
+        if AUDIO.iter().any(|f| dir.join(f).is_file()) {
+            eprintln!("echotype: could not delete the old audio of meeting {}", m.id);
+            continue;
+        }
+        m.notices.push(format!("The audio was deleted {days} days after the meeting to save space (Settings → Meetings). The transcript and notes stay."));
+        save(&dir, &m);
+    }
+}
+
+// ---------- search ----------
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Snippet {
+    pub start: f32,
+    pub text: String,
+}
+
+#[derive(Serialize, Debug)]
+pub struct Hit {
+    pub id: String,
+    pub title: String,
+    pub started_ms: u64,
+    pub snippets: Vec<Snippet>,
+}
+
+const SNIPPET_CHARS: usize = 160;
+
+/// Lowercase, one char for one char, so a match's char position is also its place in the original.
+fn fold(s: &str) -> String {
+    s.chars().map(|c| c.to_lowercase().next().unwrap_or(c)).collect()
+}
+
+/// Up to 3 lines of `m` that hold the most `words` (folded), in time order, or None unless every
+/// word is somewhere in its title, transcript or summary.
+pub fn search_meeting(m: &Meeting, words: &[String]) -> Option<Vec<Snippet>> {
+    let lines: Vec<String> = m.segments.iter().map(|s| fold(&s.text)).collect();
+    let other = [fold(&m.title), fold(m.summary.as_deref().unwrap_or_default())];
+    if words.is_empty() || !words.iter().all(|w| other.iter().chain(&lines).any(|t| t.contains(w.as_str()))) {
+        return None;
+    }
+    let mut best: Vec<(usize, usize)> = lines.iter().enumerate().map(|(i, l)| (words.iter().filter(|w| l.contains(w.as_str())).count(), i)).filter(|(n, _)| *n > 0).collect();
+    best.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    best.truncate(3);
+    best.sort_by_key(|&(_, i)| i);
+    Some(best.into_iter().map(|(_, i)| snippet(&m.segments[i], &lines[i], words)).collect())
+}
+
+/// The line, or SNIPPET_CHARS of it from a little before its first match.
+fn snippet(s: &Segment, low: &str, words: &[String]) -> Snippet {
+    let n = s.text.chars().count();
+    if n <= SNIPPET_CHARS {
+        return Snippet { start: s.start, text: s.text.clone() };
+    }
+    let first = words.iter().filter_map(|w| low.find(w.as_str())).min().unwrap_or(0);
+    let from = low[..first].chars().count().saturating_sub(40).min(n - SNIPPET_CHARS);
+    let mut text: String = s.text.chars().skip(from).take(SNIPPET_CHARS).collect();
+    if from > 0 {
+        text = format!("…{}", text.trim_start());
+    }
+    if from + SNIPPET_CHARS < n {
+        text = format!("{}…", text.trim_end());
+    }
+    Snippet { start: s.start, text }
+}
+
+/// Meetings where every word of `query` appears (any case), newest first.
+// ponytail: reads every meeting.json per query (hundreds are fine); keep an index if thousands get slow.
+pub fn search(query: &str) -> Vec<Hit> {
+    let words: Vec<String> = query.split_whitespace().map(fold).collect();
+    if words.is_empty() {
+        return vec![];
+    }
+    let hit = |m: Meeting| search_meeting(&m, &words).map(|snippets| Hit { id: m.id, title: m.title, started_ms: m.started_ms, snippets });
+    let mut out: Vec<Hit> = std::fs::read_dir(meetings_dir()).map(|rd| rd.flatten().filter_map(|e| load(&e.file_name().to_string_lossy()).ok().and_then(hit)).collect()).unwrap_or_default();
+    out.sort_by(|a, b| b.started_ms.cmp(&a.started_ms));
+    out
+}
+
 /// UTC "2026-10-14-090512" for folder names (civil-from-days, Howard Hinnant).
 fn stamp(ms: u64) -> String {
     let secs = ms / 1000;
@@ -705,6 +914,11 @@ pub fn recording() -> bool {
     lock(&LIVE).as_ref().is_some_and(|l| l.capture.is_some())
 }
 
+/// The recording meeting's id.
+pub fn recording_id() -> Option<String> {
+    lock(&LIVE).as_ref().filter(|l| l.capture.is_some()).map(|l| l.id.clone())
+}
+
 /// "Start notes · Zoom call" while a detected call is on offer (calls.rs).
 pub fn menu_label() -> String {
     match crate::calls::offered_title() {
@@ -732,7 +946,7 @@ fn emit(app: &AppHandle, id: &str, state: &str) {
 pub fn toggle(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
-        let res = if recording() { stop(&app) } else { start(&app, crate::calls::offered_title()).map(|_| ()) };
+        let res = if recording() { stop(&app) } else { crate::calls::start_offered(&app) };
         if let Err(e) = res {
             crate::emit_state(&app, crate::DictationState { state: "error", error: Some(e), ..Default::default() });
         }
@@ -743,6 +957,9 @@ pub fn toggle(app: &AppHandle) {
 static STARTING: AtomicBool = AtomicBool::new(false);
 
 pub fn start(app: &AppHandle, title: Option<String>) -> Result<Meeting, String> {
+    if crate::notices::blocked() {
+        return Err("This version of Echotype is retired. Update it in Account to take meeting notes.".into());
+    }
     if let Some(l) = lock(&LIVE).as_ref() {
         return Err(if l.capture.is_some() { "A meeting is already being transcribed" } else { "Still writing up the last meeting. Try again in a moment." }.into());
     }
@@ -779,12 +996,15 @@ fn open(app: &AppHandle, title: Option<String>) -> Result<Meeting, String> {
     m.notices.extend(notice);
     *lock(&session.meeting) = m.clone();
     let stopped = Arc::new(AtomicBool::new(false));
+    let notes = capture.notes.clone();
     *lock(&LIVE) = Some(Live { id: id.clone(), started_ms, started, capture: Some(capture), stopped: stopped.clone(), meeting: session.meeting.clone() });
     let app2 = app.clone();
-    std::thread::spawn(move || run(app2, session, rx, stopped, system));
+    std::thread::spawn(move || run(app2, session, rx, stopped, system, notes));
     tick(app);
     crate::emit_state(app, crate::hint("Meeting notes on. Let everyone know this meeting is being transcribed.", None));
     emit(app, &id, "recording");
+    show_window(app, &id);
+    crate::telemetry::meeting(&s, false);
     Ok(m)
 }
 
@@ -815,6 +1035,7 @@ pub fn status() -> serde_json::Value {
         "speakers": SPEAKERS,
         "screen_recording": capture::screen_recording_allowed(),
         "download_mb": download_mb,
+        "summaries": crate::settings::CLOUD,
     })
 }
 
@@ -845,7 +1066,7 @@ fn tick(app: &AppHandle) {
 }
 
 /// The worker: owns the session, so audio, transcription and saving happen in order.
-fn run(app: AppHandle, mut session: Session, rx: mpsc::Receiver<Piece>, stopped: Arc<AtomicBool>, system: bool) {
+fn run(app: AppHandle, mut session: Session, rx: mpsc::Receiver<Piece>, stopped: Arc<AtomicBool>, system: bool, notes: Arc<Mutex<Vec<String>>>) {
     /// However the worker ends, even by a panic, LIVE is cleared so a new meeting can start (the
     /// saved state then reads "interrupted") and the capture threads are told to stop.
     struct Done;
@@ -870,11 +1091,16 @@ fn run(app: AppHandle, mut session: Session, rx: mpsc::Receiver<Piece>, stopped:
             Err(e) => note(session, format!("Other voices are labelled Others: the speaker models are not available ({e})")),
         }
     };
+    let capture_notes = |session: &Session| {
+        let new: Vec<String> = lock(&notes).drain(..).collect();
+        lock(&session.meeting).notices.extend(new);
+    };
     loop {
         if let Ok(r) = models.try_recv() {
             waiting = false;
             take_models(&mut session, r);
         }
+        capture_notes(&session);
         let piece = match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(p) => p,
             Err(mpsc::RecvTimeoutError::Timeout) if stopped.load(Ordering::SeqCst) => match rx.try_recv() {
@@ -888,6 +1114,7 @@ fn run(app: AppHandle, mut session: Session, rx: mpsc::Receiver<Piece>, stopped:
             emit(&app, &id, "recording");
         }
     }
+    capture_notes(&session); // the capture threads have ended: their last notices are in
     lock(&session.meeting).state = "processing".into();
     emit(&app, &id, "processing");
     if waiting {
@@ -901,21 +1128,6 @@ fn run(app: AppHandle, mut session: Session, rx: mpsc::Receiver<Piece>, stopped:
     if let Err(e) = session.finish(can_diarize.then_some(&mut diarize as _), None) {
         note(&session, format!("Speakers were not re-checked at the end: {e}"));
     }
-    let s = crate::current_settings(&app);
-    let snapshot = lock(&session.meeting).clone();
-    match no_summary_reason(&s) {
-        None => {
-            if transcript_lines(&snapshot).len() > SUMMARY_MAX_CHARS {
-                note(&session, "The meeting is long, so the summary covers its first part only".into());
-            }
-            match summarize(&snapshot, |sys, text| crate::cleanup::chat(&s, sys, text, Duration::from_secs(180))) {
-                Ok(summary) => lock(&session.meeting).summary = summary,
-                Err(e) => note(&session, format!("No summary: {e}")),
-            }
-        }
-        Some(why) if !snapshot.segments.is_empty() => note(&session, why.into()),
-        Some(_) => {}
-    }
     {
         let mut m = lock(&session.meeting);
         m.state = "done".into();
@@ -924,6 +1136,7 @@ fn run(app: AppHandle, mut session: Session, rx: mpsc::Receiver<Piece>, stopped:
         }
     }
     drop(_done);
+    crate::telemetry::meeting(&crate::current_settings(&app), true);
     emit(&app, &id, "done");
 }
 
@@ -957,7 +1170,18 @@ pub async fn meeting_list() -> R<Vec<Meeting>> {
 
 #[tauri::command]
 pub async fn meeting_get(id: String) -> R<Meeting> {
-    blocking(move || load(&id)).await
+    blocking(move || {
+        let mut m = load(&id)?;
+        let unnamed = |sp: &String| m.speakers.get(sp).is_none_or(|n| *n == default_name(sp));
+        m.name_hints = name_hints(&m).into_iter().filter(|(sp, _)| unnamed(sp)).collect();
+        Ok(m)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn meeting_search(query: String) -> R<Vec<Hit>> {
+    blocking(move || Ok(search(&query))).await
 }
 
 #[tauri::command]
@@ -973,9 +1197,78 @@ pub async fn meeting_delete(id: String) -> R<()> {
 /// The meeting as Markdown ("md") or plain text ("txt"), for Copy.
 #[tauri::command]
 pub async fn meeting_export(id: String, format: String) -> R<String> {
+    blocking(move || export(&load(&id)?, &format).map(|(body, _)| body)).await
+}
+
+/// Echotype Pro: an answer about the meeting so far (or all of it), from Echotype Cloud.
+#[tauri::command]
+pub async fn meeting_ask(app: AppHandle, id: String, question: String) -> R<String> {
+    let me = crate::current_settings(&app).display_name;
     blocking(move || {
+        if !crate::settings::CLOUD {
+            return Err("Asking about a meeting is coming with Echotype Pro.".into());
+        }
         let m = load(&id)?;
-        Ok(if format == "md" { markdown(&m) } else { plain(&m) })
+        if !m.segments.iter().any(|s| crate::cleanup::has_speech(&s.text)) {
+            return Err("Nothing has been said yet.".into());
+        }
+        // The latest part of a long meeting: "what did I miss?" is about the last few minutes.
+        let text = for_notes(&m, &me);
+        let mut from = text.len().saturating_sub(SUMMARY_MAX_CHARS);
+        while !text.is_char_boundary(from) {
+            from += 1;
+        }
+        crate::cloud::ask(&text[from..], question.trim())
+    })
+    .await
+}
+
+/// Opens the meeting window, or brings it forward on meeting `id`.
+#[tauri::command]
+pub async fn meeting_window(app: AppHandle, id: String) -> R<()> {
+    show_window(&app, &id);
+    Ok(())
+}
+
+/// The meeting window (like Wispr Flow's): the live transcript, Stop, Summary and Ask beside the
+/// call, opened when meeting notes start. It shows meeting `id`; a second call switches it.
+pub fn show_window(app: &AppHandle, id: &str) {
+    if let Some(w) = app.get_webview_window("meeting") {
+        let _ = app.emit_to("meeting", "meeting-show", id);
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        return;
+    }
+    let url = WebviewUrl::App(format!("meeting.html?id={id}").into());
+    match WebviewWindowBuilder::new(app, "meeting", url).title("Meeting notes").inner_size(440.0, 720.0).min_inner_size(340.0, 420.0).build() {
+        Ok(_) => crate::apply_theme(app, &crate::current_settings(app)),
+        Err(e) => eprintln!("echotype: meeting window: {e}"),
+    }
+}
+
+/// Echotype Pro: the finished meeting's notes, written on request by Echotype Cloud and saved.
+#[tauri::command]
+pub async fn meeting_summarize(app: AppHandle, id: String) -> R<Meeting> {
+    let me = crate::current_settings(&app).display_name;
+    blocking(move || {
+        if !crate::settings::CLOUD {
+            return Err("Meeting summaries are coming with Echotype Pro.".into());
+        }
+        let dir = dir_of(&id)?;
+        let mut m = load(&id)?;
+        if m.state != "done" {
+            return Err("The meeting is still being written up.".into());
+        }
+        let Some(notes) = summarize(&m, &me, crate::cloud::summary)? else {
+            return Err("Nothing was said, so there is nothing to summarise.".into());
+        };
+        if transcript_lines(&m).len() > SUMMARY_MAX_CHARS && !m.notices.iter().any(|n| n.contains("covers its first part")) {
+            m.notices.push("The meeting is long, so the summary covers its first part only".into());
+        }
+        m.summary = Some(notes);
+        save(&dir, &m);
+        Ok(m)
     })
     .await
 }
@@ -986,7 +1279,7 @@ pub async fn meeting_save(app: AppHandle, id: String, format: String) -> R<Strin
     blocking(move || {
         use tauri_plugin_opener::OpenerExt;
         let m = load(&id)?;
-        let (body, ext) = if format == "md" { (markdown(&m), "md") } else { (plain(&m), "txt") };
+        let (body, ext) = export(&m, &format)?;
         let dir = dirs::download_dir().ok_or("No Downloads folder")?;
         let path = dir.join(format!("{}-{}.{ext}", slug(&m.title), &stamp(m.started_ms)[..10]));
         std::fs::write(&path, body).map_err(|e| format!("Could not save: {e}"))?;
@@ -1131,11 +1424,23 @@ mod tests {
     }
 
     #[test]
-    fn chunks_wait_for_25_s_and_end_at_a_pause() {
-        assert_eq!(next_cut(&tone(10.0, -20.0), false), None);
+    fn chunks_end_at_the_first_pause_after_4_s_else_at_25_s() {
+        assert_eq!(next_cut(&tone(10.0, -20.0), false), None, "no pause yet: wait");
         assert_eq!(next_cut(&tone(10.0, -20.0), true), Some((10 * RATE, true)), "flush takes the rest");
+        assert_eq!(next_cut(&tone(3.0, -20.0), true), Some((3 * RATE, true)));
         assert_eq!(next_cut(&[], true), None);
-        // Speech with a 0.6 s pause at 20 s: cut in the pause.
+        // A live line: 5 s of speech, a 0.6 s pause, more speech: cut in the pause.
+        let mut pcm = tone(5.0, -20.0);
+        pcm.extend(vec![0.0; RATE * 6 / 10]);
+        pcm.extend(tone(1.0, -20.0));
+        let (cut, pause) = next_cut(&pcm, false).unwrap();
+        assert!(pause && cut > 5 * RATE && cut < 5 * RATE + RATE * 6 / 10, "cut at {cut}");
+        // A pause before 4 s is too early for a line of its own.
+        let mut early = tone(2.0, -20.0);
+        early.extend(vec![0.0; RATE * 6 / 10]);
+        early.extend(tone(3.0, -20.0));
+        assert_eq!(next_cut(&early, false), None);
+        // Speech with a 0.6 s pause at 20 s, all of it waiting (25 s+): cut in the pause.
         let mut pcm = tone(20.0, -20.0);
         pcm.extend(vec![0.0; RATE * 6 / 10]);
         pcm.extend(tone(10.0, -20.0));
@@ -1292,6 +1597,39 @@ mod tests {
     }
 
     #[test]
+    fn names_come_from_introductions_thanks_and_questions() {
+        let seg = |sp: &str, t: &str| Segment { start: 0.0, end: 1.0, speaker: sp.into(), text: t.into() };
+        let mut m = Meeting::default();
+        m.segments = vec![
+            seg("you", "Hi everyone, I'm Aditya."),
+            seg("s1", "Hey, this is the plan. I'm Priya from design."),
+            seg("s2", "Sounds good to me."),
+            seg("you", "Thanks, Rahul. Okay, so we ship Friday."),
+            seg("you", "Meera, can you send the deck?"),
+            seg("s3", "Sure, I'm sorry it's late. I'm going to send it today."),
+        ];
+        let hints = name_hints(&m);
+        assert_eq!(hints.get("s1").map(String::as_str), Some("Priya"), "an introduction names who said it");
+        assert_eq!(hints.get("s2").map(String::as_str), Some("Rahul"), "thanks names the last other voice");
+        assert_eq!(hints.get("s3").map(String::as_str), Some("Meera"), "a question by name goes to the next voice");
+        assert!(!hints.contains_key("you"), "You is never renamed: {hints:?}");
+        assert!(!hints.values().any(|n| n == "Sorry" || n == "Going"), "lowercase and filler words are not names");
+    }
+
+    #[test]
+    fn exports_for_agents_cover_subtitles_and_json() {
+        let m = sample();
+        assert_eq!(srt(&m), "1\n00:00:02,000 --> 00:00:04,000\nYou: Shall we ship Friday?\n\n2\n00:01:05,000 --> 00:01:08,000\nPriya: Yes, I'll send the deck.\n");
+        assert!(vtt(&m).starts_with("WEBVTT\n\n00:00:02.000 --> 00:00:04.000\n<v You>Shall we ship Friday?\n"));
+        let v: serde_json::Value = serde_json::from_str(&json(&m)).unwrap();
+        assert_eq!((v["segments"][1]["speaker"].as_str(), v["title"].as_str()), (Some("Priya"), Some("Launch sync")));
+        for f in ["md", "txt", "json", "srt", "vtt"] {
+            assert!(export(&m, f).is_ok(), "{f}");
+        }
+        assert!(export(&m, "docx").is_err());
+    }
+
+    #[test]
     fn a_rename_reaches_every_line_and_the_summary_but_never_rewrites_you() {
         let mut m = sample();
         m.speakers.insert("s2".into(), "Speaker 2".into());
@@ -1316,38 +1654,26 @@ mod tests {
     }
 
     #[test]
-    fn the_echotype_model_never_writes_summaries() {
-        let mut s = Settings::default();
-        assert_eq!(no_summary_reason(&s), Some("Set up cleanup to get summaries"));
-        s.cleanup.enabled = true;
-        s.cleanup.provider = "echotype".into();
-        assert!(no_summary_reason(&s).unwrap().starts_with("Summaries need a general model"));
-        s.cleanup.provider = "ollama".into();
-        assert_eq!(no_summary_reason(&s), None);
-    }
-
-    #[test]
-    fn summary_never_asks_the_model_about_an_empty_meeting_and_forbids_invention() {
+    fn summary_never_asks_the_model_about_an_empty_meeting() {
         let mut m = sample();
         let seen = std::cell::RefCell::new(String::new());
-        let out = summarize(&m, |sys, text| {
-            *seen.borrow_mut() = format!("{sys}\n---\n{text}");
+        let out = summarize(&m, "", |text| {
+            *seen.borrow_mut() = text.to_string();
             Ok(" ## Summary\nShip Friday. ".into())
         });
         assert_eq!(out.unwrap().as_deref(), Some("## Summary\nShip Friday."));
-        let seen = seen.into_inner();
-        assert!(seen.contains("Never add facts") && seen.contains("never guess") && seen.contains("None recorded."));
-        assert!(seen.ends_with("You: Shall we ship Friday?\nPriya: Yes, I'll send the deck."));
+        assert_eq!(seen.into_inner(), "You: Shall we ship Friday?\nPriya: Yes, I'll send the deck.");
+        assert_eq!(for_notes(&m, "Aditya"), "Aditya: Shall we ship Friday?\nPriya: Yes, I'll send the deck.", "the notes use the user's name");
         let mut long = sample();
         long.segments = vec![Segment { start: 0.0, end: 1.0, speaker: "you".into(), text: "word ".repeat(9_000) }; 3];
-        summarize(&long, |_, text| {
+        summarize(&long, "", |text| {
             assert!(text.len() <= SUMMARY_MAX_CHARS && text.ends_with("word "), "cut at a line: {}", text.len());
             Ok(String::new())
         })
         .unwrap();
         for empty in [vec![], vec![Segment { start: 0.0, end: 1.0, speaker: "you".into(), text: " ... ".into() }]] {
             m.segments = empty;
-            assert_eq!(summarize(&m, |_, _| panic!("asked the model about nothing")).unwrap(), None);
+            assert_eq!(summarize(&m, "", |_| panic!("asked the model about nothing")).unwrap(), None);
         }
     }
 
@@ -1360,6 +1686,43 @@ mod tests {
         assert_eq!(stamp(0), "1970-01-01-000000");
         assert_eq!(slug("Launch sync: Q4 / pricing!"), "launch-sync-q4-pricing");
         assert_eq!(default_name("s12"), "Speaker 12");
+    }
+
+    #[test]
+    fn old_audio_goes_only_when_the_meeting_ended_long_enough_ago() {
+        const DAY: u64 = 86_400_000;
+        let now = 1000 * DAY;
+        let m = |state: &str, started_days_ago: u64, hours: f32| Meeting { state: state.into(), started_ms: now - started_days_ago * DAY, duration_s: hours * 3600.0, ..Default::default() };
+        assert!(audio_expired(&m("done", 31, 1.0), 30, now));
+        assert!(audio_expired(&m("interrupted", 8, 1.0), 7, now), "the app quit mid-meeting: it still ended");
+        assert!(!audio_expired(&m("done", 29, 1.0), 30, now));
+        assert!(!audio_expired(&m("done", 31, 48.0), 30, now), "counted from the end, not the start");
+        assert!(!audio_expired(&m("done", 400, 1.0), 0, now), "0 keeps audio forever");
+        for busy in ["recording", "processing"] {
+            assert!(!audio_expired(&m(busy, 400, 1.0), 7, now), "{busy} is never touched");
+        }
+    }
+
+    #[test]
+    fn search_needs_every_word_in_any_case_and_shows_the_best_lines() {
+        let q = |m: &Meeting, q: &str| search_meeting(m, &q.split_whitespace().map(fold).collect::<Vec<_>>());
+        let texts = |r: Option<Vec<Snippet>>| r.map(|v| v.into_iter().map(|s| (s.start, s.text)).collect::<Vec<_>>());
+        let mut m = sample();
+        m.summary = Some("## Decisions\n- Ship on Friday.".into());
+        assert_eq!(texts(q(&m, "FRIDAY ship")), Some(vec![(2.0, "Shall we ship Friday?".into())]));
+        assert_eq!(texts(q(&m, "deck yes")), Some(vec![(65.0, "Yes, I'll send the deck.".into())]));
+        assert_eq!(q(&m, "deck tuesday"), None, "every word must match");
+        assert_eq!(q(&m, "   "), None);
+        assert_eq!(q(&m, "launch decisions"), Some(vec![]), "title and summary count; no line to show");
+        // Three lines at most, those with the most words first, shown in time order.
+        m.segments = (0..6).map(|i| Segment { start: i as f32, end: i as f32 + 1.0, speaker: "you".into(), text: if i % 2 == 0 { "ship it" } else { "ship it friday" }.into() }).collect();
+        assert_eq!(q(&m, "ship friday").unwrap().iter().map(|s| s.start).collect::<Vec<_>>(), vec![1.0, 3.0, 5.0]);
+        // A long line is cut around the match, at char boundaries.
+        let long = format!("{} Größe ÉCOLE budget {}", "é".repeat(300), "ü".repeat(300));
+        m.segments = vec![Segment { start: 9.0, end: 10.0, speaker: "s1".into(), text: long }];
+        let s = &q(&m, "école BUDGET größe").unwrap()[0];
+        assert!(s.text.starts_with('…') && s.text.ends_with('…') && s.text.contains("Größe ÉCOLE budget"), "{}", s.text);
+        assert!(s.text.chars().count() <= SNIPPET_CHARS + 2);
     }
 
     #[test]

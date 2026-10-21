@@ -56,6 +56,12 @@ fn idle_hit() -> (f64, f64) {
 const ORB: f64 = 36.0;
 /// While recording, ✕ and ✓ sit either side of the orb, so its hit area is this wide.
 const REC_W: f64 = 96.0;
+
+/// Recording with the words so far (lib.rs partials): ✕, the orb, the words, ✓ and 10 pt of
+/// padding (overlay.html .live), ~6 pt a character as text_w estimates.
+fn live_w(chars: usize) -> f64 {
+    (16.0 + ORB + 4.0 + 16.0 + 10.0 + 6.0 * chars as f64).min(MAX_W)
+}
 /// The idle ball brightens while the cursor is this close to it (points, centre to cursor).
 const NEAR: f64 = 80.0;
 /// Hover must rest this long before the idle bar opens into its hint (D1), so passing over it
@@ -189,7 +195,7 @@ fn rank(s: &DictationState) -> u8 {
 #[derive(Debug, Clone, Copy)]
 struct Active {
     recording: bool,
-    /// Characters on the line (notices, transcribing, cleaning).
+    /// Characters on the line (notices, transcribing, cleaning; the live words while recording).
     chars: usize,
     /// A notice: its rank and when it ends. None while recording/transcribing/cleaning.
     notice: Option<(u8, Instant)>,
@@ -240,7 +246,8 @@ impl Pill {
         self.active = match s.state {
             "idle" if lingering.is_some() => return false,
             "idle" => None,
-            "recording" => Some(Active { recording: true, chars, notice: None, card: false }),
+            // Locking re-sends recording: the live words stay.
+            "recording" => Some(Active { recording: true, chars: self.active.filter(|a| a.recording).map_or(chars, |a| a.chars), notice: None, card: false }),
             "transcribing" | "cleaning" => Some(Active { recording: false, chars, notice: None, card: false }),
             _ => {
                 let r = rank(s);
@@ -267,6 +274,13 @@ impl Pill {
             _ => Some(Said { text: said(s), rank: rank(s), card: s.card && s.offer.is_none() && s.cleaned.is_none() }),
         };
         true
+    }
+
+    /// The live words' length while recording; a partial that lands after the recording ended is ignored.
+    pub fn set_partial(&mut self, chars: usize) {
+        if let Some(a) = self.active.as_mut().filter(|a| a.recording) {
+            a.chars = chars;
+        }
     }
 
     pub fn set_level(&mut self, muted: bool, meter: f32) {
@@ -342,6 +356,7 @@ impl Pill {
             None => idle_hit(),
             // ✕ and ✓ (16 pt each) stay either side of the words.
             Some(a) if a.recording && self.muted => (text_w("Is your mic muted?".len()) + 36.0, LINE_H),
+            Some(a) if a.recording && a.chars > 0 => (live_w(a.chars), ORB),
             Some(a) if a.recording => (REC_W, ORB),
             Some(Active { notice: None, .. }) => (ORB, ORB),
             Some(a) if a.card => (CARD_W, 57.0 + 15.0 * if a.chars > CARD_LINE { 2.0 } else { 1.0 }),
@@ -629,6 +644,13 @@ fn choose<'a>(list: &'a [Screen], cursor: Option<(f64, f64)>, follow: bool, home
     cursor.and_then(|c| list.iter().find(|m| m.rect.contains(c))).or_else(|| if placed { None } else { primary() })
 }
 
+/// Whether the pill may move to the cursor's display now: always when hidden, and on screen too
+/// (listening, thinking, Pasted) unless a card with buttons is up or the hover hint is out, which
+/// would jump away from the pointer about to click them.
+fn follows_now(shown: bool, card: bool, expanded: bool) -> bool {
+    !shown || (!card && !expanded)
+}
+
 /// The cursor in global points, or None if the OS won't say.
 pub(crate) fn cursor_now(app: &AppHandle) -> Option<(f64, f64)> {
     let primary = app.primary_monitor().ok().flatten().map_or(1.0, |m| m.scale_factor());
@@ -813,11 +835,12 @@ pub fn run(app: AppHandle, win: WebviewWindow, wake: Receiver<()>) {
                         }
                     }
                 } else if let Some(t) = target {
-                    // F4: follow the cursor's display while idle; a recording or notice stays put.
+                    // F4: follow the cursor's display, dictating included (the orb goes where the user
+                    // is looking); a card with buttons or the hover hint stays under the cursor.
                     // A new saved place for this display (a drop, a double-click) applies at once.
                     let saved = if cfg!(target_os = "macos") { s.pill_positions.get(&t.key).copied() } else { None };
                     let other = placed_on != Some(t.work);
-                    if (other && (!shown || (!active && !expanded))) || (!other && saved != placed_saved) {
+                    if (other && follows_now(shown, card, expanded)) || (!other && saved != placed_saved) {
                         if dock.is_none_or(|(t, _)| now.duration_since(t) > Duration::from_secs(60)) {
                             dock = Some((now, read_dock()));
                         }
@@ -1306,6 +1329,14 @@ mod tests {
     }
 
     #[test]
+    fn a_dictating_orb_follows_the_cursor_but_a_card_stays_put() {
+        assert!(follows_now(false, false, false), "hidden: always");
+        assert!(follows_now(true, false, false), "listening or thinking on screen: moves with the cursor");
+        assert!(!follows_now(true, true, false), "a card's buttons stay under the pointer");
+        assert!(!follows_now(true, false, true), "the hover hint too");
+    }
+
+    #[test]
     fn the_pill_follows_the_cursor_or_stays_on_its_own_screen() {
         let screen = |key: &str, x: f64, y: f64, w: f64, h: f64| Screen { key: key.into(), rect: Rect { x, y, w, h }, work: Rect { x, y, w, h } };
         let list = vec![screen("main", 0.0, 0.0, 2560.0, 1440.0), screen("laptop", 2560.0, 779.0, 1512.0, 982.0), screen("portrait", -800.0, 105.0, 800.0, 1280.0)];
@@ -1427,6 +1458,29 @@ mod tests {
     }
 
     #[test]
+    fn live_words_widen_the_recording_capsule_and_never_outlive_it() {
+        let t0 = Instant::now();
+        let mut p = Pill::default();
+        p.set_partial(10);
+        assert!(p.active.is_none(), "words with nothing recording are dropped");
+        p.on_state(&st("recording"), t0);
+        p.set_partial(25);
+        assert_eq!(p.capsule(false, 0), (232.0, ORB), "✕, orb, 25 characters, ✓: still inside MAX_W");
+        p.set_partial(60);
+        assert_eq!(p.capsule(false, 0).0, MAX_W);
+        p.set_partial(25);
+        p.on_state(&DictationState { state: "recording", locked: true, ..Default::default() }, t0);
+        assert_eq!(p.capsule(false, 0).0, 232.0, "locking keeps the words");
+        p.set_level(true, 0.0);
+        assert_eq!(p.capsule(false, 0).1, LINE_H, "muted wins over the words");
+        p.on_state(&st("transcribing"), t0);
+        p.set_partial(25);
+        assert_eq!(p.capsule(false, 0), (ORB, ORB), "a late partial cannot widen the thinking orb");
+        p.on_state(&st("recording"), t0 + Duration::from_secs(5));
+        assert_eq!(p.capsule(false, 0), (REC_W, ORB), "the next recording starts without words");
+    }
+
+    #[test]
     fn hit_testing_in_points_on_a_retina_plus_1x_pair() {
         // Retina primary (scale 2) at the origin, 1512x982 pt; a 1x 2560x1600 monitor to its right.
         let retina = Rect::from_phys(0.0, 0.0, 3024.0, 1964.0, 2.0);
@@ -1486,19 +1540,19 @@ mod tests {
     #[test]
     fn rerun_offers_only_what_would_change_the_result() {
         use crate::Rerun;
-        let ids = |s: &Settings| rerun_options(s, |id| ["small", "medium", "tiny.en"].contains(&id)).into_iter().map(|(r, l)| (r.id(), l)).collect::<Vec<_>>();
+        let ids = |s: &Settings| rerun_options(s, |id| ["large-v3-turbo-q5_0", "tiny.en"].contains(&id)).into_iter().map(|(r, l)| (r.id(), l)).collect::<Vec<_>>();
         let mut s = Settings { advanced: true, ..Settings::default() };
-        s.stt.local_model = "small".into();
+        s.stt.local_model = "base.en".into(); // a model no longer offered, still on this Mac
         s.cleanup.enabled = true;
         s.languages = vec!["en".into(), "hi".into()];
-        assert_eq!(ids(&s), [("lang:en", "In English"), ("lang:hi", "In Hindi"), ("lang:auto", "Auto-detect language"), ("model:medium", "With Medium"), ("model:tiny.en", "With Tiny (English)"), ("raw", "Without cleanup")].map(|(a, b)| (a.to_string(), b.to_string())));
+        assert_eq!(ids(&s), [("lang:en", "In English"), ("lang:hi", "In Hindi"), ("lang:auto", "Auto-detect language"), ("model:large-v3-turbo-q5_0", "With Large v3 Turbo (Q5)"), ("model:tiny.en", "With Tiny (English)"), ("raw", "Without cleanup")].map(|(a, b)| (a.to_string(), b.to_string())));
         s.languages = vec!["hi".into()];
         s.cleanup.style = "verbatim".into();
-        assert_eq!(ids(&s).iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>(), ["lang:auto", "model:medium", "model:tiny.en"], "one language is what ran; verbatim has no cleanup to skip");
+        assert_eq!(ids(&s).iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>(), ["lang:auto", "model:large-v3-turbo-q5_0", "model:tiny.en"], "one language is what ran; verbatim has no cleanup to skip");
         s.languages.clear();
         s.cleanup.enabled = false;
         s.stt.provider = "groq".into();
-        assert_eq!(ids(&s).iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>(), ["model:medium", "model:small", "model:tiny.en"], "a cloud transcript can be re-run on any local model");
+        assert_eq!(ids(&s).iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>(), ["model:large-v3-turbo-q5_0", "model:tiny.en"], "a cloud transcript can be re-run on any local model");
         for (r, _) in rerun_options(&Settings { languages: vec!["en".into(), "fr".into()], ..s.clone() }, |_| true) {
             assert_eq!(Rerun::parse(&r.id()), Some(r), "the menu id comes back as the same choice");
         }

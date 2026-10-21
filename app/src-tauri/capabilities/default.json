@@ -3,7 +3,8 @@
   "identifier": "default",
   "description": "Settings window: core window controls plus every Echotype command",
   "windows": [
-    "main"
+    "main",
+    "meeting"
   ],
   "permissions": [
     "core:default",
@@ -30,6 +31,8 @@
     "allow-list-input-devices",
     "allow-get-history",
     "allow-update-history",
+    "allow-wispr-import-preview",
+    "allow-wispr-import",
     "allow-clear-history",
     "allow-get-stats",
     "allow-clear-stats",
@@ -47,6 +50,10 @@
     "allow-request-microphone",
     "allow-focus-main",
     "allow-last-app",
+    "allow-installed-apps",
+    "allow-check-update",
+    "allow-install-update",
+    "allow-app-notices",
     "allow-mic-check",
     "allow-play-sound",
     "allow-reset-accessibility",
@@ -66,9 +73,13 @@
     "allow-meeting-status",
     "allow-meeting-list",
     "allow-meeting-get",
+    "allow-meeting-search",
     "allow-meeting-rename-speaker",
     "allow-meeting-delete",
     "allow-meeting-export",
-    "allow-meeting-save"
+    "allow-meeting-save",
+    "allow-meeting-summarize",
+    "allow-meeting-ask",
+    "allow-meeting-window"
   ]
 }

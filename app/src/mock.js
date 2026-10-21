@@ -14,16 +14,18 @@ const settings = {
     match_app: q.has('apps'), app_styles: q.has('apps') ? [{ id: 'com.apple.Terminal', name: 'Terminal', style: '' }, { id: 'com.google.Chrome', name: 'Google Chrome', style: 'casual' }] : [] },
   dictionary: ['Echotype', 'Tauri', 'Hinglish', 'Supabase'],
   replacements: [{ from: 'my email', to: 'aditya@example.com' }],
-  restore_clipboard: true, history_enabled: true,
-  usage_stats: !q.has('statsoff'), display_name: q.get('name') || '',
+  restore_clipboard: true, history_enabled: true, voice_commands: true,
+  usage_stats: !q.has('statsoff'), share_telemetry: q.has('telemetry'), display_name: q.get('name') || '',
   onboarded: !q.has('onboarding'), onboard_step: 0,
   talk_key: q.get('talk') || 'accelerator',
   paste_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+V',
   copy_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+C',
+  command_hotkey: 'Alt+Shift+Space',
   autostart: !q.has('upgrade'), sounds: true, sound_pack: 'classic', pill_fade: true, orb_listen: 'listening', orb_think: 'working', orb_detail: 1, orb_color: '#eef1ff', pill_size: 1.5, ball_size: 1,
-  advanced: q.has('advanced'), cleaner_memory: 'ready', cleaner_idle_unload: false, cleaner_idle_minutes: 10, cleaner_context: 1024, greetings: true, detect_meetings: true, prefer_builtin_mic: true, pause_music: false, meeting_end: 'ask', cloud_moved: q.has('moved'),
+  advanced: q.has('advanced'), cleaner_memory: 'ready', cleaner_idle_unload: false, cleaner_idle_minutes: 10, cleaner_context: 1024, greetings: true, detect_meetings: true, prefer_builtin_mic: true, pause_music: false, meeting_auto_stop: true, meeting_audio_days: 30,
+  call_start: { meet: 'ask', teams: 'ask', zoom: 'ask', slack: 'ask', facetime: 'ask', webex: 'ask', discord: 'ask', other: 'ask' }, cloud_moved: q.has('moved'),
   look: 'system',
-  pill_idle: !q.has('pilloff'), pill_hidden_until: q.has('pillhidden') ? now + 42 * 60000 : 0, pill_in_recordings: false,
+  pill_idle: !q.has('pilloff'), pill_hidden_until: q.has('pillhidden') ? now + 42 * 60000 : 0, pill_in_recordings: false, live_text: true,
   pill_positions: {}, pill_screen: null, pill_follow_cursor: true, show_in: q.has('menubar') ? 'menubar' : 'pill',
   dismissed: q.has('upgrade') || q.has('onboarding') ? [] : ['upgrade_offer'],
 };
@@ -42,20 +44,16 @@ const presets = [
 const cancelled = new Set(); // cancel_download: download_model stops at its next step
 const models = [
   { id: 'large-v3-turbo-q5_0', label: 'Large v3 Turbo (Q5)', size_mb: 547, ram_mb: 761, downloaded: !q.has('onboarding') || q.get('model') === 'ready', note: 'Best default: near-large accuracy, fast, 99 languages. Cannot translate.' },
-  { id: 'large-v3-turbo', label: 'Large v3 Turbo', size_mb: 1624, ram_mb: 1840, downloaded: false, note: 'Full-precision turbo. Slightly more accurate, twice the size. Cannot translate.' },
-  { id: 'large-v3-q5_0', label: 'Large v3 (Q5)', size_mb: 1031, ram_mb: 1608, downloaded: false, note: 'Most accurate, best for Hindi and other languages. Several times slower than Turbo; translates.' },
-  { id: 'medium', label: 'Medium', size_mb: 1533, ram_mb: 1869, downloaded: false, note: 'Multilingual and translates to English (Hinglish → English).' },
-  { id: 'small', label: 'Small', size_mb: 488, ram_mb: 717, downloaded: false, note: 'Multilingual, translates; lighter and less accurate than medium.' },
-  { id: 'base.en', label: 'Base (English)', size_mb: 148, ram_mb: 316, downloaded: !q.has('onboarding'), note: 'English only. For low-memory machines.' },
   { id: 'tiny.en', label: 'Tiny (English)', size_mb: 78, ram_mb: 224, downloaded: q.get('model') === 'tiny', note: 'English only. Fastest, least accurate.' },
 ];
 // ?ram=8 previews an 8 GB Mac (Automatic's light setup and its warnings); ?cloud shows Echotype Cloud.
 const low = q.get('ram') === '8';
 const sys = { total_ram_gb: low ? 8 : 24, available_ram_gb: low ? 3.2 : 5.1, os: 'macos', arch: 'aarch64', can_autostart: q.get('appdir') !== '0', low_ram: low, cloud: q.has('cloud'),
-  echotype_model_installed: true, echotype_model_mb: 940,
-  cleaners: [{ id: 'echotype-clean', label: 'Echotype 1.5B', size_mb: 940, ram_mb: 1113, installed: true, automatic: true, warning: null }] };
-for (const m of models) Object.assign(m, { english_only: m.id.endsWith('.en'), translates: ['medium', 'small', 'large-v3-q5_0'].includes(m.id), fits: m.ram_mb + 2048 <= sys.available_ram_gb * 1024 });
-const rec = models.find(m => m.id === (low ? 'small' : 'large-v3-turbo-q5_0'));
+  echotype_model_installed: true, echotype_model_mb: 401,
+  cleaners: [{ id: 'echotype-tiny', label: 'Echotype Tiny', note: '0.5B. Light and quick; best for English.', downloadable: q.has('dl-cleaners'), size_mb: 401, ram_mb: 552, installed: true, automatic: true, recommended: true, warning: null },
+    { id: 'echotype-medium', label: 'Echotype Medium', note: '1.5B. Catches more; uses about twice the memory.', downloadable: q.has('dl-cleaners'), size_mb: 940, ram_mb: 1099, installed: false, automatic: false, recommended: false, warning: low ? 'Uses about 1.1 GB while dictating. On an 8 GB Mac this can slow other apps.' : null }] };
+for (const m of models) Object.assign(m, { english_only: m.id.endsWith('.en'), translates: false, fits: m.ram_mb + 2048 <= sys.available_ram_gb * 1024 });
+const rec = models.find(m => m.id === 'large-v3-turbo-q5_0');
 rec.recommended = true;
 // Automatic: the recommendation once downloaded, else the downloaded model closest in RAM (stt.rs auto_model).
 const automatic = () => {
@@ -69,10 +67,11 @@ let history = [
   { ts: ago(1), raw: "don't forget to not include the tax in the final invoice", text: "don't forget to not include the tax in the final invoice", cleaned: "Don't forget to include the tax in the final invoice.", stt_ms: 520, cleanup_ms: 480, stt_provider: 'local', cleanup_provider: 'ollama' },
   { ts: ago(2), raw: 'ping arnav and midan about the zozo day thing', text: 'Ping Arnav and Midan about the Zozo Day thing', stt_ms: 420, cleanup_ms: 380, stt_provider: 'local', cleanup_provider: 'ollama' },
   { ts: ago(3), raw: 'lets meet tomorrow', text: 'lets meet tomorrow', stt_ms: 300, cleanup_ms: 0, stt_provider: 'local', cleanup_provider: null, no_cleanup: true },
-  { ts: ago(4), raw: 'haan toh um kal ki meeting mein we decided ki launch ko push karenge thursday tak', text: "In yesterday's meeting we decided to push the launch to Thursday.", stt_ms: 690, cleanup_ms: 540, stt_provider: 'local', cleanup_provider: 'ollama' },
+  { ts: ago(4), raw: 'haan toh um kal ki meeting mein we decided ki launch ko push karenge thursday tak', text: "In yesterday's meeting we decided to push the launch to Thursday.", stt_ms: 690, cleanup_ms: 540, stt_provider: 'local:large-v3-turbo-q5_0', cleanup_provider: 'ollama', original: 'Kal ki meeting mein we decided ki launch ko push karenge Thursday tak.' },
   { ts: ago(38), raw: 'can you send me the uh the figma link no wait the loom link from the demo', text: 'Can you send me the Loom link from the demo?', stt_ms: 410, cleanup_ms: 610, stt_provider: 'local', cleanup_provider: 'ollama' },
   { ts: ago(95), raw: 'groceries eggs milk sourdough and two avocados', text: 'Groceries:\n- Eggs\n- Milk\n- Sourdough\n- Two avocados', stt_ms: 380, cleanup_ms: 720, stt_provider: 'local', cleanup_provider: 'ollama' },
-  { ts: ago(60 * 26), raw: 'ship it after the tauri build passes on ci', text: 'ship it after the tauri build passes on ci', stt_ms: 350, cleanup_ms: 0, stt_provider: 'local', cleanup_provider: null, no_cleanup: true },
+  // noclip: recorded before Echotype kept audio, so it has no Re-run (only the newest 20 do).
+  { ts: ago(60 * 26), raw: 'ship it after the tauri build passes on ci', text: 'ship it after the tauri build passes on ci', stt_ms: 350, cleanup_ms: 0, stt_provider: 'local', cleanup_provider: null, no_cleanup: true, noclip: true },
 ];
 const secrets = new Set(['llm:groq']);
 
@@ -84,7 +83,7 @@ const sampleAccount = plan => plan === 'pro'
   : { email: 'you@example.com', plan: 'free', words_used: 1240, words_limit: 2000, resets_at: nextMonday(), audio_seconds_used: 610, audio_seconds_limit: 7200 };
 let cloudAccount = ['free', 'pro'].includes(q.get('cloud')) ? sampleAccount(q.get('cloud')) : null;
 if (q.has('cloud')) settings.stt.provider = 'cloud';
-if (q.has('builtin')) Object.assign(settings.cleanup, { enabled: true, provider: 'echotype', model: 'echotype-clean' });
+if (q.has('builtin')) Object.assign(settings.cleanup, { enabled: true, provider: 'echotype', model: 'echotype-medium' });
 let busy = false;
 // Onboarding: ?mic=unknown|denied|granted|restricted (onboarding starts at unknown), ?ax=1 (starts on).
 const perm = { mic: q.get('mic') || (q.has('onboarding') ? 'unknown' : 'granted'), ax: q.has('onboarding') ? q.get('ax') === '1' : !q.has('noaccess') };
@@ -133,8 +132,21 @@ const commands = {
   },
   relaunch: () => null,
   // ?apps turns on "Match the app you're typing in", with a last dictation into Slack.
+  installed_apps: () => [{ id: 'com.apple.mail', name: 'Mail', style: 'formal' }, { id: 'com.tinyspeck.slackmacgap', name: 'Slack', style: 'casual' }, { id: 'com.apple.TextEdit', name: 'TextEdit', style: '' }],
+  app_notices: () => ({ current: '0.1.0', blocked: q.has('retired'), min_version: q.has('retired') ? '0.2.0' : '0.1.0', notices: q.has('nonotice') ? [] : [{ id: 'models-1', title: 'Echotype models are here', body: 'Download Echotype Tiny or Medium for better cleanup on this Mac.', action_label: 'Open Models', action: 'page:speech' }] }),
+  check_update: () => ({ current: '0.1.0', version: q.has('update') ? '0.2.0' : null, notes: null }),
+  install_update: () => { throw 'Browser preview: updates install in the app.'; },
   last_app: () => (q.has('apps') ? { id: 'com.tinyspeck.slackmacgap', name: 'Slack', style: 'casual' } : null),
   get_history: ({ limit }) => (settings.history_enabled ? history.slice(0, limit) : []),
+  wispr_import_preview: () => (q.has('nowispr') ? null : {
+    words: ['Aditya Rohilla', 'Wispr Flow', 'ZopMop', 'Anshi', 'xoxoday'], replacements: [{ from: 'my email address', to: 'me@example.com' }],
+    languages: ['en'], app_styles: [{ id: 'com.tinyspeck.slackmacgap', name: 'Slack', style: 'casual' }, { id: 'net.whatsapp.WhatsApp', name: 'WhatsApp', style: 'casual' }],
+    talk_key: 'left_control', sounds: true, pause_music: false, autostart: true, look: 'light', display_name: 'Aditya',
+  }),
+  wispr_import: () => {
+    settings.display_name ||= 'Aditya';
+    return ['5 dictionary words', '1 snippet', 'your languages', 'styles for Slack, WhatsApp', 'your talk key (Left ⌃)'];
+  },
   update_history: ({ ts, text }) => {
     const e = history.find(x => x.ts === ts);
     if (!e) throw 'That entry is no longer in history.';
@@ -157,7 +169,11 @@ const commands = {
     if (busy) return null;
     busy = true;
     emit('dictation-state', { state: 'recording' });
-    for (let i = 0; i < 60; i++) { await wait(50); emit('audio-level', { meter: Math.abs(Math.sin(i / 4)) * 0.6 + Math.random() * 0.2, muted: false }); }
+    for (let i = 0; i < 60; i++) {
+      await wait(50);
+      emit('audio-level', { meter: Math.abs(Math.sin(i / 4)) * 0.6 + Math.random() * 0.2, muted: false });
+      if (i >= 30 && i % 10 === 0) partialOf('Let’s move the standup to 10:30 tomorrow.', (i - 20) / 40);
+    }
     emit('dictation-state', { state: 'transcribing' }); await wait(700);
     emit('dictation-state', { state: 'cleaning' }); await wait(600);
     emit('dictation-state', { state: 'done', text: 'Let’s move the standup to 10:30 tomorrow.' });
@@ -174,14 +190,18 @@ const commands = {
   pill_reset: () => null,
   pill_copy: () => null,
   pill_copy_cleaned: () => null,
-  // Re-run last (lib.rs rerun_options / rerun): ?norerun = no clip kept.
-  rerun_options: () => (q.has('norerun') ? [] : [
-    { id: 'lang:auto', label: 'Auto-detect language' }, { id: 'model:small', label: 'With Small' }, { id: 'raw', label: 'Without cleanup' },
-  ]),
-  rerun: async ({ id }) => {
+  // Re-run last or History entry `ts` (lib.rs rerun_options / rerun): ?norerun = no clip kept.
+  rerun_options: ({ ts }) => {
+    const e = ts == null ? history[0] : history.find(x => x.ts === ts);
+    if (q.has('norerun') || !e || e.noclip || history.indexOf(e) >= 20) return [];
+    return [{ id: 'lang:auto', label: 'Auto-detect language' }, { id: 'model:small', label: 'With Small' }, e.cleanup_provider && { id: 'raw', label: 'Without cleanup' }].filter(Boolean);
+  },
+  rerun: async ({ id, ts }) => {
+    const e = ts == null ? history[0] : history.find(x => x.ts === ts);
+    if (!e) throw 'There is no recording to re-run';
     emit('dictation-state', { state: 'transcribing' }); await wait(500);
-    const text = id === 'raw' ? 'so um the design review moves to friday at three' : 'The design review moves to Friday at 3.';
-    history.unshift({ ts: Math.floor(Date.now() / 1000), raw: 'so um the design review moves to friday at three', text, stt_ms: 610, cleanup_ms: id === 'raw' ? 0 : 450, stt_provider: id.startsWith('model:') ? `local:${id.slice(6)}` : 'local', cleanup_provider: id === 'raw' ? null : 'ollama', no_cleanup: id === 'raw' });
+    const text = id === 'raw' ? e.raw : e.raw[0].toUpperCase() + e.raw.slice(1) + '.';
+    Object.assign(e, { original: e.original ?? e.text, text, stt_ms: 610, cleanup_ms: id === 'raw' ? 0 : 450, stt_provider: id.startsWith('model:') ? `local:${id.slice(6)}` : e.stt_provider, cleanup_provider: id === 'raw' ? null : e.cleanup_provider, no_cleanup: id === 'raw', cleaned: undefined });
     emit('dictation-state', { state: 'done', text, copied: true, card: true, warning: 'Re-run copied, ⌘V to paste' });
     return null;
   },
@@ -250,19 +270,41 @@ const sampleSegments = [
 const doneMeeting = {
   id: '2026-10-14-083000-launch-review', title: 'Launch review', started_ms: now - 26 * 3600000, duration_s: 2873, state: 'done',
   speakers: { you: 'You', s1: 'Priya', s2: 'Speaker 2' }, segments: sampleSegments, notices: [],
-  summary: '## Summary\nThe beta went out last week and the crash rate dropped. Testers liked onboarding but found the permissions screen confusing.\n## Decisions\n- Ship next month if the new permissions screen is ready.\n## Action items\n- Speaker 2: redesign the permissions screen and share a draft by Thursday.\n- Priya: update the release notes and send them to marketing tomorrow.',
+  summary: q.has('nosummary') ? null : '## Summary\nThe beta went out last week and the crash rate dropped. Testers liked onboarding but found the permissions screen confusing.\n## Decisions\n- Ship next month if the new permissions screen is ready.\n## Action items\n- Speaker 2: redesign the permissions screen and share a draft by Thursday.\n- Priya: update the release notes and send them to marketing tomorrow.',
 };
 const liveMeeting = {
   id: '2026-10-15-091500-design-sync', title: 'Design sync', started_ms: now - 754000, duration_s: 754, state: 'recording',
-  speakers: { you: 'You', s1: 'Speaker 1', s2: 'Speaker 2' }, segments: sampleSegments.slice(0, 5), notices: [], summary: null,
+  speakers: { you: 'You', s1: 'Speaker 1', s2: 'Speaker 2' }, segments: sampleSegments.slice(0, 5), notices: [], summary: null, name_hints: { s1: 'Priya' },
 };
 let meetingList = mq === 'empty' ? [] : mq === 'live' ? [liveMeeting, doneMeeting] : [doneMeeting,
-  { id: '2026-10-12-140000-hiring-loop', title: 'Hiring loop debrief', started_ms: now - 3 * 86400000, duration_s: 1520, state: 'done', speakers: {}, segments: [], notices: [], summary: null },
+  { id: '2026-09-12-140000-hiring-loop', title: 'Hiring loop debrief', started_ms: now - 34 * 86400000, duration_s: 1520, state: 'done', speakers: { you: 'You', s1: 'Speaker 1' }, summary: null,
+    segments: [{ start: 4, end: 9, speaker: 's1', text: 'The candidate was strong on system design but the onboarding exercise ran long.' }, { start: 12, end: 15, speaker: 'you', text: 'Let’s ship the offer by Friday.' }],
+    notices: ['The audio was deleted 30 days after the meeting to save space (Settings → Meetings). The transcript stays, but speakers can’t be re-checked without the audio.'] },
   { id: '2026-10-10-100000-meeting', title: 'Meeting', started_ms: now - 5 * 86400000, duration_s: 312, state: 'interrupted', speakers: {}, segments: [], notices: [], summary: null }];
 Object.assign(commands, {
-  meeting_status: () => ({ live: mq === 'live' ? { id: liveMeeting.id, started_ms: liveMeeting.started_ms, recording: true } : null, computer_audio: !q.has('miconly'), speakers: !q.has('miconly'), screen_recording: !q.has('noscreen'), download_mb: mq === 'empty' ? 36 : 0 }),
+  meeting_status: () => ({ live: mq === 'live' ? { id: liveMeeting.id, started_ms: liveMeeting.started_ms, recording: true } : null, computer_audio: !q.has('miconly'), speakers: !q.has('miconly'), screen_recording: !q.has('noscreen'), download_mb: mq === 'empty' ? 36 : 0, summaries: q.has('cloud') }),
+  meeting_window: () => null,
+  meeting_ask: async ({ question }) => {
+    if (!q.has('cloud')) throw 'Asking about a meeting is coming with Echotype Pro.';
+    await new Promise(r => setTimeout(r, 400));
+    return `Sample answer to "${question}" from the preview.`;
+  },
+  meeting_summarize: async ({ id }) => {
+    if (!q.has('cloud')) throw 'Meeting summaries are coming with Echotype Pro.';
+    await new Promise(r => setTimeout(r, 600));
+    const m = meetingList.find(x => x.id === id);
+    m.summary = '## Summary\nSample notes from the preview.\n## Decisions\nNone recorded.\n## Action items\nNone recorded.';
+    return structuredClone(m);
+  },
   meeting_list: () => meetingList.map(m => ({ ...m, segments: [], summary: null })),
   meeting_get: ({ id }) => structuredClone(meetingList.find(m => m.id === id)),
+  // meeting.rs search: every word somewhere, up to 3 lines with the most words, in time order.
+  meeting_search: ({ query }) => {
+    const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+    return meetingList.filter(m => words.length && words.every(w => [m.title, m.summary || '', ...m.segments.map(s => s.text)].some(t => t.toLowerCase().includes(w))))
+      .map(m => ({ id: m.id, title: m.title, started_ms: m.started_ms, snippets: m.segments.map((s, i) => [words.filter(w => s.text.toLowerCase().includes(w)).length, i])
+        .filter(([n]) => n).sort((a, b) => b[0] - a[0] || a[1] - b[1]).slice(0, 3).sort((a, b) => a[1] - b[1]).map(([, i]) => ({ start: m.segments[i].start, text: m.segments[i].text })) }));
+  },
   meeting_start: () => { throw 'Browser preview: meetings are not recorded here.'; },
   meeting_stop: () => null,
   meeting_rename_speaker: ({ id, speaker, name }) => { const m = meetingList.find(x => x.id === id); m.speakers[speaker] = name.trim(); return structuredClone(m); },
@@ -308,9 +350,18 @@ if (q.has('view') || q.has('hover')) {
   setTimeout(() => emit('pill', { active: q.has('state'), hover: q.has('hover'), expand: q.get('view') === 'hint', hint: 'Hold ⌥ Space or click to dictate' }), 60);
 }
 
+// What lib.rs sends while recording (dictation-partial): the words so far, cut like last_words
+// to their last 24 characters from a word start. `done` (0..1) is how much has been said.
+function partialOf(text, done) {
+  if (!settings.live_text) return;
+  const so = text.split(' ').slice(0, Math.max(1, Math.round(text.split(' ').length * done))).join(' ');
+  emit('dictation-partial', so.length <= 24 ? so : '…' + so.slice(-24).replace(/^\S*\s/, ''));
+}
+
 // overlay.html?state=<state>&chip=<chip> (and index.html?state=... for the Home hero) renders any
 // dictation state through the real overlay/Home code: state = recording|transcribing|cleaning|done|error|hint,
 // chip = quiet|too_quiet|no_cleanup, plus message=, error=, action=, copied=1, locked=1, muted=1,
+// partial=... with state=recording (the words so far; partial=1 for a stock sentence),
 // card=1 (nowhere to paste; text= sets the transcript, nokey=1 drops the paste-last hint),
 // offer=Start notes with state=hint&card=1&warning=...&text=... (a detected call's offer, calls.rs),
 // cleaned=... with state=done&card=1&nokey=1&warning=... (the guard pasted the words as spoken).
@@ -330,6 +381,8 @@ if (q.has('state')) {
       const level = () => emit('audio-level', { meter: muted ? 0 : still ? [0.75, 1, 0.9][i++ % 3] : Math.abs(Math.sin(i++ / 3)) * 0.5 + Math.random() * 0.25, muted });
       for (let k = 0; k < 4; k++) level(); // at once, so a screenshot never depends on (throttled) timers
       setInterval(level, 50);
+      const words = q.get('partial');
+      if (words) partialOf(words === '1' ? 'And so, my fellow Americans, ask not what your country can do for you' : words, 1);
     }
   }, 50);
 }
@@ -361,7 +414,10 @@ function press() {
   live = true;
   emit('dictation-state', { state: 'recording' });
   let i = 0;
-  levelTimer = setInterval(() => emit('audio-level', { meter: Math.abs(Math.sin(i++ / 3)) * 0.55 + 0.15, muted: false }), 50);
+  levelTimer = setInterval(() => {
+    emit('audio-level', { meter: Math.abs(Math.sin(i++ / 3)) * 0.55 + 0.15, muted: false });
+    if (i >= 30 && i % 20 === 0) partialOf('Echotype, meet my Mac.', Math.min(1, i / 80));
+  }, 50);
 }
 addEventListener('keydown', e => { if (e.code === 'Space' && e.altKey && !e.repeat) { e.preventDefault(); press(); } }, true);
 addEventListener('keyup', e => { if (held && (e.code === 'Space' || e.key === 'Alt')) { e.preventDefault(); release(); } }, true);

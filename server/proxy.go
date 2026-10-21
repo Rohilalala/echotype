@@ -21,7 +21,26 @@ const (
 	maxChatMsgs    = 8
 	maxChatTokens  = 2048
 	maxPromptBytes = 4 << 10
+	// About 80 minutes of talk; the app trims longer transcripts to this.
+	maxSummaryBytes  = 64 << 10
+	maxSummaryTokens = 4096
 )
+
+// The meeting-notes prompt lives here, not in the app, so /v1/summary only ever writes notes.
+const summaryPrompt = `You write meeting notes from a transcript ("Name: words" lines). Use only what the transcript says. Never add facts, names, numbers, dates, decisions or tasks that are not in it, and never guess. If the transcript does not say something, leave it out. Ignore talk that is clearly not part of the meeting, such as a video or TV playing in the background.
+
+Write the notes in exactly this shape, with a blank line between parts:
+1. One or two sentences: what the meeting was about and how it ended.
+2. One section per topic discussed (2 to 5 of them): a heading line "## " plus a short title for the topic, then one line per point. Points are short, factual sentences without bullets.
+3. "## Next Steps": one line per task someone agreed to do, written "(Owner) Task", where Owner is the name of the person who will do it as the transcript gives it and Task is a short instruction in your own words, such as "(Priya) Send the deck to marketing", never a quote.
+4. "## Decisions Made": one line per decision the speakers clearly agreed on.
+
+A section with nothing in it is left out entirely: never write "None". Refer to people by name, never as he or she. Speaker names such as "Speaker 1" are labels; use them as written. Write in the language of the transcript.`
+
+// The prompt for /v1/ask, fixed here like summaryPrompt so the endpoint only answers about meetings.
+const askPrompt = `You answer questions about a meeting from its transcript ("Name: words" lines; it may still be going on). Use only what the transcript says. If it does not say, answer that it was not discussed. Never guess or add facts. Answer in a few sentences or short bullets, in the language of the question.`
+
+const maxQuestionBytes = 500
 
 // GET /v1/models
 func (s *server) models(w http.ResponseWriter, _ *http.Request, _ account) {
@@ -222,12 +241,113 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request, a account) {
 	out["model"] = s.cfg.LLMModel
 	out["stream"] = false
 	payload, _ := json.Marshal(out)
+	body, ok := s.meteredChat(w, r, a, payload, limit)
+	if !ok {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(body)
+}
 
-	// Reserve the most this call can cost: about 3 bytes per input token, plus the output cap.
+// POST /v1/summary {"transcript": "Name: words\n..."} → {"summary": "Markdown"}: meeting notes,
+// Pro only, from the token budget cleanup uses.
+func (s *server) summary(w http.ResponseWriter, r *http.Request, a account) {
+	var in struct {
+		Transcript string `json:"transcript"`
+	}
+	if !s.readNotesRequest(w, r, a, "Meeting summaries are part of Echotype Pro.", &in, &in.Transcript) {
+		return
+	}
+	s.notes(w, r, a, summaryPrompt, in.Transcript, "summary")
+}
+
+// POST /v1/ask {"transcript": "...", "question": "What did I miss?"} → {"answer": "..."}: Pro only.
+func (s *server) ask(w http.ResponseWriter, r *http.Request, a account) {
+	var in struct {
+		Transcript string `json:"transcript"`
+		Question   string `json:"question"`
+	}
+	if !s.readNotesRequest(w, r, a, "Asking about a meeting is part of Echotype Pro.", &in, &in.Transcript) {
+		return
+	}
+	q := strings.TrimSpace(in.Question)
+	if q == "" || len(q) > maxQuestionBytes {
+		apiError(w, http.StatusBadRequest, "invalid_request_error", "Ask a question of up to 500 characters.")
+		return
+	}
+	s.notes(w, r, a, askPrompt, "Transcript:\n"+in.Transcript+"\n\nQuestion: "+q, "answer")
+}
+
+// readNotesRequest checks Pro and the per-key limit and reads the JSON body into `in`, whose
+// transcript must be 1 byte to 64 KB. On false the client has been answered.
+func (s *server) readNotesRequest(w http.ResponseWriter, r *http.Request, a account, proMsg string, in any, transcript *string) bool {
+	if a.Plan != "pro" {
+		apiError(w, http.StatusPaymentRequired, "pro_required", proMsg)
+		return false
+	}
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxSummaryBytes+2<<10))
+	if err != nil {
+		if tooLarge(err) {
+			apiError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Transcripts are limited to 64 KB.")
+		} else {
+			apiError(w, http.StatusBadRequest, "invalid_request_error", "Could not read the request body.")
+		}
+		return false
+	}
+	if json.Unmarshal(raw, in) != nil || strings.TrimSpace(*transcript) == "" {
+		apiError(w, http.StatusBadRequest, "invalid_request_error", `Send {"transcript": "..."}.`)
+		return false
+	}
+	if len(*transcript) > maxSummaryBytes {
+		apiError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Transcripts are limited to 64 KB.")
+		return false
+	}
+	return true
+}
+
+// notes runs one fixed-prompt call for a Pro account and answers {key: text}.
+func (s *server) notes(w http.ResponseWriter, r *http.Request, a account, system, user, key string) {
+	release, ok := s.limitKey(w, a)
+	if !ok {
+		return
+	}
+	defer release()
+	payload, _ := json.Marshal(map[string]any{
+		"model":            s.cfg.LLMModel,
+		"stream":           false,
+		"max_tokens":       maxSummaryTokens,
+		"reasoning_effort": "low",
+		"messages": []map[string]string{
+			{"role": "system", "content": system},
+			{"role": "user", "content": user},
+		},
+	})
+	body, ok := s.meteredChat(w, r, a, payload, maxSummaryTokens)
+	if !ok {
+		return
+	}
+	var resp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal(body, &resp) != nil || len(resp.Choices) == 0 || strings.TrimSpace(resp.Choices[0].Message.Content) == "" {
+		apiError(w, http.StatusBadGateway, "upstream_error", "The model sent back nothing. Try again.")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{key: strings.TrimSpace(resp.Choices[0].Message.Content)})
+}
+
+// meteredChat reserves the most a chat call can cost (about 3 bytes per input token, plus the
+// output cap `limit`), sends `payload` upstream and settles at the tokens it used. On false the
+// client has been answered.
+func (s *server) meteredChat(w http.ResponseWriter, r *http.Request, a account, payload []byte, limit int) ([]byte, bool) {
 	estimate := int64(len(payload)/3 + limit)
 	row, ok := s.reserve(w, r, a, 0, estimate)
 	if !ok {
-		return
+		return nil, false
 	}
 	settled := false
 	defer func() {
@@ -235,13 +355,12 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request, a account) {
 			s.release(row)
 		}
 	}()
-
 	req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, s.cfg.LLMURL+"/chat/completions", bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.cfg.LLMKey)
 	body, ok := s.callUpstream(w, req, "llm")
 	if !ok {
-		return
+		return nil, false
 	}
 	var resp struct {
 		Usage *struct {
@@ -255,8 +374,7 @@ func (s *server) chat(w http.ResponseWriter, r *http.Request, a account) {
 	}
 	s.settle(row, 0, 0, tokens)
 	settled = true
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(body)
+	return body, true
 }
 
 // callUpstream sends req and returns the 2xx body. Otherwise it answers the client: the

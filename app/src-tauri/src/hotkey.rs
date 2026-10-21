@@ -279,6 +279,16 @@ pub fn label(talk_key: &str) -> Option<&'static str> {
     KEYS.iter().find(|k| k.0 == talk_key).map(|k| k.3)
 }
 
+/// The talk key on a macOS keycode (59: "left_control"), for importing another app's shortcut.
+pub fn talk_key_for(code: u16) -> Option<&'static str> {
+    KEYS.iter().find(|k| k.1 == code).map(|k| k.0)
+}
+
+/// `label`, or the setting value itself.
+pub fn talk_key_label(talk_key: &str) -> &str {
+    label(talk_key).unwrap_or(talk_key)
+}
+
 fn down_bit(code: u16) -> u64 {
     KEYS.iter().find(|k| k.1 == code).map_or(0, |k| k.2)
 }

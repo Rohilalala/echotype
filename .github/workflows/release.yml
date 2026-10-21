@@ -27,6 +27,11 @@ jobs:
             args: --bundles msi,nsis
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    env:
+      # Signs the in-app updates (Settings → Updates checks the release's latest.json against the
+      # pubkey in tauri.conf.json). The key's pair is in the owner's ~/.tauri; it has no password.
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -71,9 +76,26 @@ jobs:
           ARGS: ${{ matrix.args }}
       - run: npm ci
         working-directory: app
+      # macOS: Developer ID signing and notarization, so Gatekeeper opens the app and its
+      # permissions survive updates. Secrets: APPLE_CERTIFICATE (base64 of the .p12),
+      # APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY ("Developer ID Application: Name (TEAMID)"),
+      # APPLE_API_ISSUER and APPLE_API_KEY (App Store Connect API key) and APPLE_API_KEY_P8 (its .p8).
+      - name: App Store Connect key for notarization
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          printf '%s' "$P8" > "$RUNNER_TEMP/AuthKey.p8"
+          echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
         with:
           projectPath: app
           tagName: ${{ github.ref_name }}
@@ -98,6 +120,11 @@ jobs:
             args: --bundles msi,nsis
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    env:
+      # Signs the in-app updates (Settings → Updates checks the release's latest.json against the
+      # pubkey in tauri.conf.json). The key's pair is in the owner's ~/.tauri; it has no password.
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

@@ -525,7 +525,7 @@ mod tests {
     }
 
     fn entry(ts: u64, text: &str) -> HistoryEntry {
-        HistoryEntry { ts, raw: "secret raw words".into(), text: text.into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "local".into(), cleanup_provider: None, no_cleanup: false, cleaned: None }
+        HistoryEntry { ts, raw: "secret raw words".into(), text: text.into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "local".into(), cleanup_provider: None, no_cleanup: false, cleaned: None, original: None }
     }
 
     #[test]

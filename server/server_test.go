@@ -745,6 +745,69 @@ func TestChatTokensMeteredAndCapped(t *testing.T) {
 	}
 }
 
+func TestSummaryIsProOnlyWithTheServersPrompt(t *testing.T) {
+	x := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&lastSeen.body)
+		io.WriteString(w, `{"choices":[{"message":{"content":"  ## Summary\nShipped it.  "}}],"usage":{"prompt_tokens":900,"completion_tokens":100}}`)
+	})
+	key := x.signIn(t, "a@b.co")
+	id := accountID(t, x, "a@b.co")
+	body := `{"transcript":"You: we ship friday\nSpeaker 1: agreed"}`
+	if w := x.json("POST", "/v1/summary", body, bearer(key)...); w.Code != 402 || errType(t, w) != "pro_required" {
+		t.Fatalf("free: %d %s", w.Code, w.Body)
+	}
+	if w := x.json("POST", "/v1/summary", body); w.Code != 401 {
+		t.Fatalf("no key: %d", w.Code)
+	}
+	x.s.db.Exec(`UPDATE accounts SET plan = 'pro' WHERE id = ?`, id)
+	w := x.json("POST", "/v1/summary", body, bearer(key)...)
+	if w.Code != 200 || decode(t, w)["summary"] != "## Summary\nShipped it." {
+		t.Fatalf("pro: %d %s", w.Code, w.Body)
+	}
+	msgs, _ := lastSeen.body["messages"].([]any)
+	sys, _ := msgs[0].(map[string]any)
+	if len(msgs) != 2 || !strings.HasPrefix(sys["content"].(string), "You write meeting notes") || lastSeen.body["max_tokens"] != float64(4096) {
+		t.Fatalf("upstream got %v", lastSeen.body)
+	}
+	if me := decode(t, x.do("GET", "/v1/me", nil, bearer(key)...)); me["tokens_used"] != float64(1000) {
+		t.Fatalf("metered: %v", me)
+	}
+	big := `{"transcript":"` + strings.Repeat("a", 64<<10+1) + `"}`
+	if w := x.json("POST", "/v1/summary", big, bearer(key)...); w.Code != 413 {
+		t.Fatalf("64 KB+: %d", w.Code)
+	}
+	if w := x.json("POST", "/v1/summary", `{"transcript":"  "}`, bearer(key)...); w.Code != 400 {
+		t.Fatalf("empty: %d", w.Code)
+	}
+}
+
+func TestAskIsProOnlyAndBounded(t *testing.T) {
+	x := newHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&lastSeen.body)
+		io.WriteString(w, `{"choices":[{"message":{"content":"Priya will send the deck."}}]}`)
+	})
+	key := x.signIn(t, "a@b.co")
+	body := `{"transcript":"Priya: I'll send the deck","question":"Who sends the deck?"}`
+	if w := x.json("POST", "/v1/ask", body, bearer(key)...); w.Code != 402 || errType(t, w) != "pro_required" {
+		t.Fatalf("free: %d %s", w.Code, w.Body)
+	}
+	x.s.db.Exec(`UPDATE accounts SET plan = 'pro' WHERE id = ?`, accountID(t, x, "a@b.co"))
+	w := x.json("POST", "/v1/ask", body, bearer(key)...)
+	if w.Code != 200 || decode(t, w)["answer"] != "Priya will send the deck." {
+		t.Fatalf("pro: %d %s", w.Code, w.Body)
+	}
+	msgs, _ := lastSeen.body["messages"].([]any)
+	sys, _ := msgs[0].(map[string]any)
+	user, _ := msgs[1].(map[string]any)
+	if !strings.HasPrefix(sys["content"].(string), "You answer questions about a meeting") || !strings.HasSuffix(user["content"].(string), "Question: Who sends the deck?") {
+		t.Fatalf("upstream got %v", lastSeen.body)
+	}
+	long := `{"transcript":"x","question":"` + strings.Repeat("a", 501) + `"}`
+	if w := x.json("POST", "/v1/ask", long, bearer(key)...); w.Code != 400 {
+		t.Fatalf("long question: %d", w.Code)
+	}
+}
+
 // ---------- Stripe ----------
 
 func sign(payload []byte, secret string, ts int64) string {
@@ -903,5 +966,67 @@ func TestPages(t *testing.T) {
 	}
 	if !strings.Contains(x.do("GET", "/", nil).Body.String(), "2,000 words a week") {
 		t.Error("free tier missing from landing page")
+	}
+}
+
+// ---------- telemetry ----------
+
+const batch = `{"install_id":"0123456789abcdef0123456789abcdef","version":"0.1.0","os":"macos","arch":"aarch64",
+	"days":[{"date":"2026-10-11","dictations":3,"words":42,"failures":{"no_speech":1},"speech_ms_median":600,"cleanup_ms_median":null,
+		"speech_provider":"local","speech_model":"tiny.en","cleanup_provider":"off","cleanup_model":"","meetings_started":1,"meetings_finished":1}],
+	"crashes":[{"version":"0.1.0","os":"macos","arch":"aarch64","message":"boom at src/lib.rs:1","backtrace":"0: echotype::run"}]}`
+
+func TestTelemetryStoresABatch(t *testing.T) {
+	x := newHarness(t, nil)
+	for range 2 { // a resend after a lost response replaces the day
+		if w := x.json("POST", "/v1/telemetry", batch); w.Code != 204 {
+			t.Fatalf("%d %s", w.Code, w.Body)
+		}
+	}
+	var days, crashes int
+	var data string
+	x.s.db.QueryRow(`SELECT COUNT(*), MAX(data) FROM telemetry_days WHERE install_id = '0123456789abcdef0123456789abcdef' AND date = '2026-10-11'`).Scan(&days, &data)
+	x.s.db.QueryRow(`SELECT COUNT(*) FROM telemetry_crashes`).Scan(&crashes)
+	if days != 1 || crashes != 2 || !strings.Contains(data, `"words":42`) {
+		t.Fatalf("days %d crashes %d data %s", days, crashes, data)
+	}
+}
+
+func TestTelemetryRejectsBadBatches(t *testing.T) {
+	x := newHarness(t, nil)
+	for name, body := range map[string]string{
+		"not json":      `{"install_id":`,
+		"unknown field": strings.Replace(batch, `"words":42`, `"words":42,"transcript":"hello"`, 1),
+		"bad id":        strings.Replace(batch, "0123456789abcdef0123456789abcdef", "someone@example.com", 1),
+		"bad date":      strings.Replace(batch, "2026-10-11", "yesterday", 1),
+	} {
+		if w := x.json("POST", "/v1/telemetry", body); w.Code != 400 {
+			t.Errorf("%s: %d %s", name, w.Code, w.Body)
+		}
+	}
+	big := strings.Replace(batch, "echotype::run", strings.Repeat("x", telemetryLimit), 1)
+	if w := x.json("POST", "/v1/telemetry", big); w.Code != 413 {
+		t.Errorf("oversized: %d", w.Code)
+	}
+	var n int
+	x.s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM telemetry_days) + (SELECT COUNT(*) FROM telemetry_crashes)`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("%d rows stored from bad batches", n)
+	}
+}
+
+func TestTelemetryRateLimitPerIP(t *testing.T) {
+	x := newHarness(t, nil)
+	for i := range 30 {
+		if w := x.json("POST", "/v1/telemetry", batch); w.Code != 204 {
+			t.Fatalf("request %d: %d", i, w.Code)
+		}
+	}
+	if w := x.json("POST", "/v1/telemetry", batch); w.Code != 429 {
+		t.Fatalf("31st: %d", w.Code)
+	}
+	x.now = x.now.Add(time.Hour + time.Second)
+	if w := x.json("POST", "/v1/telemetry", batch); w.Code != 204 {
+		t.Fatalf("after an hour: %d", w.Code)
 	}
 }
