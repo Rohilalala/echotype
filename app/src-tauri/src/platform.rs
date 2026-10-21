@@ -447,6 +447,7 @@ mod mac {
     #[link(name = "ApplicationServices", kind = "framework")]
     unsafe extern "C" {
         fn AXUIElementCreateSystemWide() -> CFTypeRef;
+        fn AXUIElementCreateApplication(pid: i32) -> CFTypeRef;
         fn AXUIElementSetMessagingTimeout(el: CFTypeRef, seconds: f32) -> i32;
         fn AXUIElementCopyAttributeValue(el: CFTypeRef, attr: CFTypeRef, out: *mut CFTypeRef) -> i32;
         fn AXUIElementIsAttributeSettable(el: CFTypeRef, attr: CFTypeRef, out: *mut u8) -> i32;
@@ -458,13 +459,35 @@ mod mac {
     /// kAXErrorCannotComplete: "can't tell", which pastes as Echotype always has.
     const AX_CANNOT_TELL: i32 = -25204;
 
-    /// The app with keyboard focus (system-wide AXFocusedApplication), owned.
+    /// The app with keyboard focus (system-wide AXFocusedApplication), owned. Chrome can leave
+    /// that question unanswered (-25204) while answering on its own element, so the frontmost
+    /// app stands in.
     unsafe fn focused_app(sys: &CFType) -> Option<CFType> {
         let mut out: CFTypeRef = std::ptr::null();
         // SAFETY: as in focused(): an owned result under the create rule, a valid out-pointer.
         unsafe {
             (AXUIElementCopyAttributeValue(sys.as_CFTypeRef(), CFString::from_static_string("AXFocusedApplication").as_CFTypeRef(), &mut out) == 0 && !out.is_null())
                 .then(|| CFType::wrap_under_create_rule(out))
+                .or_else(|| front_pid().map(|pid| CFType::wrap_under_create_rule(AXUIElementCreateApplication(pid))))
+        }
+    }
+
+    /// [[NSWorkspace sharedWorkspace] frontmostApplication].processIdentifier, None without AppKit.
+    fn front_pid() -> Option<i32> {
+        // SAFETY: objc_msgSend cast to each signature: two methods returning objects, one returning
+        // pid_t; a nil receiver answers nil/0, and a missing class is checked.
+        unsafe {
+            let cls = objc_getClass(c"NSWorkspace".as_ptr());
+            if cls.is_null() {
+                return None;
+            }
+            let get: extern "C" fn(*const c_void, *const c_void) -> *const c_void = std::mem::transmute(objc_msgSend as *const ());
+            let app = get(get(cls, sel_registerName(c"sharedWorkspace".as_ptr())), sel_registerName(c"frontmostApplication".as_ptr()));
+            if app.is_null() {
+                return None;
+            }
+            let pid: extern "C" fn(*const c_void, *const c_void) -> i32 = std::mem::transmute(objc_msgSend as *const ());
+            Some(pid(app, sel_registerName(c"processIdentifier".as_ptr()))).filter(|p| *p > 0)
         }
     }
 
