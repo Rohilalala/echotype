@@ -3,28 +3,14 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
 
 jobs:
   build:
-    # A manual run from a branch would publish a release tagged with the branch name.
-    if: github.ref_type == 'tag'
+    # Mac only, Apple silicon only: the speech and cleanup models need it. Windows and Linux
+    # come back here when they ship.
+    runs-on: macos-latest
     permissions:
       contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Apple silicon only: the speech and cleanup models need it, so there is no Intel build.
-          - os: macos-latest
-            args: --target aarch64-apple-darwin
-          - os: ubuntu-22.04
-            args: --bundles appimage,deb
-          # ponytail: no Windows ARM64 yet. ggml needs clang-cl there and cmake-rs pins the VS
-          # toolset, so it takes a Ninja + clang-cl cross build (vcvars x64_arm64) to add it.
-          - os: windows-latest
-            args: --bundles msi,nsis
-    runs-on: ${{ matrix.os }}
     env:
       # Signs the in-app updates (Settings → Updates checks the release's latest.json against the
       # pubkey in tauri.conf.json). The key's pair is in the owner's ~/.tauri; it has no password.
@@ -40,17 +26,9 @@ jobs:
           node-version: 22
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
-          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
-      - name: Linux deps
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev libxdo-dev libssl-dev cmake clang
+          targets: aarch64-apple-darwin
       - name: llama-server sidecar for the built-in cleanup model
-        if: runner.os == 'macOS'
-        run: app/scripts/build-llama-server.sh "${ARGS#--target }"
-        env:
-          ARGS: ${{ matrix.args }}
+        run: app/scripts/build-llama-server.sh aarch64-apple-darwin
       - run: npm ci
         working-directory: app
       # macOS: Developer ID signing and notarization, so Gatekeeper opens the app and its
@@ -58,7 +36,6 @@ jobs:
       # APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY ("Developer ID Application: Name (TEAMID)"),
       # APPLE_API_ISSUER and APPLE_API_KEY (App Store Connect API key) and APPLE_API_KEY_P8 (its .p8).
       - name: App Store Connect key for notarization
-        if: runner.os == 'macOS'
         shell: bash
         env:
           P8: ${{ secrets.APPLE_API_KEY_P8 }}
@@ -78,53 +55,5 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: Echotype ${{ github.ref_name }}
           releaseDraft: true
-          args: ${{ matrix.args }}
+          args: --target aarch64-apple-darwin
 
-  # A manual run from a branch: the Windows and Linux installers as workflow artifacts, never a release.
-  dry-run:
-    if: github.ref_type != 'tag'
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-22.04
-            name: linux-x64
-            args: --bundles appimage,deb
-          - os: windows-latest
-            name: windows-x64
-            args: --bundles msi,nsis
-    runs-on: ${{ matrix.os }}
-    env:
-      # Signs the in-app updates (Settings → Updates checks the release's latest.json against the
-      # pubkey in tauri.conf.json). The key's pair is in the owner's ~/.tauri; it has no password.
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          submodules: true # app/src-tauri/vendor/whisper-rs-sys/whisper.cpp
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
-      - name: Linux deps
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev libxdo-dev libssl-dev cmake clang
-      - run: npm ci
-        working-directory: app
-      - run: npm run tauri build -- ${{ matrix.args }}
-        working-directory: app
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: echotype-${{ matrix.name }}
-          if-no-files-found: error
-          path: |
-            app/src-tauri/target/**/release/bundle/appimage/*.AppImage
-            app/src-tauri/target/**/release/bundle/deb/*.deb
-            app/src-tauri/target/**/release/bundle/msi/*.msi
-            app/src-tauri/target/**/release/bundle/nsis/*.exe
