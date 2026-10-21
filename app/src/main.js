@@ -119,7 +119,6 @@ function changed(p) {
   if (p === 'talk_key') saving.then(refreshStatus); // after the save, or the check re-applies the old key
   if (p === 'input_device' || p === 'prefer_builtin_mic') renderMicNote();
   if (p === 'cleanup.enabled') renderRaw();
-  if (p === 'translate_to_english') renderLangNote();
   if (p === 'languages' || p === 'script') { renderLanguages(); if (obStep === 2 && !$('#onboard').hidden) obLangsRender(); }
   if (p === 'cleanup.enabled') { setCleanupInert(); renderCloud(); refreshCloud(); }
   if (p === 'cleanup.match_app') refreshLastApp();
@@ -192,11 +191,12 @@ const DEFAULT_LAST = () => isMac ? ['CommandOrControl+Control+V', 'CommandOrCont
 function renderHotkey() {
   for (const btn of $$('[data-shortcut]')) {
     if (btn.classList.contains('listening')) continue;
-    const v = S[btn.dataset.shortcut];
+    const v = get(btn.dataset.shortcut); // a field, or a transform's "transforms.2.shortcut"
     btn.replaceChildren(...(v ? keycaps(v) : [h('span', { className: 'none' }, 'None')]));
   }
-  for (const b of $$('[data-clear]')) { b.hidden = !S[b.dataset.clear]; b.replaceChildren(svg(CROSS)); }
-  $('#commandNote').hidden = !S.command_hotkey || S.cleanup.provider !== 'echotype'; // cleanup.rs command_blocked
+  for (const b of $$('[data-clear]')) { b.hidden = !get(b.dataset.clear); b.replaceChildren(svg(CROSS)); }
+  $('#commandNote').hidden = !S.command_hotkey || !needsGeneral();
+  $('#transformsNote').hidden = !needsGeneral();
   $('#modeDesc').textContent = S.mode === 'toggle'
     ? 'Press once to start, again to stop. Esc cancels.'
     : 'Hold while you speak, let go to paste. Tap twice to go hands-free.';
@@ -214,11 +214,13 @@ function stopRecording() {
   renderHotkey();
 }
 const errEl = field => $(`#${field}Error`);
-for (const btn of $$('[data-shortcut]')) {
-  const field = btn.dataset.shortcut;
+// The built-in model can't follow an instruction (cleanup.rs command_blocked): Command Mode and transforms need another.
+// The Echotype model edits with Echotype Writer (Models page); until it is downloaded, edits can't run.
+const needsGeneral = () => S.cleanup.provider === 'echotype' && !sys?.writer?.installed;
+// Click `btn`, press a shortcut: it goes to setting `path` (see renderHotkey), errors to `err`.
+function listenShortcut(btn, path, err) {
   btn.addEventListener('click', () => {
     if (recording) { const same = recording.btn === btn; stopRecording(); if (same) return; }
-    const err = errEl(field);
     err.hidden = true;
     btn.classList.add('listening');
     btn.textContent = 'Press a shortcut…';
@@ -232,7 +234,7 @@ for (const btn of $$('[data-shortcut]')) {
         btn.textContent = r.mods.length ? r.mods.map(keyName).join(isMac ? ' ' : '+') + ' …' : 'Press a shortcut…';
         return;
       }
-      setShortcut(field, r.accel);
+      setShortcut(path, r.accel, err);
     };
     recording = { btn, fn };
     window.addEventListener('keydown', fn, true);
@@ -240,20 +242,80 @@ for (const btn of $$('[data-shortcut]')) {
   });
   btn.addEventListener('blur', stopRecording);
 }
+for (const btn of $$('[data-shortcut]')) listenShortcut(btn, btn.dataset.shortcut, errEl(btn.dataset.shortcut));
 for (const b of $$('[data-clear]')) b.addEventListener('click', () => setShortcut(b.dataset.clear, ''));
 
-async function setShortcut(field, accel) {
-  const prev = S[field], err = errEl(field);
-  S[field] = accel;
+async function setShortcut(field, accel, err = errEl(field)) {
+  const prev = get(field);
+  set(field, accel);
   stopRecording();
   const fail = await save(true);
   if (fail) {
-    S[field] = prev;
+    set(field, prev);
     err.textContent = accel ? `${hotkeyText(accel)} didn't work: ${fail}` : fail;
     err.hidden = false;
   }
   renderHotkey();
 }
+
+// ---------- transforms ----------
+const TRANSLATE = 'Translate to English'; // settings.rs TRANSLATE
+const MAX_TRANSFORMS = 12; // settings.rs MAX_TRANSFORMS
+// Each: its name, its instruction, its shortcut. Names are unique (settings.rs migrate drops a
+// repeated one), so a name another transform has is not saved until it is changed.
+function renderTransforms() {
+  const list = () => S.transforms; // S is replaced when a save comes back
+  fill($('#transforms'), list().map((t, i) => {
+    const path = `transforms.${i}.shortcut`, taken = status.unregistered_shortcuts?.includes(`transform:${t.name}`);
+    const err = h('span', { className: 'row-desc error', role: 'alert', hidden: !taken }, taken ? `${hotkeyText(t.shortcut)} isn't working: another app may be using it. Pick another.` : '');
+    const name = h('input', { type: 'text', value: t.name, maxLength: 40, spellcheck: false, 'aria-label': 'Transform name', oninput: e => {
+      const v = e.target.value.trim(), clash = list().some((o, j) => j !== i && o.name.toLowerCase() === v.toLowerCase());
+      err.textContent = !v ? 'Give it a name.' : clash ? 'Another transform has this name.' : '';
+      err.hidden = !err.textContent;
+      if (err.textContent) return;
+      if (S.auto_transform === list()[i].name) S.auto_transform = v;
+      list()[i].name = v;
+      saveSoon();
+      renderAutoTransform();
+    } });
+    const instruction = h('textarea', { rows: 3, value: t.instruction, 'aria-label': `What ${t.name} does`, placeholder: 'What to do with the selected text, for example: turn this into bullet points.',
+      oninput: e => { list()[i].instruction = e.target.value; saveSoon(); } });
+    const key = h('button', { className: 'hotkey', type: 'button', 'data-shortcut': path, 'aria-label': `${t.name} shortcut` });
+    listenShortcut(key, path, err);
+    return h('div', { className: 'row transform' }, h('span', { className: 'row-text' }, name, instruction, err),
+      h('span', { className: 'actions' }, key,
+        h('button', { className: 'icon-btn', type: 'button', 'data-clear': path, 'aria-label': `Turn off the ${t.name} shortcut`, onclick: () => setShortcut(path, '', err) }),
+        h('button', { className: 'btn quiet danger', type: 'button', 'aria-label': `Remove ${t.name}`, onclick: () => {
+          if (S.auto_transform === t.name && t.name !== TRANSLATE) S.auto_transform = ''; // Translate to English stays built in
+          list().splice(i, 1);
+          save();
+          renderTransforms();
+          renderLangNote();
+          renderChips();
+        } }, 'Remove')));
+  }));
+  $('#addTransform').disabled = list().length >= MAX_TRANSFORMS;
+  renderAutoTransform();
+  renderHotkey();
+}
+// "Apply to every dictation": none, or one transform (TRANSLATE stays offered once its row is gone).
+function renderAutoTransform() {
+  const names = S.transforms.map(t => t.name);
+  if (S.auto_transform === TRANSLATE && !names.includes(TRANSLATE)) names.push(TRANSLATE);
+  $('#autoTransform').replaceChildren(h('option', { value: '' }, 'None'), ...names.map(n => h('option', { value: n, selected: n === S.auto_transform }, n)));
+  // cleanup.rs run: it only runs with cleanup on, the user's choice to send text to that provider.
+  $('#autoTransformDesc').textContent = S.cleanup.enabled ? 'Runs after cleanup on everything you dictate.' : 'Runs after cleanup, so turn Cleanup on to use it.';
+  $('#autoTransformDesc').classList.toggle('warn', !S.cleanup.enabled && !!S.auto_transform);
+}
+$('#autoTransform').addEventListener('change', e => { S.auto_transform = e.target.value; save(); renderLangNote(); renderChips(); });
+$('#addTransform').addEventListener('click', () => {
+  let name = 'New transform';
+  for (let n = 2; S.transforms.some(t => t.name.toLowerCase() === name.toLowerCase()); n++) name = `New transform ${n}`;
+  S.transforms.push({ name, instruction: '', shortcut: '' });
+  save();
+  renderTransforms();
+  $$('#transforms textarea').at(-1).focus();
+});
 
 // ---------- talk key, Input Monitoring, Globe key ----------
 async function refreshStatus() {
@@ -285,7 +347,8 @@ function renderTalk() {
   }
   $('#obTalk').value = S.talk_key;
   if (!$('#onboard').hidden) obFoot(); // "Finish and relaunch" once the talk key needs it
-  for (const field of status.unregistered_shortcuts || []) {
+  renderTransforms(); // a transform's shortcut another app holds
+  for (const field of (status.unregistered_shortcuts || []).filter(f => !f.startsWith('transform:'))) {
     const err = errEl(field);
     if (err.hidden) { err.textContent = `${hotkeyText(S[field])} isn't working: another app may be using it. Pick another.`; err.hidden = false; }
   }
@@ -368,7 +431,7 @@ function renderChips() {
   const local = S.stt.provider === 'local';
   $('#chipModel').textContent = local ? sttModel()?.label ?? 'No model' : preset(S.stt.provider)?.label ?? S.stt.provider;
   const lang = S.languages.length ? S.languages.map(langName).join(', ') : 'Auto-detect';
-  $('#chipLang').textContent = S.translate_to_english ? `${lang} to English` : lang;
+  $('#chipLang').textContent = S.auto_transform === TRANSLATE ? `${lang} to English` : lang;
   $('#chipStyle').textContent = noCleanup() ? 'No cleanup' : STYLE_LABEL[S.cleanup.style] ?? S.cleanup.style;
   for (const b of $$('[data-go]')) b.ariaLabel = `${b.title}: ${b.textContent}`; // the chip opens that page
 }
@@ -602,8 +665,7 @@ function modelRow(m) {
     h('span', { className: 'row-text' },
       h('span', { className: 'model-name' }, m.label,
         m.recommended && h('span', { className: 'tag rec' }, 'Recommended'),
-        m.english_only && h('span', { className: 'tag' }, 'English only'),
-        m.translates && h('span', { className: 'tag' }, 'Translates')),
+        m.english_only && h('span', { className: 'tag' }, 'English only')),
       m.note && h('span', { className: 'row-desc' }, m.note),
       h('span', { className: 'model-meta' },
         h('span', {}, fmtMB(m.size_mb)),
@@ -1055,21 +1117,19 @@ $('#langAuto').addEventListener('change', e => {
   changed('languages');
 });
 
-// Translating needs a model that can; none of the offered local ones does yet (more coming).
-const canTranslate = () => S.stt.provider !== 'local' || models.some(m => m.translates);
+// "Type in English whatever language I speak": the Translate to English transform on every
+// dictation (cleanup.rs auto_transform). It needs a model that follows instructions.
 function renderLangNote() {
-  $('[data-bind="translate_to_english"]').closest('.row').hidden = !canTranslate();
-  const note = $('#translateNote');
-  const m = sttModel();
-  note.hidden = !(S.translate_to_english && S.stt.provider === 'local' && m && !m.translates);
-  if (note.hidden) return;
-  const alt = models.find(x => x.translates && x.downloaded);
-  note.classList.toggle('warn', !alt);
-  fill(note, alt
-    ? `${m.label} can't translate, so Echotype uses ${alt.label} while this is on.`
-    : `${m.label} can't translate, and no multilingual model is downloaded yet. Medium works best for Hinglish.`,
-  !alt && h('button', { className: 'btn', type: 'button', onclick: () => go('speech') }, 'Choose a model'));
+  $('#langEnglish').checked = S.auto_transform === TRANSLATE;
+  $('#translateNote').hidden = !(S.auto_transform === TRANSLATE && needsGeneral());
 }
+$('#langEnglish').addEventListener('change', e => {
+  S.auto_transform = e.target.checked ? TRANSLATE : S.auto_transform === TRANSLATE ? '' : S.auto_transform;
+  save();
+  renderLangNote();
+  renderTransforms();
+  renderChips();
+});
 
 // ---------- dictionary ----------
 // Placeholders only: what a snippet can be. Nothing is filled in for the user.
@@ -2356,6 +2416,7 @@ S.dictionary ??= [];
 S.replacements ??= [];
 S.learned ??= [];
 S.ignored_words ??= [];
+S.transforms ??= [];
 S.dismissed ??= [];
 base = clone(S);
 recent = await invoke('get_history', { limit: 3 }).catch(() => []);
@@ -2411,6 +2472,7 @@ function renderAll() {
   renderLangNote();
   renderLanguages();
   renderDict();
+  renderTransforms();
   renderAdvanced();
   renderNotice();
 }

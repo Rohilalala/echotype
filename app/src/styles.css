@@ -250,7 +250,7 @@ h1 + .group { margin-top: 16px; }
   min-height: 44px;
   padding: 10px 14px;
 }
-.row + .row::before, #apiBody > .row::before, #reps > .row::before, .group > #reps + .row::before, #appStyles > .row::before {
+.row + .row::before, #apiBody > .row::before, #reps > .row::before, .group > #reps + .row::before, #appStyles > .row::before, .group > #transforms:not(:empty) + .row::before {
   content: "";
   position: absolute;
   left: 14px;
@@ -554,6 +554,13 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .rep-head { padding: 10px 14px 2px; color: var(--fg-3); font-size: 12px; }
 .rep { min-height: 44px; }
 .rep input { width: 100%; }
+
+/* Settings → Transforms: name and instruction on the left, shortcut and Remove on the right. */
+.transform { align-items: flex-start; }
+.transform .row-text { gap: 6px; }
+.transform input[type="text"] { font-weight: var(--fw-med); max-width: 260px; }
+.transform .actions { min-width: 200px; justify-content: flex-end; }
+#transformsNote { margin: 0 0 10px; }
 
 /* Settings */
 .hotkey {

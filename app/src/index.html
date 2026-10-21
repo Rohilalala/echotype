@@ -196,10 +196,9 @@
             <label><input type="radio" name="script" value="latin" data-bind="script" /><span>English letters</span></label>
             <label><input type="radio" name="script" value="native" data-bind="script" /><span>Native script</span></label>
           </span></div>
-        <label class="row"><span class="row-text"><span class="row-title">Translate to English</span><span class="row-desc">Speak Hindi, Hinglish or any language and get English. Turbo models can’t translate, so Echotype switches to a multilingual model you have downloaded.</span></span>
-          <input type="checkbox" class="switch" data-bind="translate_to_english" /></label>
+        <label class="row"><span class="row-text"><span class="row-title">Type in English whatever language I speak</span><span class="row-desc">Speak Hindi, Hinglish or any language and get English. Your cleanup model translates each dictation after cleanup, so text takes a moment longer.</span><span class="row-desc warn" id="translateNote" hidden>Needs Echotype Writer: download it on the Models page, or pick Ollama, LM Studio or an API key under Cleanup.</span></span>
+          <input type="checkbox" class="switch" id="langEnglish" /></label>
       </div>
-      <p class="note" id="translateNote" hidden></p>
     </section>
 
     <!-- Dictionary -->
@@ -329,7 +328,7 @@
           <span class="actions"><button class="hotkey" data-shortcut="paste_last_hotkey" type="button" aria-labelledby="pasteLabel"></button><button class="icon-btn" data-clear="paste_last_hotkey" type="button" aria-label="Turn off the paste last shortcut"></button></span></div>
         <div class="row"><span class="row-text"><span class="row-title" id="copyLabel">Copy last</span><span class="row-desc">Puts your last dictation on the clipboard.</span><span class="row-desc error" id="copy_last_hotkeyError" role="alert" hidden></span></span>
           <span class="actions"><button class="hotkey" data-shortcut="copy_last_hotkey" type="button" aria-labelledby="copyLabel"></button><button class="icon-btn" data-clear="copy_last_hotkey" type="button" aria-label="Turn off the copy last shortcut"></button></span></div>
-        <div class="row"><span class="row-text"><span class="row-title" id="commandLabel">Command Mode</span><span class="row-desc">Select text and say what to change: “more formal”, “shorter”, “translate to Spanish”. With nothing selected, say what to write.</span><span class="row-desc warn" id="commandNote" hidden>Needs a general model. The Echotype model only cleans up dictation: pick Ollama, LM Studio or an API key under Cleanup.</span><span class="row-desc error" id="command_hotkeyError" role="alert" hidden></span></span>
+        <div class="row"><span class="row-text"><span class="row-title" id="commandLabel">Command Mode</span><span class="row-desc">Select text and say what to change: “more formal”, “shorter”, “translate to Spanish”. With nothing selected, say what to write.</span><span class="row-desc warn" id="commandNote" hidden>Needs Echotype Writer: download it on the Models page, or pick Ollama, LM Studio or an API key under Cleanup.</span><span class="row-desc error" id="command_hotkeyError" role="alert" hidden></span></span>
           <span class="actions"><button class="hotkey" data-shortcut="command_hotkey" type="button" aria-labelledby="commandLabel"></button><button class="icon-btn" data-clear="command_hotkey" type="button" aria-label="Turn off the Command Mode shortcut"></button></span></div>
         <div class="row"><span class="row-text"><span class="row-title" id="undoLabel">Undo cleanup</span><span class="row-desc">Copies your last dictation as you said it, before cleanup changed it. Undo in the app, then paste.</span><span class="row-desc error" id="undo_edit_hotkeyError" role="alert" hidden></span></span>
           <span class="actions"><button class="hotkey" data-shortcut="undo_edit_hotkey" type="button" aria-labelledby="undoLabel"></button><button class="icon-btn" data-clear="undo_edit_hotkey" type="button" aria-label="Turn off the undo cleanup shortcut"></button></span></div>
@@ -337,6 +336,16 @@
           <input type="checkbox" class="switch" data-bind="voice_commands" /></label>
         <label class="row"><span class="row-text"><span class="row-title">“Send it”</span><span class="row-desc">End a dictation with “send it” to paste it and press Return, as in a chat. Only as the last words, said on their own.</span></span>
           <input type="checkbox" class="switch" data-bind="send_it" /></label>
+      </div>
+
+      <h2 class="group-title">Transforms</h2>
+      <p class="lede small">Saved rewrites. Select text in any app and press a transform’s shortcut: your cleanup model rewrites it in place, as Command Mode would. On text you can’t edit, the result shows on the pill.</p>
+      <p class="note warn" id="transformsNote" hidden>Needs Echotype Writer: download it on the Models page, or pick Ollama, LM Studio or an API key under Cleanup.</p>
+      <div class="group">
+        <div id="transforms"></div>
+        <div class="row"><span class="row-text"><span class="row-title" id="autoTransformLabel">Apply to every dictation</span><span class="row-desc" id="autoTransformDesc">Runs after cleanup on everything you dictate.</span></span>
+          <select id="autoTransform" aria-labelledby="autoTransformLabel"></select></div>
+        <div class="row"><button class="btn" id="addTransform" type="button">Add transform</button></div>
       </div>
 
       <h2 class="group-title" id="pillTitle">Pill</h2>

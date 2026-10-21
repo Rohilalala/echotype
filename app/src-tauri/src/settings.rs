@@ -47,6 +47,9 @@ pub struct Settings {
     /// How a language with its own script is typed: "native" (हिंदी) or "latin" (English letters,
     /// "Hinglish"). Only the languages in stt::ROMANISED have a "latin"; the rest stay native.
     pub script: String,
+    /// Builds before 2026-10-22 had Whisper translate here; migrate() turns it into
+    /// `auto_transform` = TRANSLATE, which translates the cleaned text with the cleanup provider.
+    #[serde(skip_serializing)]
     pub translate_to_english: bool,
     pub local_api: LocalApi,
     pub stt: Stt,
@@ -93,6 +96,13 @@ pub struct Settings {
     pub command_hotkey: String,
     /// Undo the AI edit: the last dictation's words as heard, before cleanup, onto the clipboard. "" is unbound.
     pub undo_edit_hotkey: String,
+    /// Saved rewrites (Settings → Transforms): select text, press a transform's shortcut, and the
+    /// cleanup provider applies its instruction as Command Mode would. Names are unique, at most
+    /// MAX_TRANSFORMS; upgraders get TRANSFORMS.
+    pub transforms: Vec<Transform>,
+    /// The transform applied to every dictation after cleanup, by name; "" is none. Language's
+    /// "Type in English whatever language I speak" is this set to TRANSLATE.
+    pub auto_transform: String,
     /// Launch at login. Off for upgraders; onboarding offers it pre-checked.
     pub autostart: bool,
     /// Start, stop and lock sounds.
@@ -290,6 +300,35 @@ pub fn app_style<'a>(c: &'a Cleanup, id: Option<&str>) -> &'a str {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(default)]
+pub struct Transform {
+    pub name: String,
+    /// What to do with the selected text, as it would be said in Command Mode.
+    pub instruction: String,
+    /// Its global shortcut, pressed and let go with text selected; "" is unbound.
+    pub shortcut: String,
+}
+
+pub const MAX_TRANSFORMS: usize = 12;
+pub const TRANSLATE: &str = "Translate to English";
+
+/// The built-in transforms, every install's starting list. Each can be edited or removed.
+pub const TRANSFORMS: [(&str, &str); 5] = [
+    ("Polish", "Fix grammar, spelling and flow. Keep the meaning, the tone and the writer's voice, and change as little as needed."),
+    ("Make it formal", "Rewrite this in a formal, professional tone. Keep the meaning and every detail."),
+    ("Make it shorter", "Make this shorter and tighter. Keep every key point and the writer's voice."),
+    (TRANSLATE, "Translate this into natural English. If it is already English, return it unchanged."),
+    ("Prompt engineer", "Rewrite these rough notes as a clear prompt for an AI assistant: the goal, the context, any constraints and the output wanted, using only what the notes say. Output only the prompt."),
+];
+
+/// The instruction of the transform called `name`: the user's own, else a built-in one (so
+/// TRANSLATE works even after its row was removed). None for an unknown name.
+pub fn transform_instruction(s: &Settings, name: &str) -> Option<String> {
+    let mine = s.transforms.iter().find(|t| t.name == name).map(|t| t.instruction.clone());
+    mine.or_else(|| TRANSFORMS.iter().find(|(n, _)| *n == name).map(|(_, i)| i.to_string()))
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
 pub struct Replacement {
     pub from: String,
     pub to: String,
@@ -330,6 +369,8 @@ impl Default for Settings {
             // macOS only: elsewhere ⌥⇧ switches keyboard layouts, and no modifier wait guards the ⌘C.
             command_hotkey: if cfg!(target_os = "macos") { "Alt+Shift+Space" } else { "" }.into(),
             undo_edit_hotkey: String::new(),
+            transforms: TRANSFORMS.iter().map(|(n, i)| Transform { name: n.to_string(), instruction: i.to_string(), shortcut: String::new() }).collect(),
+            auto_transform: String::new(),
             autostart: false,
             sounds: true,
             dismissed: vec![],
@@ -441,6 +482,23 @@ impl Settings {
             true
         });
         self.languages.truncate(3);
+        if std::mem::take(&mut self.translate_to_english) && self.auto_transform.is_empty() {
+            self.auto_transform = TRANSLATE.into();
+        }
+        // Names are how auto_transform and the shortcut slots find a transform: trimmed, unique.
+        let mut names = vec![];
+        self.transforms.retain_mut(|t| {
+            t.name = t.name.trim().to_string();
+            let k = t.name.to_lowercase();
+            !k.is_empty() && !names.contains(&k) && {
+                names.push(k);
+                true
+            }
+        });
+        self.transforms.truncate(MAX_TRANSFORMS);
+        if transform_instruction(self, &self.auto_transform).is_none() {
+            self.auto_transform.clear();
+        }
         if !matches!(self.script.as_str(), "native" | "latin") {
             self.script = "native".into();
         }
@@ -875,6 +933,29 @@ mod tests {
         assert!(!s.cleanup.match_app && s.cleanup.app_styles.is_empty(), "upgraders keep one style everywhere");
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn transforms_load_unique_and_whisper_translation_becomes_the_translate_transform() {
+        let mut s: Settings = serde_json::from_str(r#"{"translate_to_english":true}"#).unwrap();
+        s.migrate();
+        assert_eq!(s.transforms.len(), TRANSFORMS.len(), "upgraders get the built-ins");
+        assert_eq!(s.auto_transform, TRANSLATE, "Translate to English keeps translating");
+        assert!(!serde_json::to_string(&s).unwrap().contains("translate_to_english"), "the old field is never written back");
+        let t = |name: &str| Transform { name: name.into(), instruction: "x".into(), shortcut: String::new() };
+        s.transforms = vec![t(" Polish "), t("polish"), t(""), t("Summarize")];
+        s.auto_transform = "Gone".into();
+        s.migrate();
+        assert_eq!(s.transforms.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Polish", "Summarize"], "trimmed, blank and repeated names dropped");
+        assert_eq!(s.auto_transform, "", "an unknown auto transform is switched off");
+        s.auto_transform = TRANSLATE.into();
+        s.migrate();
+        assert_eq!(s.auto_transform, TRANSLATE, "a removed built-in still applies by name");
+        assert!(transform_instruction(&s, TRANSLATE).unwrap().contains("English"));
+        assert_eq!(transform_instruction(&s, "Summarize").as_deref(), Some("x"), "the user's own instruction");
+        s.transforms = (0..20).map(|i| t(&format!("T{i}"))).collect();
+        s.migrate();
+        assert_eq!(s.transforms.len(), MAX_TRANSFORMS);
     }
 
     #[test]

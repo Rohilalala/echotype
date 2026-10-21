@@ -7,7 +7,7 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
 const now = Date.now();
 
 const settings = {
-  hotkey: 'Alt+Space', mode: 'hold', input_device: null, languages: q.get('langs')?.split(',') ?? [], script: q.get('script') || 'native', translate_to_english: false,
+  hotkey: 'Alt+Space', mode: 'hold', input_device: null, languages: q.get('langs')?.split(',') ?? [], script: q.get('script') || 'native',
   local_api: { enabled: false, port: 7811 },
   stt: { provider: 'local', local_model: q.has('onboarding') ? '' : 'large-v3-turbo-q5_0', model: '', base_url: '' },
   cleanup: { enabled: !q.has('nocleanup'), provider: 'ollama', model: 'gemma3:4b', base_url: '', style: 'default', level: q.get('level') || 'medium', custom_instructions: '',
@@ -23,6 +23,15 @@ const settings = {
   paste_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+V',
   copy_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+C',
   command_hotkey: 'Alt+Shift+Space', undo_edit_hotkey: '',
+  // The same built-ins as settings.rs TRANSFORMS; ?translate turns on "Type in English".
+  transforms: [
+    { name: 'Polish', instruction: "Fix grammar, spelling and flow. Keep the meaning, the tone and the writer's voice, and change as little as needed.", shortcut: 'Control+Alt+P' },
+    { name: 'Make it formal', instruction: 'Rewrite this in a formal, professional tone. Keep the meaning and every detail.', shortcut: '' },
+    { name: 'Make it shorter', instruction: "Make this shorter and tighter. Keep every key point and the writer's voice.", shortcut: '' },
+    { name: 'Translate to English', instruction: 'Translate this into natural English. If it is already English, return it unchanged.', shortcut: '' },
+    { name: 'Prompt engineer', instruction: 'Rewrite these rough notes as a clear prompt for an AI assistant: the goal, the context, any constraints and the output wanted, using only what the notes say. Output only the prompt.', shortcut: '' },
+  ],
+  auto_transform: q.has('translate') ? 'Translate to English' : '',
   autostart: !q.has('upgrade'), sounds: true, sound_pack: 'classic', pill_fade: true, orb_listen: 'listening', orb_think: 'working', orb_detail: 1, orb_color: '#eef1ff', pill_size: 1.5, ball_size: 1,
   advanced: q.has('advanced'), cleaner_memory: 'ready', cleaner_idle_unload: false, cleaner_idle_minutes: 10, cleaner_context: 1024, greetings: true, detect_meetings: true, prefer_builtin_mic: true, pause_music: false, meeting_auto_stop: true, meeting_audio_days: 30,
   call_start: { meet: 'ask', teams: 'ask', zoom: 'ask', slack: 'ask', facetime: 'ask', webex: 'ask', discord: 'ask', other: 'ask' }, cloud_moved: q.has('moved'),
@@ -46,7 +55,7 @@ const presets = [
 // The same catalog, sizes and notes as stt.rs MODELS.
 const cancelled = new Set(); // cancel_download: download_model stops at its next step
 const models = [
-  { id: 'large-v3-turbo-q5_0', label: 'Large v3 Turbo (Q5)', size_mb: 547, ram_mb: 761, downloaded: !q.has('onboarding') || q.get('model') === 'ready', note: 'Best default: near-large accuracy, fast, 99 languages. Cannot translate.' },
+  { id: 'large-v3-turbo-q5_0', label: 'Large v3 Turbo (Q5)', size_mb: 547, ram_mb: 761, downloaded: !q.has('onboarding') || q.get('model') === 'ready', note: 'Best default: near-large accuracy, fast, 99 languages.' },
   { id: 'tiny.en', label: 'Tiny (English)', size_mb: 78, ram_mb: 224, downloaded: q.get('model') === 'tiny', note: 'English only. Fastest, least accurate.' },
 ];
 // ?ram=8 previews an 8 GB Mac (Automatic's light setup and its warnings); ?cloud shows Echotype Cloud.
@@ -55,7 +64,7 @@ const sys = { total_ram_gb: low ? 8 : 24, available_ram_gb: low ? 3.2 : 5.1, os:
   echotype_model_installed: true, echotype_model_mb: 401,
   cleaners: [{ id: 'echotype-tiny', label: 'Echotype Tiny', note: '0.5B. Light and quick; best for English.', downloadable: q.has('dl-cleaners'), size_mb: 401, ram_mb: 552, installed: true, automatic: true, recommended: true, warning: null },
     { id: 'echotype-medium', label: 'Echotype Medium', note: '1.5B. Catches more; uses about twice the memory.', downloadable: q.has('dl-cleaners'), size_mb: 940, ram_mb: 1099, installed: false, automatic: false, recommended: false, warning: low ? 'Uses about 1.1 GB while dictating. On an 8 GB Mac this can slow other apps.' : null }] };
-for (const m of models) Object.assign(m, { english_only: m.id.endsWith('.en'), translates: false, fits: m.ram_mb + 2048 <= sys.available_ram_gb * 1024 });
+for (const m of models) Object.assign(m, { english_only: m.id.endsWith('.en'), fits: m.ram_mb + 2048 <= sys.available_ram_gb * 1024 });
 const rec = models.find(m => m.id === 'large-v3-turbo-q5_0');
 rec.recommended = true;
 // Automatic: the recommendation once downloaded, else the downloaded model closest in RAM (stt.rs auto_model).
@@ -132,7 +141,7 @@ const commands = {
     const talk = settings.talk_key !== 'accelerator', globe = q.get('globe') !== '0', im = q.get('im') !== '0', relaunch = q.has('relaunch');
     const active = talk && (settings.talk_key !== 'fn' || globe) && im && !relaunch;
     return { talk_key_active: active, talk_key_error: talk && !active ? 'not active' : null, input_monitoring: im, globe_does_nothing: globe,
-      needs_relaunch: talk && im && relaunch, unregistered_shortcuts: q.has('shortcutfail') && settings.hotkey === 'Alt+Space' ? ['hotkey'] : [], key_label: '⌥ Space' };
+      needs_relaunch: talk && im && relaunch, unregistered_shortcuts: q.has('shortcutfail') ? [settings.hotkey === 'Alt+Space' && 'hotkey', ...settings.transforms.filter(t => t.shortcut === 'Control+Alt+P').map(t => `transform:${t.name}`)].filter(Boolean) : [], key_label: '⌥ Space' };
   },
   relaunch: () => null,
   // ?apps turns on "Match the app you're typing in", with a last dictation into Slack.
