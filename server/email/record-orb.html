@@ -1,0 +1,47 @@
+<!doctype html><meta charset="utf-8"><title>orb</title>
+<!-- Records orb.gif for the sign-in email from the app's own orb (app/src/orb.js).
+     From the repo root: python3 server/email/record-orb.py, then open
+     http://127.0.0.1:8733/server/email/record-orb.html and wait for the title to say "done"
+     (200 frames in server/email/frames2/). Encode from server/email, starting on frame 60 (the
+     full sphere, which Outlook shows as a still):
+       mkdir seq; n=0; for i in $(seq 60 199) $(seq 0 59); do ln -s ../frames2/$(printf %04d $i).png seq/$(printf %04d $n).png; n=$((n+1)); done
+       ffmpeg -framerate 25 -i seq/%04d.png -vf "fps=20,curves=all=0/0 0.35/0.55 1/1,split[a][b];[a]palettegen=max_colors=24:stats_mode=full[p];[b][p]paletteuse=dither=none" -loop 0 orb.gif
+-->
+<body style="margin:0;background:#000">
+<canvas id="c" style="width:240px;height:240px;display:block;color:#fff"></canvas>
+<script type="module">
+// Steps the app's onboarding orb (src/orb.js) on a fixed clock and posts every frame as a PNG.
+let pending = null, now = 0;
+window.requestAnimationFrame = cb => { pending = cb; return 1; };
+window.cancelAnimationFrame = () => {};
+performance.now = () => now;
+Object.defineProperty(window, 'devicePixelRatio', { get: () => 2 });
+const { createOrb } = await import('../../app/src/orb.js');
+const S = 240, cvs = document.getElementById('c'), orb = createOrb(cvs, false);
+orb.point(S / 2, S / 2, 167);
+orb.start();
+const FPS = Number(new URLSearchParams(location.search).get('fps') || 25), DT = 1000 / FPS;
+// The story, in ms: a ball bursts into the listening orb, which speaks, changes shape three
+// times, thinks, lands on a check, and folds back into the ball the loop starts from.
+const plan = [
+  [600, () => orb.set('orb')],
+  [2100, () => orb.style({ listen: 'searching' })],
+  [3000, () => orb.style({ listen: 'breathing' })],
+  [3900, () => orb.style({ listen: 'shaping' })],
+  [4800, () => orb.set('think')],
+  [6100, () => orb.set('check')],
+  [7200, () => { orb.style(null); orb.set('ball'); }],
+];
+const END = 8000;
+const speech = t => 0.25 + 0.55 * Math.abs(Math.sin(t / 130)) * Math.abs(Math.sin(t / 410 + 1));
+const step = t => { for (const [at, fn] of plan) if (at > t - DT && at <= t) fn(); if (t > 600 && t < 4800) orb.level(speech(t)); else orb.level(0); now += DT; const cb = pending; pending = null; cb(now); };
+for (let i = 0; i < 30; i++) { now += DT; const cb = pending; pending = null; cb(now); } // settle as a ball
+const out = Object.assign(document.createElement('canvas'), { width: 2 * S, height: 2 * S }), og = out.getContext('2d');
+for (let f = 0, t = 0; t < END; f++, t += DT) {
+  step(t);
+  og.fillStyle = '#000'; og.fillRect(0, 0, 2 * S, 2 * S); og.drawImage(cvs, 0, 0);
+  const png = await new Promise(r => out.toBlob(r, 'image/png'));
+  await fetch('/frame2/' + String(f).padStart(4, '0'), { method: 'POST', body: png });
+}
+document.title = 'done';
+</script>

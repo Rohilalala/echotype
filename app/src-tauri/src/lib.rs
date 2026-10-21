@@ -1919,6 +1919,11 @@ async fn cloud_verify(email: String, code: String) -> R<serde_json::Value> {
 }
 
 #[tauri::command]
+async fn cloud_sign_in_with(app: AppHandle, provider: String) -> R<serde_json::Value> {
+    blocking(move || cloud::sign_in_with(&provider, |url| app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string()))).await
+}
+
+#[tauri::command]
 async fn cloud_account() -> R<serde_json::Value> {
     blocking(cloud::account).await
 }
@@ -2211,6 +2216,7 @@ pub fn run() {
             film_float,
             cloud_start_login,
             cloud_verify,
+            cloud_sign_in_with,
             cloud_account,
             cloud_checkout,
             cloud_portal,

@@ -1,10 +1,20 @@
-//! Echotype Cloud account (server/ in this repo): email-code sign-in, usage, Stripe checkout and portal.
-//! The API key lives only in the keychain as `cloud`; the UI never sees it.
+//! Echotype Cloud account (server/ in this repo): sign-in through Supabase (Google, Apple or an
+//! emailed code), usage, Stripe checkout and portal. Supabase vouches for the email; the server
+//! then issues its own API key, which lives only in the keychain as `cloud`; the UI never sees it.
 
 use crate::settings;
+use base64::Engine;
 use reqwest::Method;
 use serde_json::{Value, json};
-use std::time::Duration;
+use sha2::{Digest, Sha256};
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
+use std::time::{Duration, Instant};
+
+/// The Supabase project that signs people in. The anon key is public by design: it only lets
+/// people sign in, and the project exposes no tables. ECHOTYPE_SUPABASE_URL/_ANON_KEY override both (tests).
+const SUPABASE_URL: &str = "https://njozixvvvygsbawbyets.supabase.co";
+const SUPABASE_ANON_KEY: &str = "sb_publishable_12buu7IYCStk5rVbl_RCFA_8TBKafr7";
 
 const SECRET: &str = "cloud";
 /// The error every command returns when there is no usable key. The UI matches on it.
@@ -59,16 +69,111 @@ fn authed(method: Method, path: &str, body: Option<Value>) -> Result<Value, Stri
     }
 }
 
-pub fn start_login(email: &str) -> Result<(), String> {
-    call(Method::POST, "/auth/start", None, Some(json!({ "email": email.trim() }))).map(drop).map_err(|(_, e)| e)
+fn supabase_url() -> String {
+    std::env::var("ECHOTYPE_SUPABASE_URL").unwrap_or_else(|_| SUPABASE_URL.into()).trim_end_matches('/').to_string()
 }
 
-/// Redeems the code, stores the new key, and returns `{email, plan}` (never the key).
-pub fn verify(email: &str, code: &str) -> Result<Value, String> {
-    let v = call(Method::POST, "/auth/verify", None, Some(json!({ "email": email.trim(), "code": code.trim() }))).map_err(|(_, e)| e)?;
+/// POST to Supabase Auth (`path` under /auth/v1). Its errors read like "Token has expired or is
+/// invalid", so a 4xx passes its message through.
+fn supabase(path: &str, body: Value) -> Result<Value, String> {
+    let key = std::env::var("ECHOTYPE_SUPABASE_ANON_KEY").unwrap_or_else(|_| SUPABASE_ANON_KEY.into());
+    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
+    let resp = client.post(format!("{}/auth/v1{path}", supabase_url())).header("apikey", key).json(&body).send().map_err(|e| format!("Could not reach the sign-in service: {e}"))?;
+    let status = resp.status().as_u16();
+    let v: Value = resp.json().unwrap_or_default();
+    if (200..300).contains(&status) {
+        return Ok(v);
+    }
+    let msg = [&v["msg"], &v["error_description"], &v["message"]].into_iter().find_map(|m| m.as_str()).unwrap_or("").trim().to_string();
+    Err(match status {
+        429 => "Too many sign-in attempts. Wait a minute and try again.".into(),
+        400..=499 if !msg.is_empty() => msg,
+        _ => format!("The sign-in service answered with an error ({status}). Try again in a minute."),
+    })
+}
+
+/// Trades a Supabase session for an Echotype Cloud key, stores the key, and returns `{email, plan}` (never the key).
+fn redeem(session: &Value) -> Result<Value, String> {
+    let token = session["access_token"].as_str().filter(|t| !t.is_empty()).ok_or("The sign-in service sent no session. Try again.")?;
+    let v = call(Method::POST, "/auth/supabase", None, Some(json!({ "access_token": token }))).map_err(|(_, e)| e)?;
     let key = v["api_key"].as_str().filter(|k| !k.is_empty()).ok_or("Echotype Cloud did not return a key. Try signing in again.")?;
     settings::set_secret(SECRET, key)?;
     Ok(json!({ "email": v["email"], "plan": v["plan"] }))
+}
+
+/// Emails a 6-digit code (Supabase's "Magic Link" template sends {{ .Token }}).
+pub fn start_login(email: &str) -> Result<(), String> {
+    supabase("/otp", json!({ "email": email.trim(), "create_user": true })).map(drop)
+}
+
+/// Checks the emailed code and signs in.
+pub fn verify(email: &str, code: &str) -> Result<Value, String> {
+    redeem(&supabase("/verify", json!({ "type": "email", "email": email.trim(), "token": code.trim() }))?)
+}
+
+/// What a browser sign-in waits for before giving up.
+const BROWSER_WAIT: Duration = Duration::from_secs(300);
+
+/// Google or Apple through the browser: Supabase redirects back to a one-off listener on
+/// 127.0.0.1, and PKCE ties the returned code to this app, so a code caught by anyone else is useless.
+/// `open` opens the sign-in page.
+pub fn sign_in_with(provider: &str, open: impl FnOnce(String) -> Result<(), String>) -> Result<Value, String> {
+    if !matches!(provider, "google" | "apple") {
+        return Err(format!("Unknown sign-in provider '{provider}'"));
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("Could not start sign-in: {e}"))?;
+    let redirect = format!("http://127.0.0.1:{}/callback", listener.local_addr().map_err(|e| e.to_string())?.port());
+    let mut raw = [0u8; 32];
+    getrandom::fill(&mut raw).map_err(|e| e.to_string())?;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let verifier = b64.encode(raw);
+    let challenge = b64.encode(Sha256::digest(&verifier));
+    let url = reqwest::Url::parse_with_params(
+        &format!("{}/auth/v1/authorize", supabase_url()),
+        [("provider", provider), ("redirect_to", &redirect), ("code_challenge", &challenge), ("code_challenge_method", "s256")],
+    )
+    .map_err(|e| e.to_string())?;
+    open(url.to_string())?;
+    let code = wait_for_code(&listener, Instant::now() + BROWSER_WAIT)?;
+    redeem(&supabase("/token?grant_type=pkce", json!({ "auth_code": code, "code_verifier": verifier }))?)
+}
+
+/// Answers browser requests on the listener until one brings `?code=` (or Supabase's `?error=`).
+fn wait_for_code(listener: &TcpListener, until: Instant) -> Result<String, String> {
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    loop {
+        let mut stream = match listener.accept() {
+            Ok((s, _)) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() > until {
+                    return Err("Sign-in timed out. Try again.".into());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        let _ = stream.set_nonblocking(false);
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let mut line = String::new();
+        let _ = BufReader::new(&stream).read_line(&mut line);
+        // "GET /callback?code=...&state=... HTTP/1.1"
+        let target = line.split_whitespace().nth(1).unwrap_or("");
+        let Ok(url) = reqwest::Url::parse(&format!("http://127.0.0.1{target}")) else { continue };
+        if url.path() != "/callback" {
+            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            continue;
+        }
+        let param = |k: &str| url.query_pairs().find(|(n, _)| n == k).map(|(_, v)| v.into_owned());
+        let (code, page) = match (param("code"), param("error_description").or_else(|| param("error"))) {
+            (Some(c), _) if !c.is_empty() => (Ok(c), "You are signed in to Echotype. You can close this tab."),
+            (_, Some(e)) => (Err(format!("Sign-in did not finish: {e}")), "Sign-in did not finish. Go back to Echotype and try again."),
+            _ => (Err("Sign-in did not finish. Try again.".into()), "Sign-in did not finish. Go back to Echotype and try again."),
+        };
+        let html = format!("<!doctype html><meta charset=utf-8><title>Echotype</title><body style=\"font:16px -apple-system,sans-serif;text-align:center;padding-top:20vh\">{page}</body>");
+        let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}", html.len()).as_bytes());
+        return code;
+    }
 }
 
 /// GET /v1/me: `{email, plan, words_used, words_limit, resets_at, audio_seconds_used, audio_seconds_limit}`.
@@ -146,48 +251,77 @@ mod tests {
         assert!(error_message(502, "<html>Bad gateway</html>").contains("(502)"));
     }
 
-    /// Against a real server/ in dev mode (SMTP_HOST empty, so it logs each code as JSON):
-    /// ECHOTYPE_CLOUD_URL=http://127.0.0.1:8790/v1 ECHOTYPE_TEST_EMAIL=a@example.com
-    /// ECHOTYPE_TEST_SERVER_LOG=<server stdout file> [ECHOTYPE_TEST_WAV=<speech.wav>] cargo test live_sign_in -- --ignored --nocapture
-    /// It leaves the key in the keychain (for a CLI run afterwards) unless ECHOTYPE_TEST_LOGOUT=1.
+    /// A one-request HTTP server: answers `status` + `reply` and hands back what it was sent.
+    fn fake_http(status: u16, reply: &'static str) -> (String, std::sync::mpsc::Receiver<String>) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (s, _) = l.accept().unwrap();
+            let mut r = BufReader::new(&s);
+            let (mut head, mut len) = (String::new(), 0);
+            loop {
+                let mut line = String::new();
+                r.read_line(&mut line).unwrap();
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap();
+                }
+                head.push_str(&line);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let mut body = vec![0; len];
+            std::io::Read::read_exact(&mut r, &mut body).unwrap();
+            (&s).write_all(format!("HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len()).as_bytes()).unwrap();
+            tx.send(head + &String::from_utf8(body).unwrap()).unwrap();
+        });
+        (url, rx)
+    }
+
     #[test]
-    #[ignore = "needs a running dev-mode server"]
-    fn live_sign_in() {
-        let email = std::env::var("ECHOTYPE_TEST_EMAIL").unwrap();
-        let log = std::env::var("ECHOTYPE_TEST_SERVER_LOG").unwrap();
-        assert_eq!(account().unwrap_err(), SIGNED_OUT);
-        start_login(&email).unwrap();
-        let code = std::fs::read_to_string(&log).unwrap().lines().rev()
-            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-            .find(|v| v["email"] == email.as_str() && v["code"].is_string())
-            .map(|v| v["code"].as_str().unwrap().to_string())
-            .expect("no dev-mode code in the server log");
-        assert!(verify(&email, "000000").is_err() || code == "000000");
-        let who = verify(&email, &code).unwrap();
-        assert_eq!(who, json!({ "email": email, "plan": "free" }));
-        assert!(settings::secret(SECRET).unwrap().is_some_and(|k| k.starts_with("et_live_")));
-        let me = account().unwrap();
-        println!("account: {me}");
-        assert_eq!(me["plan"], "free");
-        assert_eq!(me["words_limit"], 2000);
-        assert_eq!(billing_url(None).unwrap_err(), "Billing is not set up on this server.");
-        // The dictation pipeline with both stages on the cloud provider, using the one `cloud` key.
-        if let Ok(wav) = std::env::var("ECHOTYPE_TEST_WAV") {
-            let mut s = settings::Settings::default();
-            s.stt.provider = "cloud".into();
-            s.cleanup.enabled = true;
-            s.cleanup.provider = "cloud".into();
-            let pcm = crate::audio::decode(std::fs::read(wav).unwrap(), Some("wav")).unwrap();
-            let out = crate::cleanup::run(&s, &pcm, false, || {}).unwrap();
-            println!("pipeline: raw {:?}, text {:?}, warning {:?}", out.raw, out.text, out.warning);
-            assert_eq!(out.raw, "hello world");
-            let after = account().unwrap();
-            println!("account after: {after}");
-            assert_eq!(after["words_used"].as_i64().unwrap(), me["words_used"].as_i64().unwrap() + 2);
-        }
-        if std::env::var("ECHOTYPE_TEST_LOGOUT").is_ok_and(|v| v == "1") {
-            logout().unwrap();
-            assert_eq!(account().unwrap_err(), SIGNED_OUT);
-        }
+    fn browser_sign_in_ties_the_code_to_this_app() {
+        let (supa, sent) = fake_http(400, r#"{"error":"invalid_grant","error_description":"Invalid code"}"#);
+        // SAFETY: only this test reads the variable while it runs (the other browser test never reaches Supabase).
+        unsafe { std::env::set_var("ECHOTYPE_SUPABASE_URL", &supa) };
+        let mut seen = None;
+        let err = sign_in_with("google", |page| {
+            let page = reqwest::Url::parse(&page).unwrap();
+            let q: std::collections::HashMap<_, _> = page.query_pairs().into_owned().collect();
+            assert_eq!((page.path(), q["provider"].as_str(), q["code_challenge_method"].as_str()), ("/auth/v1/authorize", "google", "s256"));
+            let back = q["redirect_to"].clone();
+            assert!(back.starts_with("http://127.0.0.1:") && back.ends_with("/callback"), "{back}");
+            // The browser: a stray request first, then the redirect with the code.
+            let browser = std::thread::spawn(move || {
+                assert_eq!(reqwest::blocking::get(back.replace("/callback", "/favicon.ico")).unwrap().status(), 404);
+                reqwest::blocking::get(format!("{back}?code=abc-123")).unwrap().text().unwrap()
+            });
+            seen = Some((q["code_challenge"].clone(), browser));
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(err, "Invalid code", "Supabase's own message passes through");
+        let (challenge, browser) = seen.unwrap();
+        assert!(browser.join().unwrap().contains("signed in"));
+        let req = sent.recv().unwrap();
+        assert!(req.starts_with("POST /auth/v1/token?grant_type=pkce "), "{req}");
+        let body: Value = serde_json::from_str(&req[req.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+        assert_eq!(body["auth_code"], "abc-123");
+        let verifier = body["code_verifier"].as_str().unwrap();
+        assert!(verifier.len() >= 43, "PKCE wants 43+ characters");
+        assert_eq!(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier)), challenge, "the verifier answers the challenge");
+    }
+
+    #[test]
+    fn browser_sign_in_reports_a_refusal() {
+        let err = sign_in_with("apple", |page| {
+            let q: std::collections::HashMap<_, _> = reqwest::Url::parse(&page).unwrap().query_pairs().into_owned().collect();
+            let back = q["redirect_to"].clone();
+            std::thread::spawn(move || reqwest::blocking::get(format!("{back}?error=access_denied&error_description=The+user+cancelled")));
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(err, "Sign-in did not finish: The user cancelled");
+        assert!(sign_in_with("github", |_| Ok(())).is_err());
     }
 }

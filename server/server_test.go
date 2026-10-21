@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -29,10 +30,13 @@ func TestMain(m *testing.M) {
 var t0 = time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)
 
 type harness struct {
-	s     *server
-	h     http.Handler
-	now   time.Time
-	codes map[string]string
+	s   *server
+	h   http.Handler
+	now time.Time
+	// The fake Supabase: access token -> the user GET /auth/v1/user answers with.
+	users     map[string]map[string]any
+	supaDown  bool
+	supaCalls int
 }
 
 func newHarness(t *testing.T, upstream http.HandlerFunc) *harness {
@@ -49,10 +53,23 @@ func newHarness(t *testing.T, upstream http.HandlerFunc) *harness {
 		t.Cleanup(up.Close)
 		cfg.STTURL, cfg.LLMURL = up.URL, up.URL
 	}
-	x := &harness{now: t0, codes: map[string]string{}}
+	x := &harness{now: t0, users: map[string]map[string]any{}}
+	supa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		x.supaCalls++
+		u, ok := x.users[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
+		switch {
+		case x.supaDown:
+			w.WriteHeader(500)
+		case r.Method != "GET" || r.URL.Path != "/auth/v1/user" || r.Header.Get("apikey") != "anon-key" || !ok:
+			w.WriteHeader(401)
+		default:
+			json.NewEncoder(w).Encode(u)
+		}
+	}))
+	t.Cleanup(supa.Close)
+	cfg.SupabaseURL, cfg.SupabaseAnonKey = supa.URL, "anon-key"
 	x.s = newServer(cfg, db)
 	x.s.now = func() time.Time { return x.now }
-	x.s.sendCode = func(email, code string) error { x.codes[email] = code; return nil }
 	x.h = x.s.routes()
 	return x
 }
@@ -71,18 +88,23 @@ func (x *harness) json(method, path, body string, hdr ...string) *httptest.Respo
 	return x.do(method, path, strings.NewReader(body), append([]string{"Content-Type", "application/json"}, hdr...)...)
 }
 
-// signIn runs auth start + verify and returns the API key.
+// signIn signs in through the fake Supabase as a user with this confirmed email and returns the API key.
 func (x *harness) signIn(t *testing.T, email string) string {
 	t.Helper()
-	if w := x.json("POST", "/v1/auth/start", `{"email":"`+email+`"}`); w.Code != 204 {
-		t.Fatalf("start: %d %s", w.Code, w.Body)
-	}
-	w := x.json("POST", "/v1/auth/verify", fmt.Sprintf(`{"email":%q,"code":%q}`, email, x.codes[strings.ToLower(strings.TrimSpace(email))]))
+	token := jwtWith("otp", len(x.users))
+	x.users[token] = map[string]any{"id": "u-" + email, "email": email, "email_confirmed_at": "2026-10-12T09:00:00Z"}
+	w := x.json("POST", "/v1/auth/supabase", `{"access_token":"`+token+`"}`)
 	if w.Code != 200 {
-		t.Fatalf("verify: %d %s", w.Code, w.Body)
+		t.Fatalf("sign in: %d %s", w.Code, w.Body)
 	}
 	key, _ := decode(t, w)["api_key"].(string)
 	return key
+}
+
+// jwtWith is a token shaped like Supabase's: only its payload's amr claim is read. n keeps tokens apart.
+func jwtWith(method string, n int) string {
+	p, _ := json.Marshal(map[string]any{"amr": []map[string]any{{"method": method, "timestamp": n}}})
+	return "h." + base64.RawURLEncoding.EncodeToString(p) + ".sig"
 }
 
 func bearer(key string) []string { return []string{"Authorization", "Bearer " + key} }
@@ -120,10 +142,6 @@ func TestAuthFlowAndKeyHashing(t *testing.T) {
 	if n != 0 {
 		t.Fatal("raw key stored")
 	}
-	x.s.db.QueryRow(`SELECT COUNT(*) FROM login_codes`).Scan(&n)
-	if n != 0 {
-		t.Fatal("used code not deleted")
-	}
 
 	me := decode(t, x.do("GET", "/v1/me", nil, bearer(key)...))
 	if me["email"] != "ada@example.com" || me["plan"] != "free" || me["words_limit"] != float64(2000) {
@@ -150,122 +168,92 @@ func TestAuthFlowAndKeyHashing(t *testing.T) {
 	}
 }
 
-func TestAuthCodeStoredHashed(t *testing.T) {
+func TestSupabaseSignInNeedsATokenSupabaseVouchesFor(t *testing.T) {
 	x := newHarness(t, nil)
-	x.json("POST", "/v1/auth/start", `{"email":"a@b.co"}`)
-	var stored []byte
-	x.s.db.QueryRow(`SELECT hash FROM login_codes WHERE email = 'a@b.co'`).Scan(&stored)
-	if bytes.Equal(stored, []byte(x.codes["a@b.co"])) || !bytes.Equal(stored, codeHash("a@b.co", x.codes["a@b.co"])) {
-		t.Fatal("code not stored as its hash")
+	ok := "2026-10-12T09:00:00Z"
+	tokens := map[string]map[string]any{
+		"unknown":     nil,
+		"unconfirmed": {"email": "a@b.co", "email_confirmed_at": nil},
+		"no-email":    {"email": "", "email_confirmed_at": ok}, // a phone-only user
+		"bad-email":   {"email": "Ada <a@b.co>", "email_confirmed_at": ok},
+		// A password proves nothing about the address (a project that auto-confirms sign-ups), nor does an anonymous user.
+		"password":  {"email": "a@b.co", "email_confirmed_at": ok},
+		"anonymous": {"email": "a@b.co", "email_confirmed_at": ok},
+		"totp-only": {"email": "a@b.co", "email_confirmed_at": ok}, // a second factor alone proves no address
 	}
-}
-
-func TestAuthRejectsBadEmail(t *testing.T) {
-	x := newHarness(t, nil)
-	for _, e := range []string{"", "nope", "a@b", "Ada <a@b.co>", "a@b.co\r\nBcc: x@y.z", strings.Repeat("a", 250) + "@b.co"} {
-		b, _ := json.Marshal(map[string]string{"email": e})
-		if w := x.json("POST", "/v1/auth/start", string(b)); w.Code != 400 {
-			t.Fatalf("%q: %d", e, w.Code)
+	for name, u := range tokens {
+		method := map[string]string{"password": "password", "anonymous": "anonymous", "totp-only": "totp"}[name]
+		if method == "" {
+			method = "otp"
+		}
+		tok := jwtWith(method, len(x.users)+100)
+		if u != nil {
+			x.users[tok] = u
+		}
+		w := x.json("POST", "/v1/auth/supabase", `{"access_token":"`+tok+`"}`)
+		if w.Code != 401 || errType(t, w) != "invalid_token" {
+			t.Fatalf("%s: %d %s", name, w.Code, w.Body)
 		}
 	}
-}
-
-func TestAuthCodeTTL(t *testing.T) {
-	x := newHarness(t, nil)
-	x.json("POST", "/v1/auth/start", `{"email":"a@b.co"}`)
-	x.now = x.now.Add(10*time.Minute + time.Second)
-	w := x.json("POST", "/v1/auth/verify", `{"email":"a@b.co","code":"`+x.codes["a@b.co"]+`"}`)
-	if w.Code != 401 || errType(t, w) != "invalid_code" {
-		t.Fatalf("expired code accepted: %d", w.Code)
+	for _, tok := range []string{"not-a-jwt", "a.!!!.c", "a." + base64.RawURLEncoding.EncodeToString([]byte(`{"amr":[]}`)) + ".c"} {
+		x.users[tok] = map[string]any{"email": "a@b.co", "email_confirmed_at": ok}
+		if w := x.json("POST", "/v1/auth/supabase", `{"access_token":"`+tok+`"}`); w.Code != 401 {
+			t.Fatalf("%q: %d", tok, w.Code)
+		}
+	}
+	// Google/Apple (oauth) and a code plus a second factor are fine.
+	for _, amr := range [][]string{{"oauth"}, {"totp", "otp"}} {
+		var list []map[string]any
+		for _, m := range amr {
+			list = append(list, map[string]any{"method": m})
+		}
+		p, _ := json.Marshal(map[string]any{"amr": list})
+		tok := "h." + base64.RawURLEncoding.EncodeToString(p) + ".s"
+		x.users[tok] = map[string]any{"email": "ok@b.co", "email_confirmed_at": ok}
+		if w := x.json("POST", "/v1/auth/supabase", `{"access_token":"`+tok+`"}`); w.Code != 200 {
+			t.Fatalf("%v: %d %s", amr, w.Code, w.Body)
+		}
+	}
+	x.s.db.Exec(`DELETE FROM api_keys`)
+	x.s.db.Exec(`DELETE FROM accounts`)
+	calls := x.supaCalls
+	if w := x.json("POST", "/v1/auth/supabase", `{"access_token":"  "}`); w.Code != 401 || x.supaCalls != calls {
+		t.Fatalf("blank token: %d, asked Supabase: %v", w.Code, x.supaCalls != calls)
+	}
+	var n int
+	x.s.db.QueryRow(`SELECT COUNT(*) FROM accounts`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("accounts = %d", n)
 	}
 }
 
-func TestAuthCodeAttemptLimit(t *testing.T) {
+func TestSupabaseDownIsNotASignInFailure(t *testing.T) {
 	x := newHarness(t, nil)
-	x.json("POST", "/v1/auth/start", `{"email":"a@b.co"}`)
-	good := x.codes["a@b.co"]
-	bad := "000000"
-	if good == bad {
-		bad = "111111"
+	tok := jwtWith("oauth", 0)
+	x.users[tok] = map[string]any{"email": "a@b.co", "email_confirmed_at": "2026-10-12T09:00:00Z"}
+	x.supaDown = true
+	if w := x.json("POST", "/v1/auth/supabase", `{"access_token":"`+tok+`"}`); w.Code != 502 || errType(t, w) != "auth_unavailable" {
+		t.Fatalf("Supabase down: %d %s", w.Code, w.Body)
 	}
-	for i := 0; i < 5; i++ {
-		if w := x.json("POST", "/v1/auth/verify", `{"email":"a@b.co","code":"`+bad+`"}`); w.Code != 401 {
+	x.supaDown = false
+	if w := x.json("POST", "/v1/auth/supabase", `{"access_token":"`+tok+`"}`); w.Code != 200 {
+		t.Fatalf("Supabase back: %d", w.Code)
+	}
+}
+
+func TestSupabaseSignInRateLimitPerIP(t *testing.T) {
+	x := newHarness(t, nil)
+	for i := 0; i < 30; i++ {
+		if w := x.json("POST", "/v1/auth/supabase", `{"access_token":"wrong"}`); w.Code != 401 {
 			t.Fatalf("attempt %d: %d", i, w.Code)
 		}
 	}
-	if w := x.json("POST", "/v1/auth/verify", `{"email":"a@b.co","code":"`+good+`"}`); w.Code != 401 {
-		t.Fatal("right code accepted after 5 wrong tries")
+	if w := x.json("POST", "/v1/auth/supabase", `{"access_token":"wrong"}`); w.Code != 429 {
+		t.Fatalf("31st attempt from one IP: %d", w.Code)
 	}
-	// Unknown email gets the identical answer.
-	w := x.json("POST", "/v1/auth/verify", `{"email":"nobody@b.co","code":"123456"}`)
-	if w.Code != 401 || errType(t, w) != "invalid_code" {
-		t.Fatal("unknown email answered differently")
-	}
-}
-
-func TestAuthFailuresCappedPerEmailAcrossCodes(t *testing.T) {
-	x := newHarness(t, nil)
-	wrong := func() int {
-		bad := "000000"
-		if x.codes["a@b.co"] == bad {
-			bad = "111111"
-		}
-		return x.json("POST", "/v1/auth/verify", `{"email":"a@b.co","code":"`+bad+`"}`).Code
-	}
-	start := func() int { return x.json("POST", "/v1/auth/start", `{"email":"a@b.co"}`).Code }
-	// 5 wrong on code A, 4 on code B, 1 on a fresh code C: 10 failures in 24 h.
-	for i, tries := range []int{5, 4, 1} {
-		x.now = x.now.Add(10 * time.Minute)
-		if c := start(); c != 204 {
-			t.Fatalf("code %d: start %d", i, c)
-		}
-		for j := 0; j < tries; j++ {
-			if c := wrong(); c != 401 {
-				t.Fatalf("wrong guess: %d", c)
-			}
-		}
-	}
-	// The 11th check is refused even with the right, fresh code, and no new code is issued.
-	w := x.json("POST", "/v1/auth/verify", `{"email":"a@b.co","code":"`+x.codes["a@b.co"]+`"}`)
-	if w.Code != 401 || errType(t, w) != "invalid_code" {
-		t.Fatalf("locked email verified: %d %s", w.Code, w.Body)
-	}
-	x.now = x.now.Add(2 * time.Hour) // past the per-email start rate limit, inside the 24 h window
-	if c := start(); c != 429 {
-		t.Fatalf("locked email got a new code: %d", c)
-	}
-	// Other emails are unaffected.
-	if c := x.json("POST", "/v1/auth/start", `{"email":"c@d.co"}`).Code; c != 204 {
-		t.Fatalf("other email: %d", c)
-	}
-	// Once the oldest failures are 24 h old, sign-in works again.
-	x.now = x.now.Add(22 * time.Hour)
-	if key := x.signIn(t, "a@b.co"); !strings.HasPrefix(key, "et_live_") {
-		t.Fatal("no key after the window")
-	}
-}
-
-func TestAuthStartRateLimits(t *testing.T) {
-	x := newHarness(t, nil)
-	for i := 0; i < 5; i++ {
-		if w := x.json("POST", "/v1/auth/start", `{"email":"a@b.co"}`); w.Code != 204 {
-			t.Fatalf("start %d: %d", i, w.Code)
-		}
-	}
-	if w := x.json("POST", "/v1/auth/start", `{"email":"a@b.co"}`); w.Code != 429 {
-		t.Fatalf("6th start for one email: %d", w.Code)
-	}
-	x.now = x.now.Add(time.Hour + time.Second)
-	if w := x.json("POST", "/v1/auth/start", `{"email":"a@b.co"}`); w.Code != 204 {
+	x.now = x.now.Add(10*time.Minute + time.Second)
+	if w := x.json("POST", "/v1/auth/supabase", `{"access_token":"wrong"}`); w.Code != 401 {
 		t.Fatalf("after window: %d", w.Code)
-	}
-	// Per IP: 20 an hour across any emails (httptest uses one RemoteAddr).
-	y := newHarness(t, nil)
-	for i := 0; i < 20; i++ {
-		y.json("POST", "/v1/auth/start", fmt.Sprintf(`{"email":"u%d@b.co"}`, i))
-	}
-	if w := y.json("POST", "/v1/auth/start", `{"email":"last@b.co"}`); w.Code != 429 {
-		t.Fatalf("21st start from one IP: %d", w.Code)
 	}
 }
 

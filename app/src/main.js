@@ -771,9 +771,10 @@ function renderAdvanced() {
 $('#ctxPick').addEventListener('change', e => { S.cleaner_context = Number(e.target.value); save(); });
 
 // ---------- Echotype Cloud ----------
-// status: loading | out (email step) | code (code step) | in (signed in) | error (unreachable, no account yet).
+// status: loading | out (email step) | code (code step) | browser (Google/Apple sign-in open in the
+// browser) | in (signed in) | error (unreachable, no account yet).
 // The API key never reaches this window; Rust keeps it in the keychain.
-let cloud = { status: 'loading' }, cloudEmail = '';
+let cloud = { status: 'loading' }, cloudEmail = '', cloudAttempt = 0;
 const usesCloud = () => !!sys?.cloud && (S.stt.provider === 'cloud' || (S.cleanup.enabled && S.cleanup.provider === 'cloud'));
 const SIGNED_OUT = 'signed out';
 
@@ -790,7 +791,7 @@ async function refreshCloud() {
     cloud = { status: 'in', account, note: account.plan === cloud.account?.plan ? cloud.note : null };
   } catch (e) {
     // Mid sign-in, leave the form alone: re-rendering would wipe what was typed, and the form shows its own errors.
-    if (cloud.status === 'out' || cloud.status === 'code') return;
+    if (cloud.status === 'out' || cloud.status === 'code' || cloud.status === 'browser') return;
     cloud = String(e) === SIGNED_OUT ? { status: 'out' } : { ...cloud, status: cloud.account ? 'in' : 'error', error: String(e) };
   }
   renderCloud();
@@ -829,9 +830,30 @@ function cloudForm(title, desc, input, label, run) {
 function cloudPanel() {
   if (cloud.status === 'loading') return [h('p', { className: 'empty working' }, 'Checking your account')];
   if (cloud.status === 'error') return [h('p', { className: 'empty', role: 'alert' }, `${cloud.error} `, h('button', { className: 'btn', type: 'button', onclick: () => { cloud = { status: 'loading' }; renderCloud(); refreshCloud(); } }, 'Try again'))];
+  if (cloud.status === 'browser') {
+    return [cloudRow('Finish signing in in your browser', `Echotype opened ${cloud.provider} sign-in. Come back here once the page says you are signed in.`,
+      [h('button', { className: 'btn quiet', type: 'button', onclick: () => { cloudAttempt++; cloud = { status: 'out' }; renderCloud(); } }, 'Cancel')])];
+  }
   if (cloud.status === 'out') {
+    // A sign-in cancelled (or superseded) here still finishes in Rust; its answer is dropped.
+    const provider = (id, name) => h('button', { className: 'btn', type: 'button', onclick: async () => {
+      const mine = ++cloudAttempt;
+      cloud = { status: 'browser', provider: name };
+      renderCloud();
+      try {
+        const who = await invoke('cloud_sign_in_with', { provider: id });
+        if (mine !== cloudAttempt) return;
+        cloud = { status: 'in', account: who };
+        renderCloud();
+        refreshCloud();
+      } catch (e) {
+        if (mine === cloudAttempt) { cloud = { status: 'out', providerError: String(e) }; renderCloud(); }
+      }
+    } }, `Continue with ${name}`);
     const email = h('input', { type: 'text', inputMode: 'email', autocomplete: 'email', spellcheck: false, placeholder: 'you@example.com', 'aria-label': 'Email', value: cloudEmail });
-    return [cloudForm('Sign in with your email', 'Echotype emails you a 6-digit code. There is no password.', email, 'Send code', async v => {
+    return [cloudRow('Sign in', 'With Google or Apple, or with a code sent to your email. There is no password.', [provider('google', 'Google'), provider('apple', 'Apple')],
+      cloud.providerError && h('span', { className: 'row-desc error', role: 'alert' }, cloud.providerError)),
+    cloudForm('Or use your email', 'Echotype emails you a 6-digit code.', email, 'Send code', async v => {
       cloudEmail = v;
       await invoke('cloud_start_login', { email: v });
       cloud = { status: 'code' };

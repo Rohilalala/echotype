@@ -238,6 +238,13 @@ const commands = {
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw 'Enter a valid email address.';
     return null;
   },
+  cloud_sign_in_with: async ({ provider }) => {
+    await wait(2500);
+    if (q.has('signinfail')) throw 'Sign-in did not finish: The user cancelled';
+    const email = provider === 'apple' ? 'x7k2p9@privaterelay.appleid.com' : 'you@gmail.com';
+    cloudAccount = { ...sampleAccount('free'), email };
+    return { email, plan: 'free' };
+  },
   cloud_verify: async ({ email, code }) => {
     await wait(500);
     if (!/^\d{6}$/.test(code) || code === '000000') throw 'That code is wrong or has expired.';

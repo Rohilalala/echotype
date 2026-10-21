@@ -23,11 +23,8 @@
 //	STRIPE_WEBHOOK_SECRET  signing secret of the /webhooks/stripe endpoint (whsec_...)
 //	STRIPE_PRICE_MONTHLY   Stripe price id for Pro monthly ($6/month)
 //	STRIPE_PRICE_YEARLY    Stripe price id for Pro yearly ($60/year)
-//	SMTP_HOST              mail server for sign-in codes; when empty the server runs in dev mode
-//	                       and logs each code to stdout instead of emailing it
-//	SMTP_PORT              default 587; STARTTLS is required
-//	SMTP_USER, SMTP_PASS   SMTP credentials (PLAIN auth over TLS)
-//	SMTP_FROM              From address, e.g. "Echotype <login@example.com>"
+//	SUPABASE_URL           https://<project>.supabase.co; it signs people in (required)
+//	SUPABASE_ANON_KEY      the project's anon / publishable key (public, the app ships it too)
 package main
 
 import (
@@ -48,7 +45,7 @@ type config struct {
 	STTURL, STTKey, STTModel, TranslateModel                  string
 	LLMURL, LLMKey, LLMModel                                  string
 	StripeKey, StripeWebhookSecret, PriceMonthly, PriceYearly string
-	SMTPHost, SMTPPort, SMTPUser, SMTPPass, SMTPFrom          string
+	SupabaseURL, SupabaseAnonKey                              string
 }
 
 func env(k, def string) string {
@@ -72,11 +69,8 @@ func loadConfig() config {
 		StripeWebhookSecret: env("STRIPE_WEBHOOK_SECRET", ""),
 		PriceMonthly:        env("STRIPE_PRICE_MONTHLY", ""),
 		PriceYearly:         env("STRIPE_PRICE_YEARLY", ""),
-		SMTPHost:            env("SMTP_HOST", ""),
-		SMTPPort:            env("SMTP_PORT", "587"),
-		SMTPUser:            env("SMTP_USER", ""),
-		SMTPPass:            env("SMTP_PASS", ""),
-		SMTPFrom:            env("SMTP_FROM", ""),
+		SupabaseURL:         strings.TrimRight(env("SUPABASE_URL", ""), "/"),
+		SupabaseAnonKey:     env("SUPABASE_ANON_KEY", ""),
 	}
 	c.PublicURL = strings.TrimRight(env("PUBLIC_URL", "http://localhost:"+c.Port), "/")
 	c.LLMURL = strings.TrimRight(env("LLM_UPSTREAM_URL", c.STTURL), "/")
@@ -90,8 +84,9 @@ func main() {
 	if cfg.STTKey == "" {
 		slog.Warn("STT_UPSTREAM_KEY is empty; upstream calls will be unauthenticated")
 	}
-	if cfg.SMTPHost == "" {
-		slog.Warn("DEV MODE: SMTP_HOST is empty, sign-in codes are logged to stdout instead of emailed")
+	if cfg.SupabaseURL == "" || cfg.SupabaseAnonKey == "" {
+		slog.Error("SUPABASE_URL and SUPABASE_ANON_KEY are required: nobody can sign in without them")
+		os.Exit(1)
 	}
 	if cfg.StripeKey == "" || cfg.StripeWebhookSecret == "" {
 		slog.Warn("Stripe is not fully configured; billing routes answer 503")
