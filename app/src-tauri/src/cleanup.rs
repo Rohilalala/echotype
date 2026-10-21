@@ -1661,6 +1661,44 @@ mod tests {
         assert!(COMMAND_PROMPT.contains("<text>") && COMMAND_PROMPT.contains("<instruction>") && COMMAND_PROMPT.contains("Output only"));
     }
 
+    /// Command Mode the way the app runs it, minus the keyboard: a spoken instruction (a wav per
+    /// case) through the app's own transcription, then the edit through chat() with the built-in
+    /// provider, so Echotype Writer. ECHOTYPE_TEST_WAVS=<dir with formal.wav, shorter.wav, spanish.wav,
+    /// bullets.wav, friendly.wav, write.wav> `cargo test --release -- --ignored --nocapture command_mode_end_to_end`.
+    #[test]
+    #[ignore]
+    fn command_mode_end_to_end() {
+        let Ok(dir) = std::env::var("ECHOTYPE_TEST_WAVS") else { return eprintln!("skipped: no ECHOTYPE_TEST_WAVS") };
+        assert!(llm::writer_installed(), "Echotype Writer is not downloaded");
+        let mut s = Settings::default();
+        s.cleanup.enabled = true;
+        s.cleanup.provider = "echotype".into();
+        s.languages = vec!["en".into()];
+        let mut heard = s.clone();
+        heard.cleanup.enabled = false; // the instruction as spoken, as run_command does
+        let sel = "hey can u send me the deck when ur free, the meeting is tuesday at 3:30 with priya";
+        let numbers = |t: &str| ["3:30", "Priya"].iter().all(|k| t.to_lowercase().contains(&k.to_lowercase()));
+        for (case, selection, ok) in [
+            ("formal", Some(sel), &(|t: &str| numbers(t) && !t.contains(" u ") && !t.contains(" ur ")) as &dyn Fn(&str) -> bool),
+            ("shorter", Some("I just wanted to let you know that I have reviewed the document you sent yesterday and overall it looks good, but there are a couple of small things in the second section we should discuss before Friday."), &|t: &str| t.split_whitespace().count() < 38 && t.contains("Friday")),
+            ("spanish", Some("Can we meet tomorrow at 10 to talk about the budget?"), &|t: &str| t.contains("10") && ["mañana", "presupuesto", "podemos"].iter().any(|w| t.to_lowercase().contains(w))),
+            ("bullets", Some("we need to fix the login bug update the docs and email the beta users"), &|t: &str| t.lines().filter(|l| l.trim_start().starts_with(['-', '•', '*'])).count() >= 3),
+            ("friendly", Some("Send me the report by 5. Don't be late again."), &|t: &str| t.contains('5') && !t.contains("Don't be late again")),
+            ("write", None, &|t: &str| t.contains("Friday") && t.split_whitespace().count() > 6),
+        ] {
+            let wav = std::fs::read(format!("{dir}/{case}.wav")).unwrap();
+            let pcm = crate::audio::decode(wav, Some("wav")).unwrap();
+            let t = Instant::now();
+            let instruction = run(&heard, &pcm, false, || {}).unwrap().text;
+            let stt_ms = t.elapsed().as_millis();
+            let t = Instant::now();
+            let out = chat(&s, COMMAND_PROMPT, &command_input(selection, &instruction), Duration::from_secs(60)).unwrap();
+            eprintln!("--- {case}: heard {instruction:?} ({stt_ms} ms), edit {} ms\n{out}\n", t.elapsed().as_millis());
+            assert!(ok(&out), "{case}: {out}");
+        }
+        llm::stop();
+    }
+
     #[test]
     fn edits_go_to_the_writer_and_cleanup_to_the_cleaner() {
         let mut s = Settings::default();
