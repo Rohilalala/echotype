@@ -815,10 +815,12 @@ function renderAppStyles() {
   box.hidden = !S.cleanup.match_app;
   const add = lastApp?.id && !list().some(a => a.id === lastApp.id) ? lastApp : null;
   const label = v => APP_STYLE_OPTS.find(o => o[0] === v)?.[1].toLowerCase() ?? v;
-  fill(box, list().map((a, i) => h('div', { className: 'row' },
-    h('span', { className: 'row-text' }, h('span', { className: 'row-title' }, a.name)),
+  fill(box, list().flatMap((a, i) => [h('div', { className: 'row' },
+    h('span', { className: 'row-text' }, h('span', { className: 'row-title' }, a.name), appExtras(a) && h('span', { className: 'row-desc' }, appExtras(a))),
     h('select', { 'aria-label': `Style in ${a.name}`, onchange: e => { list()[i].style = e.target.value; save(); } }, APP_STYLE_OPTS.map(([v, l]) => h('option', { value: v, selected: v === a.style }, l))),
-    h('button', { className: 'icon-btn', type: 'button', 'aria-label': `Remove ${a.name}`, onclick: () => { list().splice(i, 1); save(); renderAppStyles(); } }, svg(CROSS)))),
+    h('button', { className: 'btn quiet', type: 'button', 'aria-expanded': String(appMore.has(a.id)), onclick: () => { appMore.has(a.id) ? appMore.delete(a.id) : appMore.add(a.id); renderAppStyles(); } }, 'More'),
+    h('button', { className: 'icon-btn', type: 'button', 'aria-label': `Remove ${a.name}`, onclick: () => { list().splice(i, 1); save(); renderAppStyles(); } }, svg(CROSS))),
+    appMore.has(a.id) && appMoreRow(a, () => list()[i])]).filter(Boolean),
   h('div', { className: 'row' },
     h('span', { className: 'row-text' }, h('span', { className: 'row-desc' }, add ? `Your last dictation went to ${add.name}, which uses ${label(add.style)}.` : 'Pick an app to set its style.')),
     add && h('button', { className: 'btn', type: 'button', onclick: () => { list().push({ id: add.id, name: add.name, style: add.style }); save(); renderAppStyles(); } }, `Add ${add.name}`),
@@ -827,6 +829,20 @@ function renderAppStyles() {
       if (a) { list().push({ id: a.id, name: a.name, style: a.style }); save(); }
       renderAppStyles();
     } }, h('option', { value: '' }, 'Add an app…'), installed.filter(a => !list().some(x => x.id === a.id)).map(a => h('option', { value: a.id }, a.name)))));
+}
+// "More" on an app's row: cleanup on or off and the languages spoken there, over the user's (settings::apply_app).
+const appMore = new Set();
+const appExtras = a => [a.cleanup === false && 'No cleanup', a.cleanup === true && 'Cleanup on', a.languages?.length && a.languages.map(c => c === 'auto' ? 'Any language' : langName(c)).join(', ')].filter(Boolean).join(', ');
+function appMoreRow(a, row) {
+  const langs = (a.languages ?? []).join(','), cleanup = a.cleanup == null ? '' : a.cleanup ? 'on' : 'off';
+  const changed = () => { save(); renderAppStyles(); };
+  return h('div', { className: 'row app-more' },
+    h('select', { 'aria-label': `Cleanup in ${a.name}`, onchange: e => { row().cleanup = { on: true, off: false }[e.target.value] ?? null; changed(); } },
+      [['', 'Cleanup as set'], ['on', 'Cleanup on'], ['off', 'No cleanup']].map(([v, l]) => h('option', { value: v, selected: v === cleanup }, l))),
+    h('select', { 'aria-label': `Languages in ${a.name}`, onchange: e => { row().languages = e.target.value ? e.target.value.split(',') : []; changed(); } },
+      h('option', { value: '' }, 'Your languages'),
+      langs.includes(',') && h('option', { value: langs, selected: true }, a.languages.map(langName).join(', ')),
+      LANGS.map(([v, l]) => h('option', { value: v, selected: v === langs }, v === 'auto' ? 'Any language' : l))));
 }
 let installed = [];
 async function refreshInstalled() {

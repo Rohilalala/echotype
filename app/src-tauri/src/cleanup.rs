@@ -1019,6 +1019,10 @@ fn after_stt(s: &Settings, raw: String, stt_ms: u64, mut warning: Option<String>
         None => (replaced, false),
     };
     let mut text = if dictated && s.voice_commands { voice_commands(&spoken_punctuation(&replaced)) } else { replaced };
+    // "tag auth dot ts" → "@auth.ts" in an AI code editor's chat, before cleanup can reword it.
+    if dictated && s.voice_commands && crate::context::tags_files(&s.screen.app) {
+        text = crate::context::tag_files(&text, &s.screen.words);
+    }
     let (mut cleanup_ms, mut cleaned) = (0, None);
     // "No cleanup": switched off, or on with no key to call the provider. Verbatim is a choice, not raw.
     let no_cleanup = !s.cleanup.enabled || keyless;
@@ -1656,6 +1660,19 @@ mod tests {
         assert_eq!(post(&s, "Agenda. New line. Budget.").text, "«Agenda. New line. Budget.»");
         let file = after_stt(&Settings::default(), "Agenda. New line. Budget.".into(), 1, None, false, false, || {}, |_, t| Ok(t.into()));
         assert_eq!(file.text, "Agenda. New line. Budget.");
+    }
+
+    #[test]
+    fn file_tags_only_in_ai_code_editors() {
+        let mut s = Settings::default();
+        s.screen.words = vec!["user_service.ts".into()];
+        let run = |s: &Settings, dictated| after_stt(s, "Look at user service dot ts and tag auth dot ts.".into(), 1, None, false, dictated, || {}, |_, t| Ok(t.into())).text;
+        assert_eq!(run(&s, true), "Look at user service dot ts and tag auth dot ts.", "TextEdit or unknown: words");
+        s.screen.app = "com.todesktop.230313mzl4w4u92".into();
+        assert_eq!(run(&s, true), "Look @user_service.ts and @auth.ts.");
+        assert_eq!(run(&s, false), "Look at user service dot ts and tag auth dot ts.", "a voice note keeps its words");
+        s.voice_commands = false;
+        assert_eq!(run(&s, true), "Look at user service dot ts and tag auth dot ts.", "voice commands off");
     }
 
     #[test]

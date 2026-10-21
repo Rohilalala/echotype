@@ -1045,3 +1045,7 @@ html.film .film-shell { display: block; position: fixed; z-index: 0; opacity: 0;
 html.film .ob-top, html.film .ob-stage, html.film .ob-foot, html.film .ob-model { transition: opacity 450ms ease; }
 html.film-pre :is(.ob-top, .ob-stage, .ob-foot, .ob-model), html.film-out :is(.ob-top, .ob-stage, .ob-foot, .ob-model) { opacity: 0; pointer-events: none; }
 .film-canvas { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 20; transition: opacity 300ms ease; }
+
+/* An app's "More" options sit under its row, with no divider between them. */
+#appStyles > .app-more { justify-content: flex-end; gap: 8px; padding-top: 0; min-height: 0; }
+#appStyles > .app-more::before { display: none; }

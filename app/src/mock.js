@@ -11,8 +11,8 @@ const settings = {
   local_api: { enabled: false, port: 7811 },
   stt: { provider: 'local', local_model: q.has('onboarding') ? '' : 'large-v3-turbo-q5_0', model: '', base_url: '' },
   cleanup: { enabled: !q.has('nocleanup'), provider: 'ollama', model: 'gemma3:4b', base_url: '', style: 'default', level: q.get('level') || 'medium', custom_instructions: '',
-    match_app: q.has('apps'), app_styles: q.has('apps') ? [{ id: 'com.apple.Terminal', name: 'Terminal', style: '' }, { id: 'com.google.Chrome', name: 'Google Chrome', style: 'casual' }] : [] },
-  dictionary: ['Echotype', 'Tauri', 'Hinglish', 'Supabase'],
+    match_app: q.has('apps'), app_styles: q.has('apps') ? [{ id: 'com.apple.Terminal', name: 'Terminal', style: '', cleanup: false, languages: [] }, { id: 'com.google.Chrome', name: 'Google Chrome', style: 'casual', cleanup: null, languages: ['hi', 'en'] }] : [] },
+  dictionary: ['Echotype', 'Tauri', 'Hinglish', 'Supabase'], screen_context: !q.has('noscreen'),
   replacements: [{ from: 'my email', to: 'aditya@example.com' }, { from: 'our nav', to: 'Arnav' }],
   // ?learned previews the notice for words picked up from corrections (learn.rs).
   learn_words: true, learned: q.has('learned') ? ['Midhun', 'Xoxoday'] : [], ignored_words: [],
