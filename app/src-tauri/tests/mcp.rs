@@ -36,7 +36,7 @@ fn the_binary_answers_initialize_tools_list_and_a_tool_call_over_stdio() {
     // A notification gets no reply, so the next line read is the answer to tools/list.
     let tools = ask("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}");
     assert_eq!(tools["id"], 2);
-    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 6);
+    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 7);
     let call = ask(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_history","arguments":{"query":"flight"}}}"#);
     assert_eq!(call["result"]["isError"], false);
     let hits: serde_json::Value = serde_json::from_str(call["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
