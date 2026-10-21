@@ -52,6 +52,12 @@ pub struct Settings {
     pub stt: Stt,
     pub cleanup: Cleanup,
     pub dictionary: Vec<String>,
+    /// "Use text on screen to spell names": names and identifiers near the caret go into the local
+    /// speech model's prompt (context.rs). Read through Accessibility; never saved or sent. On for upgraders too.
+    pub screen_context: bool,
+    /// What the screen showed for this one dictation (lib.rs read_screen). Never saved.
+    #[serde(skip)]
+    pub screen: crate::context::Screen,
     pub replacements: Vec<Replacement>,
     pub restore_clipboard: bool,
     pub history_enabled: bool,
@@ -230,6 +236,10 @@ pub struct AppStyle {
     pub name: String,
     /// A style, or "" for the user's own `Cleanup::style`.
     pub style: String,
+    /// Cleanup on or off in this app; None: as `Cleanup::enabled`.
+    pub cleanup: Option<bool>,
+    /// The languages spoken in this app, ["auto"] for any; empty: the user's `Settings::languages`.
+    pub languages: Vec<String>,
 }
 
 /// Built-in styles by bundle id (an id ending in '.' matches the prefix). Browsers and every
@@ -270,6 +280,21 @@ pub fn app_style<'a>(c: &'a Cleanup, id: Option<&str>) -> &'a str {
     }
 }
 
+/// A dictation into app `id` with that app's style, cleanup switch and languages over the user's,
+/// while "Match the app" is on (app_style).
+pub fn apply_app(s: &mut Settings, id: &str) {
+    s.cleanup.style = app_style(&s.cleanup, Some(id)).to_string();
+    let Some(a) = s.cleanup.app_styles.iter().find(|a| a.id == id).filter(|_| s.cleanup.match_app) else { return };
+    if let Some(on) = a.cleanup {
+        s.cleanup.enabled = on;
+    }
+    match &a.languages[..] {
+        [] => {}
+        [auto] if auto == "auto" => s.languages.clear(),
+        l => s.languages = l.to_vec(),
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(default)]
 pub struct Replacement {
@@ -293,6 +318,8 @@ impl Default for Settings {
             stt: Stt::default(),
             cleanup: Cleanup::default(),
             dictionary: vec![],
+            screen_context: true,
+            screen: Default::default(),
             replacements: vec![],
             restore_clipboard: true,
             history_enabled: true,
@@ -928,7 +955,7 @@ mod tests {
         assert_eq!(app_style(&c, Some("com.google.Chrome")), "formal", "browsers keep the user's style");
         assert_eq!(app_style(&c, Some("")), "formal");
         assert_eq!(app_style(&c, None), "formal", "Echotype itself or not known");
-        let row = |id: &str, style: &str| AppStyle { id: id.into(), name: id.into(), style: style.into() };
+        let row = |id: &str, style: &str| AppStyle { id: id.into(), name: id.into(), style: style.into(), ..Default::default() };
         c.app_styles = vec![row("com.tinyspeck.slackmacgap", "formal"), row("com.apple.Terminal", ""), row("com.google.Chrome", "verbatim")];
         assert_eq!(app_style(&c, slack), "formal", "the user's pick beats the built-in one");
         assert_eq!(app_style(&c, Some("com.apple.Terminal")), "formal", "\"\" is the user's style");
@@ -938,11 +965,32 @@ mod tests {
     }
 
     #[test]
+    fn an_apps_own_cleanup_and_languages_beat_the_users() {
+        let mut s = Settings { languages: vec!["en".into()], ..Settings::default() };
+        s.cleanup.enabled = true;
+        let row = |id: &str, cleanup, languages: &[&str]| AppStyle { id: id.into(), name: id.into(), cleanup, languages: languages.iter().map(|l| l.to_string()).collect(), ..Default::default() };
+        s.cleanup.app_styles = vec![row("com.apple.Terminal", Some(false), &[]), row("net.whatsapp.WhatsApp", None, &["hi", "en"]), row("com.apple.mail", Some(true), &["auto"])];
+        let run = |s: &Settings, id: &str| {
+            let mut s = s.clone();
+            apply_app(&mut s, id);
+            (s.cleanup.enabled, s.languages, s.cleanup.style)
+        };
+        assert_eq!(run(&s, "com.apple.Terminal"), (true, vec!["en".into()], "default".into()), "off: the user's everything");
+        s.cleanup.match_app = true;
+        assert_eq!(run(&s, "com.apple.Terminal"), (false, vec!["en".into()], "default".into()), "no cleanup, the user's languages and style (\"\")");
+        assert_eq!(run(&s, "net.whatsapp.WhatsApp"), (true, vec!["hi".into(), "en".into()], "default".into()), "the user's cleanup, the app's languages");
+        assert_eq!(run(&s, "com.apple.mail"), (true, vec![], "default".into()), "\"auto\": any language");
+        assert_eq!(run(&s, "com.googlecode.iterm2"), (true, vec!["en".into()], "verbatim".into()), "no row: the user's, in the built-in style");
+        s.cleanup.enabled = false;
+        assert!(run(&s, "com.apple.mail").0, "an app can turn cleanup on too");
+    }
+
+    #[test]
     fn settings_round_trip() {
         let mut s = Settings::default();
         s.dictionary = vec!["Arnav".into()];
         s.replacements = vec![Replacement { from: "my email".into(), to: "me@example.com".into() }];
-        s.cleanup.app_styles = vec![AppStyle { id: "com.apple.mail".into(), name: "Mail".into(), style: "casual".into() }];
+        s.cleanup.app_styles = vec![AppStyle { id: "com.apple.mail".into(), name: "Mail".into(), style: "casual".into(), cleanup: Some(false), languages: vec!["hi".into()] }];
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
     }

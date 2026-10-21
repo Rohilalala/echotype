@@ -73,7 +73,7 @@ pub fn from_config(u: &Value, bundle_id: impl Fn(&str) -> Option<String>) -> Fou
             if let Some(id) = bundle_id(name)
                 && !f.app_styles.iter().any(|a| a.id == id)
             {
-                f.app_styles.push(AppStyle { id, name: name.to_string(), style: style.to_string() });
+                f.app_styles.push(AppStyle { id, name: name.to_string(), style: style.to_string(), ..Default::default() });
             }
         }
     }
@@ -268,7 +268,7 @@ mod tests {
             words: vec!["midhun".into(), "Xoxoday".into()],
             replacements: vec![Replacement { from: "my email address".into(), to: "me@example.com".into() }, Replacement { from: "btw".into(), to: "by the way".into() }],
             languages: vec!["en".into(), "hi".into()],
-            app_styles: vec![AppStyle { id: "com.tinyspeck.slackmacgap".into(), name: "Slack".into(), style: "casual".into() }],
+            app_styles: vec![AppStyle { id: "com.tinyspeck.slackmacgap".into(), name: "Slack".into(), style: "casual".into(), ..Default::default() }],
             talk_key: Some("left_control".into()),
             display_name: Some("Aditya".into()),
             ..Default::default()

@@ -4,6 +4,7 @@ mod calls;
 mod capture;
 mod cleanup;
 mod cloud;
+mod context;
 mod hotkey;
 mod llm;
 mod meeting;
@@ -271,6 +272,8 @@ struct Live {
     command: bool,
     /// Set as the recording ends: the partials loop stops and a partial in flight aborts.
     partials: Arc<AtomicBool>,
+    /// The app in front and the names around its caret, filled in while the user speaks (read_screen).
+    screen: Arc<Mutex<context::Screen>>,
 }
 
 /// One thread owns the recorder and the talk-key state machine, so every key, click, Esc and
@@ -342,6 +345,9 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                 Act::Start { id, locked } => match command_ready(&s, command).and_then(|()| start_recording(&app, &s, id)) {
                     Ok(mut l) => {
                         l.command = command;
+                        if !command {
+                            l.screen = read_screen(&app, &s);
+                        }
                         llm::prewarm(&s); // warm while the user talks, not after
                         // Recording before anything shows, so the pill loop takes Esc for it (pill.rs owns Esc).
                         state(&app).recording.store(true, Ordering::SeqCst);
@@ -424,7 +430,7 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                         continue;
                     }
                     let warning = l.lost.load(Ordering::SeqCst).then(|| "Microphone disconnected. Transcribed what was captured.".to_string());
-                    let clip = Clip { quality: st.quality(), muted_seen: st.muted_seen(), warning, speaking_ms: st.speaking_ms(), snr_db: st.floor_and_speech().map(|(floor, speech)| speech - floor), front: l.front.clone(), entry: None };
+                    let clip = Clip { quality: st.quality(), muted_seen: st.muted_seen(), warning, speaking_ms: st.speaking_ms(), snr_db: st.floor_and_speech().map(|(floor, speech)| speech - floor), front: l.front.clone(), entry: None, screen: lock(&l.screen).clone() };
                     drop(st);
                     if l.command {
                         process_command(&app, pcm, busy.clone());
@@ -484,13 +490,30 @@ fn start_recording(app: &AppHandle, s: &Settings, id: u64) -> Result<Live, Dicta
             if s.live_text && s.stt.provider == "local" {
                 spawn_partials(app, s, rec.tap(), partials.clone());
             }
-            Ok(Live { id, shown: false, locked: false, rec, stats, lost, front: None, command: false, partials })
+            Ok(Live { id, shown: false, locked: false, rec, stats, lost, front: None, command: false, partials, screen: Default::default() })
         }
         Err(_) if platform::microphone_status() == "denied" => {
             Err(DictationState { state: "error", error: Some("Microphone access is off".into()), action: Some("microphone"), ..Default::default() })
         }
         Err(e) => Err(DictationState { state: "error", error: Some(e), action: Some("microphone"), ..Default::default() }),
     }
+}
+
+/// The app in front, and with "Use text on screen" and a local speech model the names around its
+/// caret, read on another thread so the mic opens at once. A dictation that ends first goes without.
+/// Echotype's own window (no front app) is not read.
+fn read_screen(app: &AppHandle, s: &Settings) -> Arc<Mutex<context::Screen>> {
+    let out = Arc::new(Mutex::new(context::Screen::default()));
+    let (app, read, o) = (app.clone(), s.screen_context && s.stt.provider == "local", out.clone());
+    std::thread::spawn(move || {
+        let Some(front) = platform::frontmost_app(&app) else { return };
+        lock(&o).app = front.id;
+        if read {
+            let words = context::read();
+            lock(&o).words = words;
+        }
+    });
+    out
 }
 
 /// Whether to start a partial now, with `secs` recorded and the last one started `since` ago
@@ -553,6 +576,8 @@ struct Clip {
     front: Option<platform::FrontApp>,
     /// The history entry this audio was recorded as: a re-run replaces its result.
     entry: Option<u64>,
+    /// Live::screen as the recording ended. A retry or re-run has none.
+    screen: context::Screen,
 }
 
 /// A dictation's audio kept in memory (AppState last_clip).
@@ -653,9 +678,10 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
         let guard = Busy(busy);
         let mut s = current_settings(&app);
         if let Some(f) = clip.front.clone() {
-            s.cleanup.style = settings::app_style(&s.cleanup, Some(&f.id)).to_string();
+            settings::apply_app(&mut s, &f.id);
             *lock(&state(&app).last_app) = Some(f);
         }
+        s.screen = clip.screen.clone();
         if let Some(r) = &rerun {
             r.apply(&mut s); // after the app's style: "Without cleanup" wins
         }

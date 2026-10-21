@@ -576,10 +576,16 @@ pub fn romanising(s: &Settings) -> bool {
 /// Whisper prompt: the romanised sentences of the user's languages when they want English
 /// letters, then the dictionary, which biases spelling of names at no latency cost. Whisper
 /// copies the prompt's style, so it ends like a sentence: a bare comma list made it drop full
-/// stops, which ran a meeting's sentences (and so its speakers) together.
+/// stops, which ran a meeting's sentences (and so its speakers) together. The names read off the
+/// screen for this dictation (Settings::screen) follow the dictionary's.
 pub fn prompt(s: &Settings) -> String {
     let mut parts: Vec<String> = romanised(s).iter().map(|(_, p)| p.to_string()).collect();
-    let words: Vec<String> = s.dictionary.iter().map(|w| w.trim().replace('\0', "")).filter(|w| !w.is_empty()).collect();
+    let mut words: Vec<String> = s.dictionary.iter().map(|w| w.trim().replace('\0', "")).filter(|w| !w.is_empty()).collect();
+    for w in &s.screen.words {
+        if !words.iter().any(|d| d.eq_ignore_ascii_case(w)) {
+            words.push(w.clone());
+        }
+    }
     if !words.is_empty() {
         parts.push(format!("{}.", words.join(", ")));
     }
@@ -1499,6 +1505,32 @@ mod tests {
         assert_eq!(prompt(&s), "", "no romanised sentence for a Latin-script language");
         s.languages.clear();
         assert_eq!(prompt(&s), "", "auto-detect: no language to romanise");
+    }
+
+    #[test]
+    fn screen_words_follow_the_dictionary_once() {
+        let mut s = Settings { dictionary: vec!["Arnav".into()], ..Default::default() };
+        s.screen.words = vec!["arnav".into(), "Kumustahan".into(), "user_service.ts".into()];
+        assert_eq!(prompt(&s), "Arnav, Kumustahan, user_service.ts.");
+        s.dictionary.clear();
+        assert_eq!(prompt(&s), "arnav, Kumustahan, user_service.ts.");
+    }
+
+    /// The same clip with and without screen words in the prompt.
+    /// ECHOTYPE_TEST_MODEL=<large-v3-turbo> ECHOTYPE_TEST_CLIP=<16 kHz mono wav of "ask Xoxoday about
+    /// the Kumustahan rollout"> `cargo test --release screen_words_spell_names -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn screen_words_spell_names() {
+        let (Ok(model), Ok(clip)) = (std::env::var("ECHOTYPE_TEST_MODEL"), std::env::var("ECHOTYPE_TEST_CLIP")) else { return eprintln!("skipped") };
+        let pcm = crate::audio::decode(std::fs::read(clip).unwrap(), Some("wav")).unwrap();
+        let mut s = Settings { languages: vec!["en".into()], ..Default::default() };
+        let run = |s: &Settings| transcribe_local(Path::new(&model), &pcm, &languages(s), false, &prompt(s), None).unwrap();
+        let without = run(&s);
+        s.screen.words = crate::context::tokens("Hi Arnav, the Xoxoday store opens with the Kumustahan rollout next week. Can you", "");
+        let with = run(&s);
+        eprintln!("prompt: {}\nwithout: {without}\nwith:    {with}", prompt(&s));
+        assert!(with.contains("Xoxoday") && with.contains("Kumustahan"), "{with:?}");
     }
 
     #[test]
