@@ -516,6 +516,115 @@ pub fn only_filler(text: &str) -> bool {
     text.split(|c: char| !c.is_alphanumeric() && c != '\'').filter(|w| !w.is_empty()).all(|w| FILLER.contains(&w.to_lowercase().as_str()))
 }
 
+/// Items said in a row become a bullet list: a sentence ending in 3 or more items ("A, B and C",
+/// "or" too, the comma before it optional) when every item starts with a quantity ("14 footballs,
+/// 2 cricket bats and 3 tennis rackets") or the sentence says "list of", "list:" or "list is". The
+/// words before the items lead in with a colon; other sentences stay as said. Run after the model,
+/// which lists only when told to ("make a list of…" at the start), and skipped when the text
+/// already has lines (the model or a voice command laid it out).
+// ponytail: English quantities and cues; "Paris, Rome and Berlin" stays a sentence on purpose.
+pub fn spoken_lists(text: &str) -> String {
+    if text.contains('\n') {
+        return text.to_string();
+    }
+    let mut out: Vec<String> = Vec::new();
+    for sentence in sentences(text) {
+        match list_in(&sentence) {
+            Some((lead, items)) => {
+                let mut block = if lead.is_empty() { String::new() } else { format!("{lead}:\n") };
+                block.push_str(&items.iter().map(|i| format!("- {i}")).collect::<Vec<_>>().join("\n"));
+                out.push(block);
+            }
+            None => out.push(sentence),
+        }
+    }
+    // A list stands on its own lines; sentences around it stay joined by a space.
+    let mut s = String::new();
+    for (i, part) in out.iter().enumerate() {
+        if i > 0 {
+            s.push(if part.contains('\n') || out[i - 1].contains('\n') { '\n' } else { ' ' });
+        }
+        s.push_str(part);
+    }
+    s
+}
+
+/// The text cut after each . ! ? that ends a sentence (followed by a space or the end).
+fn sentences(text: &str) -> Vec<String> {
+    let (mut out, mut cur) = (Vec::new(), String::new());
+    let mut it = text.chars().peekable();
+    while let Some(c) = it.next() {
+        cur.push(c);
+        if matches!(c, '.' | '!' | '?') && it.peek().is_none_or(|n| n.is_whitespace()) {
+            out.push(cur.trim().to_string());
+            cur.clear();
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur.trim().to_string());
+    }
+    out
+}
+
+/// The sentence's closing run of items, and the words before it.
+fn list_in(sentence: &str) -> Option<(String, Vec<String>)> {
+    const NUMBERS: [&str; 16] = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "twenty", "dozen", "couple", "few"];
+    let qty = |item: &str| {
+        let w = item.split_whitespace().next().unwrap_or("").to_lowercase();
+        let w = if w == "a" { item.split_whitespace().nth(1).unwrap_or("").to_lowercase() } else { w };
+        w.chars().next().is_some_and(|c| c.is_ascii_digit()) || NUMBERS.contains(&w.trim_end_matches(',')) || w == "half"
+    };
+    let body = sentence.trim_end_matches(['.', '!', '?']);
+    let low = body.to_lowercase();
+    // "list of" / "list:" / "list is": everything after it is the run of items.
+    let cue = ["list of ", "list: ", "list is "].iter().find_map(|c| low.find(c).map(|at| at + c.len()));
+    let (lead, run) = match cue {
+        Some(at) => (body[..at].trim_end().trim_end_matches(':').to_string(), body[at..].to_string()),
+        None => (String::new(), body.to_string()),
+    };
+    // The last item follows the final " and " / " or " after the last comma.
+    let comma = run.rfind(", ")?;
+    let tail = &run[comma + 2..];
+    let join = [" and ", " or "].iter().filter_map(|j| tail.rfind(j).map(|at| (at, j.len()))).max();
+    let (mut parts, last): (Vec<&str>, &str) = match join {
+        Some((at, len)) => (run[..comma + 2 + at].split(", ").collect(), &tail[at + len..]),
+        // "A, B, and C": the comma before "and" leaves "and C" as the tail.
+        None => (run[..comma].split(", ").collect(), tail.strip_prefix("and ").or_else(|| tail.strip_prefix("or "))?),
+    };
+    parts.push(last);
+    let parts: Vec<&str> = parts.into_iter().map(str::trim).filter(|p| !p.is_empty()).collect();
+    let (lead, first, rest) = if cue.is_some() {
+        if parts.len() < 3 {
+            return None;
+        }
+        (lead, parts[0].to_string(), &parts[1..])
+    } else {
+        // Items run back from the end while each starts with a quantity; the first one starts at
+        // the last quantity inside its part ("…and I need 14 footballs").
+        let n = parts.iter().rev().take_while(|p| qty(p)).count();
+        let head = parts[..parts.len() - n].join(", ");
+        let words: Vec<&str> = head.split(' ').collect();
+        let at = words.iter().rposition(|w| qty(w)).map(|i| if i > 0 && words[i - 1].eq_ignore_ascii_case("a") { i - 1 } else { i });
+        let (lead, first) = match at {
+            Some(i) if n >= 2 => (words[..i].join(" "), words[i..].join(" ")),
+            _ if n >= 3 && head.is_empty() => (String::new(), String::new()),
+            _ => return None,
+        };
+        if first.is_empty() {
+            (lead, parts[parts.len() - n].to_string(), &parts[parts.len() - n + 1..])
+        } else {
+            (lead, first, &parts[parts.len() - n..])
+        }
+    };
+    let cap = |s: &str| {
+        let mut c = s.chars();
+        c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_default()
+    };
+    let items: Vec<String> = std::iter::once(first.as_str()).chain(rest.iter().copied()).map(|i| cap(i.trim().trim_end_matches(',')))
+        .collect();
+    (items.len() >= 3).then(|| (lead.trim_end_matches(',').trim().to_string(), items))
+}
+
 /// Spoken commands in a live dictation, applied here so the cleanup model never sees them:
 /// "new line", "new paragraph", "bullet point" / "next bullet" (a "- " item on its own line) and
 /// "scratch that" (drops the sentence before it). Any case, and only as a clause of its own: at
@@ -669,6 +778,9 @@ fn after_stt(s: &Settings, raw: String, stt_ms: u64, mut warning: Option<String>
             }
         }
         cleanup_ms = t.elapsed().as_millis() as u64;
+    }
+    if !no_cleanup {
+        text = spoken_lists(&text);
     }
     Output { raw, text, stt_ms, cleanup_ms, warning, no_cleanup, cleaned }
 }
@@ -824,7 +936,7 @@ mod tests {
         let mut s = Settings::default();
         s.cleanup.enabled = true;
         let o = after_stt(&s, raw.into(), 1, None, false, true, || {}, |_, _| Ok("1. Blueberries".into()));
-        assert_eq!(o.text, raw, "the words as spoken");
+        assert_eq!(o.text, "Create a list of:\n- 12 blueberries\n- 3 chocolates\n- 15 mobile phones", "the words as spoken, laid out as the list they name");
         assert!(o.warning.is_some_and(|w| w.contains("number")));
     }
 
@@ -983,6 +1095,32 @@ mod tests {
         crate::llm::stop();
     }
 
+    /// The built-in model on spoken lists: ECHOTYPE_TEST_LISTS=1 `cargo test -- --ignored --nocapture spoken_lists`.
+    #[test]
+    #[ignore]
+    fn spoken_lists_come_back_as_lists() {
+        if std::env::var("ECHOTYPE_TEST_LISTS").is_err() {
+            return eprintln!("skipped: no ECHOTYPE_TEST_LISTS");
+        }
+        let mut s = echotype();
+        s.cleanup.model = std::env::var("ECHOTYPE_TEST_LISTS").unwrap();
+        for text in [
+            "Make a list of 12 bananas, 14 mobile phones and 64 pineapples.",
+            "Things to buy, eggs, milk, two loaves of bread and a dozen bananas.",
+            "I need you to make a list of 14 footballs, 12 mangoes and 16 pineapples.",
+            "12 bananas, 14 mobile phones, 64 pineapples.",
+            "I need 14 footballs, 2 cricket bats and 3 tennis rackets.",
+            "I need 12 bread loaves, 2 pineapples and 11 packets of milk.",
+            "Get these groceries from the store. 12 bread, 2 pineapples and 11 packets of milk.",
+            "Hi, my name is Aditya and I need 14 footballs, 12 mobile phones and 16 pineapples.",
+            "First open the app, second sign in, third pick a model.",
+        ] {
+            let out = cleanup(&s, text).unwrap();
+            eprintln!("{text}\n  -> {out:?}\n");
+        }
+        crate::llm::stop();
+    }
+
     /// Dictation latency the way the app sees it, for the memory-pressure runs: models loaded once,
     /// two warm dictations, then ECHOTYPE_TEST_IDLE_S seconds idle (an outside memhog.py applies
     /// pressure meanwhile; the cleaner's resident MB is printed every 5 s), then the first dictation
@@ -1025,6 +1163,41 @@ mod tests {
     }
 
     // Whisper's own punctuation around the commands, as it writes a pause.
+    #[test]
+    fn items_said_in_a_row_become_a_list() {
+        for (said, want) in [
+            ("I need 14 footballs, 2 cricket bats and 3 tennis rackets.", "I need:\n- 14 footballs\n- 2 cricket bats\n- 3 tennis rackets"),
+            ("Get these groceries from the store. 12 bread, 2 pineapples and 11 packets of milk.", "Get these groceries from the store.\n- 12 bread\n- 2 pineapples\n- 11 packets of milk"),
+            ("Hi, my name is Aditya and I need 14 footballs, 12 mobile phones and 16 pineapples.", "Hi, my name is Aditya and I need:\n- 14 footballs\n- 12 mobile phones\n- 16 pineapples"),
+            ("I need you to make a list of footballs, mangoes and pineapples.", "I need you to make a list of:\n- Footballs\n- Mangoes\n- Pineapples"),
+            ("My shopping list is cologne, 12 blueberries, 3 chocolates, and 15 mobile phones. Thanks!", "My shopping list is:\n- Cologne\n- 12 blueberries\n- 3 chocolates\n- 15 mobile phones\nThanks!"),
+            ("Buy a dozen eggs, two loaves of bread or 3 bananas", "Buy:\n- A dozen eggs\n- Two loaves of bread\n- 3 bananas"),
+            ("12 bananas, 14 mobile phones, 64 pineapples.", "12 bananas, 14 mobile phones, 64 pineapples."),
+        ] {
+            assert_eq!(spoken_lists(said), want, "{said}");
+        }
+        // Not lists: places and plain clauses, two items, and text that already has lines.
+        for same in [
+            "I went to Paris, Rome and Berlin.",
+            "We met at 10, talked for an hour and left.",
+            "I need 14 footballs and 2 bats.",
+            "Things to buy:\n- Eggs\n- Milk",
+            "Hello, how are you? My name is Aditya.",
+        ] {
+            assert_eq!(spoken_lists(same), same, "{same}");
+        }
+    }
+
+    #[test]
+    fn lists_are_laid_out_after_the_model_only_with_cleanup_on() {
+        let said = "I need 14 footballs, 2 cricket bats and 3 tennis rackets.";
+        let mut s = echotype();
+        let out = after_stt(&s, said.into(), 0, None, false, true, || {}, |_, t| Ok(t.to_string()));
+        assert_eq!(out.text, "I need:\n- 14 footballs\n- 2 cricket bats\n- 3 tennis rackets");
+        s.cleanup.enabled = false;
+        assert_eq!(after_stt(&s, said.into(), 0, None, false, true, || {}, |_, t| Ok(t.to_string())).text, said, "cleanup off keeps the words as said");
+    }
+
     #[test]
     fn voice_commands_act_as_their_own_clause() {
         let said = [
