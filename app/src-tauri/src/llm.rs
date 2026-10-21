@@ -242,7 +242,7 @@ pub fn ensure(settings: &Settings) -> Result<(String, String), String> {
 
 /// llama.cpp logs this and carries on unlocked when mlock is refused (a wired-memory limit).
 fn mlock_failed(log: &Path) -> bool {
-    std::fs::read_to_string(log).is_ok_and(|l| l.contains("failed to mlock"))
+    std::fs::read_to_string(log).is_ok_and(|l| l.contains("failed to mlock") || l.contains("failed to VirtualLock"))
 }
 
 /// "Unload when idle": one thread for the life of the app stops the server once it has gone
@@ -318,11 +318,24 @@ pub fn stop() {
     *SERVER.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
-/// Next to Echotype's own executable: Contents/MacOS/ in the app bundle, target/<profile>/ in a
-/// cargo build (tauri-build copies it there), one level up from a test binary in target/<profile>/deps/.
+/// Next to Echotype's own executable: Contents/MacOS/ in the app bundle, the install folder on
+/// Windows, target/<profile>/ in a cargo build (tauri-build copies it there), one level up from a
+/// test binary in target/<profile>/deps/.
 fn sidecar() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    exe.ancestors().skip(1).take(2).map(|d| d.join("llama-server")).find(|p| p.is_file())
+    let name = format!("llama-server{}", std::env::consts::EXE_SUFFIX);
+    exe.ancestors().skip(1).take(2).map(|d| d.join(&name)).find(|p| p.is_file())
+}
+
+/// Windows: start a console program without opening a console window (CREATE_NO_WINDOW).
+#[cfg(windows)]
+fn no_window(c: &mut Command) -> &mut Command {
+    use std::os::windows::process::CommandExt;
+    c.creation_flags(0x0800_0000)
+}
+#[cfg(not(windows))]
+fn no_window(c: &mut Command) -> &mut Command {
+    c
 }
 
 fn preflight(sidecar: Option<&Path>, model: &Path, need_mb: u64, free_mb: u64) -> Result<(), String> {
@@ -371,7 +384,7 @@ fn start(bin: &Path, opts: &Opts, log: &Path) -> Result<Server, String> {
         let _ = std::fs::create_dir_all(dir);
     }
     let stderr = std::fs::File::create(log).map(Stdio::from).unwrap_or_else(|_| Stdio::null());
-    let child = Command::new(bin)
+    let child = no_window(&mut Command::new(bin))
         .args(args(opts, port, MLOCK_FAILED.load(Ordering::Relaxed)))
         .env("LLAMA_API_KEY", &key) // in the environment, not argv, so `ps` never shows it
         // The pinned llama-server's router-child mode: it exits when its stdin closes, so it can
@@ -389,7 +402,7 @@ fn start(bin: &Path, opts: &Opts, log: &Path) -> Result<Server, String> {
 
 /// Whether process `pid` is the one listening on 127.0.0.1:`port`.
 // ponytail: one lsof call at start-up (~50 ms); read the socket table with proc_pidfdinfo if lsof
-// is ever missing. macOS only: the built-in model's server ships with the macOS app alone.
+// is ever missing.
 #[cfg(target_os = "macos")]
 fn listens_on(pid: u32, port: u16) -> bool {
     Command::new("/usr/sbin/lsof")
@@ -398,8 +411,24 @@ fn listens_on(pid: u32, port: u16) -> bool {
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().any(|p| p == pid.to_string()))
 }
 
-/// Off macOS there is no built-in model server and no ownership check yet, so never trust one.
-#[cfg(not(target_os = "macos"))]
+// ponytail: one netstat call at start-up; GetExtendedTcpTable if netstat is ever too slow.
+#[cfg(windows)]
+fn listens_on(pid: u32, port: u16) -> bool {
+    let netstat = PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into())).join("System32").join("netstat.exe");
+    no_window(&mut Command::new(netstat)).args(["-ano", "-p", "TCP"]).output().is_ok_and(|o| netstat_listens(&String::from_utf8_lossy(&o.stdout), pid, port))
+}
+
+/// From `netstat -ano -p TCP` ("  TCP    127.0.0.1:4321    0.0.0.0:0    LISTENING    1234"): whether
+/// `pid` listens on 127.0.0.1:`port`. A listening row's remote address is 0.0.0.0:0; the state
+/// word itself is translated on non-English Windows, so it is not read.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn netstat_listens(out: &str, pid: u32, port: u16) -> bool {
+    let local = format!("127.0.0.1:{port}");
+    out.lines().map(|l| l.split_whitespace().collect::<Vec<_>>()).any(|f| f.len() == 5 && f[0] == "TCP" && f[1] == local && f[2] == "0.0.0.0:0" && f[4] == pid.to_string())
+}
+
+/// Linux has no built-in model server and no ownership check yet, so never trust one.
+#[cfg(not(any(target_os = "macos", windows)))]
 fn listens_on(_: u32, _: u16) -> bool {
     false
 }
@@ -475,12 +504,21 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "macos")]
+    fn netstat_rows_name_the_listening_process() {
+        let out = "\r\nActive Connections\r\n\r\n  Proto  Local Address          Foreign Address        State           PID\r\n  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       1012\r\n  TCP    127.0.0.1:4321         0.0.0.0:0              ABH\u{d6}REN         5678\r\n  TCP    127.0.0.1:4321         127.0.0.1:50000        ESTABLISHED     9999\r\n";
+        assert!(netstat_listens(out, 5678, 4321), "German Windows says ABH\u{d6}REN");
+        assert!(!netstat_listens(out, 9999, 4321), "a connection to the port is not listening on it");
+        assert!(!netstat_listens(out, 1012, 135), "all interfaces, not 127.0.0.1");
+        assert!(!netstat_listens(out, 5678, 432));
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", windows))]
     fn a_port_is_only_trusted_from_the_process_listening_on_it() {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
         assert!(listens_on(std::process::id(), port), "this test process listens there");
-        assert!(!listens_on(1, port), "launchd does not");
+        assert!(!listens_on(if cfg!(windows) { 4 } else { 1 }, port), "System / launchd does not");
         drop(l);
         assert!(!listens_on(std::process::id(), port), "nobody listens any more");
     }
