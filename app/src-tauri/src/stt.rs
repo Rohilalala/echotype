@@ -521,8 +521,12 @@ fn not_internal(path: &Path) -> Option<&'static str> {
 
 /// Frees the loaded model. Must run before process exit: ggml-metal asserts at exit
 /// if a context still holds GPU residency sets.
+/// Frees every whisper context, the voice detector and language ID too: one still alive at exit
+/// trips ggml-metal's teardown assert, so each quit ended in an abort and a crash report.
 pub fn unload() {
     *ENGINE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *SILERO.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *LID.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 pub fn quiet_whisper_logs() {

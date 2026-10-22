@@ -1925,6 +1925,7 @@ mod tests {
             assert!(ok(&out), "{case}: {out}");
         }
         llm::stop();
+        stt::unload(); // as the app does at exit: nothing may abort after this
     }
 
     fn on_screen(provider: &str) -> Settings {
