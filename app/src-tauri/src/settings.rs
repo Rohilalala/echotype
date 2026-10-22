@@ -297,7 +297,9 @@ pub struct AppStyle {
 pub const APP_INSTRUCTIONS_MAX: usize = 300;
 
 /// Built-in styles by bundle id (an id ending in '.' matches the prefix). Browsers and every
-/// other app keep the user's style.
+/// other app keep the user's style. Code editors and terminals are not Verbatim by default: most
+/// of what is dictated there is prose for an AI assistant, and cleanup runs on every dictation;
+/// Verbatim is one click per app for anyone who dictates code.
 pub const APP_STYLES: &[(&str, &str)] = &[
     ("com.tinyspeck.slackmacgap", "casual"),
     ("net.whatsapp.WhatsApp", "casual"),
@@ -307,16 +309,6 @@ pub const APP_STYLES: &[(&str, &str)] = &[
     ("com.tdesktop.Telegram", "casual"),
     ("com.apple.mail", "formal"),
     ("com.microsoft.Outlook", "formal"),
-    ("com.apple.Terminal", "verbatim"),
-    ("com.googlecode.iterm2", "verbatim"),
-    ("dev.warp.Warp-Stable", "verbatim"),
-    ("com.mitchellh.ghostty", "verbatim"),
-    ("com.microsoft.VSCode", "verbatim"),
-    ("com.microsoft.VSCodeInsiders", "verbatim"),
-    ("com.todesktop.230313mzl4w4u92", "verbatim"), // Cursor
-    ("com.apple.dt.Xcode", "verbatim"),
-    ("com.jetbrains.", "verbatim"),
-    ("dev.zed.Zed", "verbatim"),
 ];
 
 pub fn builtin_style(id: &str) -> Option<&'static str> {
@@ -1230,9 +1222,8 @@ mod tests {
         c.match_app = true;
         assert_eq!(app_style(&c, slack), "casual");
         assert_eq!(app_style(&c, Some("com.apple.mail")), "formal");
-        assert_eq!(app_style(&c, Some("com.apple.Terminal")), "verbatim");
-        assert_eq!(app_style(&c, Some("com.jetbrains.pycharm")), "verbatim", "any JetBrains IDE");
-        assert_eq!(app_style(&c, Some("com.jetbrains")), "formal", "the prefix needs its dot");
+        assert_eq!(app_style(&c, Some("com.microsoft.VSCode")), "formal", "editors and terminals get cleanup like any app");
+        assert_eq!(app_style(&c, Some("com.apple.Terminal")), "formal");
         assert_eq!(app_style(&c, Some("com.google.Chrome")), "formal", "browsers keep the user's style");
         assert_eq!(app_style(&c, Some("")), "formal");
         assert_eq!(app_style(&c, None), "formal", "Echotype itself or not known");
@@ -1261,7 +1252,8 @@ mod tests {
         assert_eq!(run(&s, "com.apple.Terminal"), (false, vec!["en".into()], "default".into()), "no cleanup, the user's languages and style (\"\")");
         assert_eq!(run(&s, "net.whatsapp.WhatsApp"), (true, vec!["hi".into(), "en".into()], "default".into()), "the user's cleanup, the app's languages");
         assert_eq!(run(&s, "com.apple.mail"), (true, vec![], "default".into()), "\"auto\": any language");
-        assert_eq!(run(&s, "com.googlecode.iterm2"), (true, vec!["en".into()], "verbatim".into()), "no row: the user's, in the built-in style");
+        assert_eq!(run(&s, "com.apple.Mail"), (true, vec!["en".into()], "default".into()), "no row, no built-in style: the user's");
+        assert_eq!(run(&s, "com.tinyspeck.slackmacgap"), (true, vec!["en".into()], "casual".into()), "no row: the user's, in the built-in style");
         s.cleanup.enabled = false;
         assert!(run(&s, "com.apple.mail").0, "an app can turn cleanup on too");
         s.cleanup.app_styles[0].instructions = "No full stop at the end".into();
