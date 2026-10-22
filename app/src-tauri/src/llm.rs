@@ -25,12 +25,20 @@ pub struct Cleaner {
     pub note: &'static str,
 }
 
-/// The Echotype cleanup models (Qwen2.5 Instruct fine-tunes, Apache-2.0), from the 2026-10-16
-/// distillation: on 12,198 real clips they add 0.31 (Tiny) and 0.51 (Medium) points of WER over raw
-/// whisper, against 5.23 for the first 1.5B they replace. Automatic uses Tiny, the first.
+/// Echotype One: one Qwen2.5-1.5B-Instruct (Apache-2.0) fine-tune that both cleans dictation and
+/// edits selected text (Command Mode, Transforms, meeting summaries). It was trained on Echotype
+/// Medium's cleanup rows and Echotype Writer's edits together, plus dictations that hold an
+/// instruction to type rather than follow, and replaces both: one download, and no swap between a
+/// cleaner and a writer. Numbers in echotype-models/merged-eval/REPORT.md.
+pub const ONE: Cleaner = Cleaner { id: "echotype-one", label: "Echotype One", file: "echotype-one-iq4_xs.gguf", size_mb: 860, sha256: "", note: "1.5B. Cleans up dictation and edits selected text when you ask." };
+
+/// The built-in cleanup models: Echotype One, and Echotype Tiny (0.5B, from the 2026-10-16
+/// distillation: 0.31 points of WER over raw whisper on 12,198 real clips) for Macs short of memory,
+/// which only cleans. Automatic uses the first. Echotype Medium is gone: One cleans as well and
+/// also edits, so a Medium pick falls back to Automatic.
 pub const CLEANERS: &[Cleaner] = &[
-    Cleaner { id: "echotype-tiny", label: "Echotype Tiny", file: "echotype-tiny-q5_k_m.gguf", size_mb: 401, sha256: "5b6faf7e64f41d34569413409bc0628e4c48d2893ad95ace9b51192b6bee2be9", note: "0.5B. Light and quick; best for English." },
-    Cleaner { id: "echotype-medium", label: "Echotype Medium", file: "echotype-medium-q4_k_m.gguf", size_mb: 940, sha256: "944fa5a9221b7a1c0e8b8617392df071ef57323a64dc3e99f5a563e02ace6f37", note: "1.5B. Catches more; uses about twice the memory." },
+    ONE,
+    Cleaner { id: "echotype-tiny", label: "Echotype Tiny", file: "echotype-tiny-q5_k_m.gguf", size_mb: 401, sha256: "5b6faf7e64f41d34569413409bc0628e4c48d2893ad95ace9b51192b6bee2be9", note: "0.5B. Light and quick; best for English. Cleans only: edits use Echotype One." },
 ];
 
 /// Where the cleaner files are served from: the echotype-models Cloudflare R2 bucket (uploaded with
@@ -39,14 +47,10 @@ pub const CLEANERS: &[Cleaner] = &[
 /// stays on only for builds that still fetch notices from it).
 pub const DOWNLOAD_URL: Option<&str> = Some("https://models.tryechotype.tech");
 
-/// Echotype Writer: a Qwen2.5-1.5B-Instruct (Apache-2.0) distilled on 2,489 Command Mode edits by
-/// Qwen3-4B-Instruct-2507 (LoRA, IQ4_XS: judged 4.58/5 against 4.17 for the plain 1.5B), for the
-/// edits the cleaners can't do (Command Mode, Transforms) with the built-in provider. It shares the
-/// one llama-server with the cleaner: an edit swaps it in, the next dictation swaps the cleaner back,
-/// so memory never holds both.
-pub const WRITER: Cleaner = Cleaner { id: "echotype-writer", label: "Echotype Writer", file: "echotype-writer-iq4_xs.gguf", size_mb: 860, sha256: "223d1f0457e5326b9781c4355ebd90355b54fdc7364481866620d4035f1922f7", note: "1.5B. Edits selected text when you ask: Command Mode and Transforms." };
+/// The model edits run on with the built-in provider: Echotype One, whichever cleaner is picked.
+pub const WRITER: Cleaner = ONE;
 
-/// Context the writer is served with: a selection and its rewrite, kept in an 8-bit KV cache.
+/// Context edits are served with: a selection and its rewrite, kept in an 8-bit KV cache.
 pub const WRITER_CONTEXT: u32 = 2048;
 
 pub fn find(id: &str) -> Option<&'static Cleaner> {
@@ -107,9 +111,8 @@ fn installed(c: &Cleaner) -> bool {
     model_path(c).is_file()
 }
 
-/// The cleaner Automatic uses: Echotype Tiny on every Mac (71 of 100 benchmark dictations exact
-/// against Medium's 74, at half the size and twice the speed); the closest installed one until
-/// Tiny is, so a Mac with only Medium keeps cleaning up.
+/// The cleaner Automatic uses: Echotype One on every Mac, since it also does the edits; the closest
+/// installed one until One is, so a Mac with only Tiny keeps cleaning up.
 fn auto_cleaner(installed: impl Fn(&str) -> bool) -> &'static Cleaner {
     let want = CLEANERS[0].id;
     let id = stt::closest(CLEANERS.iter().map(|c| c.id), want, installed).unwrap_or(want);
@@ -245,7 +248,7 @@ pub fn ensure(settings: &Settings) -> Result<(String, String), String> {
     ensure_for(settings, false)
 }
 
-/// ensure, for the cleaner or (`writer`) for Echotype Writer: the other one is stopped first.
+/// ensure, for the cleaner or (`writer`) for Echotype One: a different model running is stopped first.
 pub fn ensure_for(settings: &Settings, writer: bool) -> Result<(String, String), String> {
     use_for(settings, writer).map(|(url, key, _)| (url, key))
 }
@@ -263,14 +266,22 @@ impl Drop for InUse {
     }
 }
 
+/// How the server runs for a cleanup or (`writer`) an edit. Echotype One is served the same way
+/// for both, so an edit never swaps it out; Tiny cleans with a plain cache and hands edits to One.
+fn serving(settings: &Settings, writer: bool) -> Opts {
+    let c = if writer { &WRITER } else { cleaner(settings) };
+    let lock = memory(settings) == "ready";
+    if c.id == WRITER.id {
+        Opts { model: model_path(c), ctx: WRITER_CONTEXT.max(context(settings)), lock, kv8: true }
+    } else {
+        Opts { model: model_path(c), ctx: context(settings), lock, kv8: false }
+    }
+}
+
 /// `ensure_for`, plus a lease that keeps this server from being swapped out until it drops.
 pub fn use_for(settings: &Settings, writer: bool) -> Result<(String, String, InUse), String> {
     let c = if writer { &WRITER } else { cleaner(settings) };
-    let opts = if writer {
-        Opts { model: model_path(c), ctx: WRITER_CONTEXT, lock: memory(settings) == "ready", kv8: true }
-    } else {
-        Opts { model: model_path(c), ctx: context(settings), lock: memory(settings) == "ready", kv8: false }
-    };
+    let opts = serving(settings, writer);
     IDLE_SECS.store(idle(settings).map_or(0, |d| d.as_secs()), Ordering::Relaxed);
     let asked = Instant::now();
     let mut g = loop {
@@ -349,7 +360,7 @@ pub fn prewarm(s: &Settings, command: bool) {
     if cold {
         let s = s.clone();
         std::thread::spawn(move || {
-            // Command Mode runs on Echotype Writer: loading the cleaner first would only be thrown away.
+            // Command Mode runs on Echotype One: loading Tiny first would only be thrown away.
             if command {
                 let _ = ensure_for(&s, true);
             } else {
@@ -526,7 +537,18 @@ mod tests {
         assert!(a.windows(2).any(|p| p == ["-ctk", "q8_0"]) && a.windows(2).any(|p| p == ["-ctv", "q8_0"]) && a.windows(2).any(|p| p == ["-c", "2048"]));
         let c = Opts { kv8: false, ..w };
         assert!(!args(&c, 1, false).iter().any(|a| a == "-ctk"));
-        assert_eq!(find("echotype-writer").map(|c| c.file), Some(WRITER.file), "download and delete find the writer");
+        assert_eq!(find("echotype-one").map(|c| c.file), Some(WRITER.file), "download and delete find Echotype One");
+    }
+
+    #[test]
+    fn echotype_one_cleans_and_edits_on_one_server() {
+        let pick = |id: &str| Settings { advanced: true, cleanup: crate::settings::Cleanup { model: id.into(), ..Default::default() }, ..Default::default() };
+        let one = pick("echotype-one");
+        assert!(serving(&one, false) == serving(&one, true), "same model, same flags: an edit never restarts the server");
+        assert!(serving(&one, false).kv8 && serving(&one, false).ctx >= WRITER_CONTEXT, "cleanup gets the edit's context too");
+        let tiny = pick("echotype-tiny");
+        assert!(serving(&tiny, false) != serving(&tiny, true), "Tiny cleans; edits go to One");
+        assert_eq!(serving(&tiny, true).model, model_path(&ONE));
     }
 
     #[test]
@@ -542,12 +564,14 @@ mod tests {
 
     #[test]
     fn automatic_cleaner_memory_and_context_follow_the_mac() {
-        assert_eq!(auto_cleaner(|_| true).id, "echotype-tiny", "Tiny on every Mac");
-        assert_eq!(auto_cleaner(|_| false).id, "echotype-tiny", "and to download when none is");
-        assert_eq!(auto_cleaner(|id| id == "echotype-medium").id, "echotype-medium", "a Medium-only Mac keeps Medium until Tiny is in");
+        assert_eq!(auto_cleaner(|_| true).id, "echotype-one", "Echotype One on every Mac");
+        assert_eq!(auto_cleaner(|_| false).id, "echotype-one", "and to download when none is");
+        assert_eq!(auto_cleaner(|id| id == "echotype-tiny").id, "echotype-tiny", "a Tiny-only Mac keeps Tiny until One is in");
         let mut s = Settings { advanced: true, ..Default::default() };
-        s.cleanup.model = "echotype-medium".into();
-        assert_eq!(cleaner(&s).id, "echotype-medium", "a hand-picked Medium stays");
+        s.cleanup.model = "echotype-tiny".into();
+        assert_eq!(cleaner(&s).id, "echotype-tiny", "a hand-picked Tiny stays");
+        s.cleanup.model = "echotype-medium".into(); // replaced by One
+        assert!(CLEANERS.iter().any(|c| c.id == cleaner(&s).id), "a Medium pick falls back to Automatic's");
         let mut s = Settings { cleaner_memory: "save".into(), cleaner_context: 4096, cleaner_idle_unload: true, cleaner_idle_minutes: 1, ..Default::default() };
         assert_eq!(context(&s), CONTEXT, "advanced off: the one constant");
         assert_eq!(idle(&s), None);
@@ -557,8 +581,7 @@ mod tests {
         s.cleanup.model = "echotype-clean".into(); // the first 1.5B, no longer offered
         assert!(find(cleaner(&s).id).is_some(), "an unknown pick falls back to Automatic's");
         let st = cleaners(8192);
-        assert!(st.iter().all(|c| c.ram_mb > 0));
-        assert!(st.iter().find(|c| c.id == "echotype-medium").unwrap().warning.is_some(), "Medium on an 8 GB Mac");
+        assert!(st.iter().all(|c| c.ram_mb > 0 && c.ram_mb <= 1024), "every built-in model stays within 1 GB");
     }
 
     #[test]

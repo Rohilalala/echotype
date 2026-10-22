@@ -63,10 +63,10 @@ const models = [
 const low = q.get('ram') === '8';
 const sys = { total_ram_gb: low ? 8 : 24, available_ram_gb: low ? 3.2 : 5.1, os: 'macos', arch: 'aarch64', can_autostart: q.get('appdir') !== '0', low_ram: low, cloud: q.has('cloud'),
   echotype_model_installed: true, echotype_model_mb: 401,
-  cleaners: [{ id: 'echotype-tiny', label: 'Echotype Tiny', note: '0.5B. Light and quick; best for English.', downloadable: q.has('dl-cleaners'), size_mb: 401, ram_mb: 552, installed: true, automatic: true, recommended: true, warning: null },
-    { id: 'echotype-medium', label: 'Echotype Medium', note: '1.5B. Catches more; uses about twice the memory.', downloadable: q.has('dl-cleaners'), size_mb: 940, ram_mb: 1099, installed: false, automatic: false, recommended: false, warning: low ? 'Uses about 1.1 GB while dictating. On an 8 GB Mac this can slow other apps.' : null }],
-  // ?writer: Echotype Writer installed (lib.rs SystemInfo.writer).
-  writer: { id: 'echotype-writer', label: 'Echotype Writer', note: '1.5B. Edits selected text when you ask: Command Mode and Transforms.', downloadable: true, size_mb: 860, ram_mb: 1012, installed: q.has('writer'), automatic: false, recommended: false, warning: null } };
+  cleaners: [{ id: 'echotype-one', label: 'Echotype One', note: '1.5B. Cleans up dictation and edits selected text when you ask.', downloadable: q.has('dl-cleaners'), size_mb: 860, ram_mb: 1012, installed: q.has('writer'), automatic: q.has('writer'), recommended: true, warning: null },
+    { id: 'echotype-tiny', label: 'Echotype Tiny', note: '0.5B. Light and quick; best for English. Cleans only: edits use Echotype One.', downloadable: q.has('dl-cleaners'), size_mb: 401, ram_mb: 552, installed: true, automatic: !q.has('writer'), recommended: false, warning: null }],
+  // ?writer: Echotype One installed (lib.rs SystemInfo.writer: the model edits run on).
+  writer: { id: 'echotype-one', label: 'Echotype One', note: '1.5B. Cleans up dictation and edits selected text when you ask.', downloadable: true, size_mb: 860, ram_mb: 1012, installed: q.has('writer'), automatic: false, recommended: false, warning: null } };
 for (const m of models) Object.assign(m, { english_only: m.id.endsWith('.en'), fits: m.ram_mb + 2048 <= sys.available_ram_gb * 1024 });
 const rec = models.find(m => m.id === 'large-v3-turbo-q5_0');
 rec.recommended = true;
@@ -109,7 +109,7 @@ const sampleAccount = plan => plan === 'pro'
   : { email: 'you@example.com', plan: 'free', words_used: 1240, words_limit: 2000, resets_at: nextMonday(), audio_seconds_used: 610, audio_seconds_limit: 7200 };
 let cloudAccount = ['free', 'pro'].includes(q.get('cloud')) ? sampleAccount(q.get('cloud')) : null;
 if (q.has('cloud')) settings.stt.provider = 'cloud';
-if (q.has('builtin')) Object.assign(settings.cleanup, { enabled: true, provider: 'echotype', model: 'echotype-medium' });
+if (q.has('builtin')) Object.assign(settings.cleanup, { enabled: true, provider: 'echotype', model: 'echotype-one' });
 let busy = false;
 // Onboarding: ?mic=unknown|denied|granted|restricted (onboarding starts at unknown), ?ax=1 (starts on).
 const perm = { mic: q.get('mic') || (q.has('onboarding') ? 'unknown' : 'granted'), ax: q.has('onboarding') ? q.get('ax') === '1' : !q.has('noaccess') };
@@ -354,7 +354,7 @@ let meetingList = mq === 'empty' ? [] : mq === 'live' ? [liveMeeting, doneMeetin
 let stopSummary = false;
 Object.assign(commands, {
   meeting_status: () => ({ live: mq === 'live' ? { id: liveMeeting.id, started_ms: liveMeeting.started_ms, recording: true } : null, computer_audio: !q.has('miconly'), speakers: !q.has('miconly'), screen_recording: !q.has('noscreen'), download_mb: mq === 'empty' ? 36 : 0, summaries: true,
-    summary_with: q.has('openai') ? 'OpenAI' : 'Echotype Writer (on this Mac)', summary_blocked: q.has('nowriter') ? 'Meeting summaries need Echotype Writer: download it on the Models page' : null }),
+    summary_with: q.has('openai') ? 'OpenAI' : 'Echotype One (on this Mac)', summary_blocked: q.has('nowriter') ? 'Meeting summaries need Echotype One: download it on the Models page' : null }),
   meeting_window: () => null,
   meeting_ask: async ({ question }) => {
     await new Promise(r => setTimeout(r, 400));

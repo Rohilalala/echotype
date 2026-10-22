@@ -1073,7 +1073,7 @@ fn apply_edit(app: &AppHandle, s: &Settings, what: &str, selection: Option<&str>
     // Undo edit then copies the text as it was before this edit, not an older dictation.
     *lock(&state(app).last_raw) = selection.map(str::to_string);
     if llm::wanted(s) {
-        // The edit swapped Echotype Writer in; have the cleaner back before the next dictation.
+        // With Tiny picked, the edit swapped Echotype One in; have Tiny back before the next dictation.
         let s = s.clone();
         std::thread::spawn(move || llm::apply(&s));
     }
@@ -1748,7 +1748,7 @@ struct SystemInfo {
     echotype_model_mb: u64,
     /// The Echotype cleaners with their RAM, for the Cleanup page's picker (advanced settings).
     cleaners: Vec<llm::CleanerStatus>,
-    /// Echotype Writer, for the Models page (Command Mode with the built-in provider).
+    /// Echotype One, the model edits use (Command Mode with the built-in provider), for the Models page.
     writer: llm::CleanerStatus,
     /// 8 GB or less: Automatic picks the light setup.
     low_ram: bool,

@@ -666,7 +666,7 @@ pub fn assistant(s: &Settings) -> (String, Option<String>) {
         p => preset.as_ref().map_or(p, |p| p.label).to_string(),
     };
     let blocked = if c.provider == "echotype" && !crate::llm::writer_installed() {
-        Some("Meeting summaries need Echotype Writer: download it on the Models page".to_string())
+        Some(format!("Meeting summaries need {}: download it on the Models page", crate::llm::WRITER.label))
     } else if crate::cleanup::keyless(s) {
         Some(format!("Meeting summaries need your {} API key", preset.map_or(c.provider.as_str(), |p| p.label)))
     } else {
@@ -2134,7 +2134,7 @@ mod tests {
     fn the_button_names_the_cleanup_provider_and_where_it_runs() {
         let mut s = Settings::default();
         s.cleanup.provider = "echotype".into();
-        assert_eq!(assistant(&s).0, "Echotype Writer (on this Mac)");
+        assert_eq!(assistant(&s).0, "Echotype One (on this Mac)");
         s.cleanup.provider = "ollama".into();
         assert_eq!(assistant(&s), ("Ollama (on this Mac)".into(), None));
         s.cleanup.provider = "custom".into();
@@ -2148,7 +2148,7 @@ mod tests {
     #[test]
     #[ignore]
     fn a_long_meeting_keeps_its_facts_with_echotype_writer() {
-        assert!(crate::llm::writer_installed(), "Echotype Writer is not downloaded");
+        assert!(crate::llm::writer_installed(), "Echotype One is not downloaded");
         let mut s = Settings::default();
         s.cleanup.enabled = true;
         s.cleanup.provider = "echotype".into();

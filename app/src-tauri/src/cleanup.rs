@@ -186,7 +186,7 @@ fn pieces(text: &str, budget: usize) -> Result<Vec<(&str, &'static str)>, String
 /// One chat completion with the configured cleanup provider: `system` as the system prompt and
 /// `text` inside <transcript> tags. Also used for meeting summaries.
 /// With the built-in provider, anything but cleanup (Command Mode, Transforms) is an edit, which
-/// Echotype Writer does: the cleaners only know how to clean dictation.
+/// Echotype One does (Tiny only knows how to clean dictation).
 pub fn uses_writer(s: &Settings, system: &str) -> bool {
     s.cleanup.provider == "echotype" && system != system_prompt(s)
 }
@@ -482,7 +482,7 @@ pub fn command_input(selection: Option<&str>, instruction: &str) -> String {
 pub fn command_blocked(s: &Settings, keyless: bool) -> Option<String> {
     let label = settings::preset(&s.cleanup.provider).map_or(s.cleanup.provider.clone(), |p| p.label.to_string());
     if s.cleanup.provider == "echotype" {
-        (!llm::writer_installed()).then(|| "Command Mode needs Echotype Writer: download it on the Models page".to_string())
+        (!llm::writer_installed()).then(|| format!("Command Mode needs {}: download it on the Models page", llm::WRITER.label))
     } else if keyless {
         Some(format!("Command Mode needs your {label} API key"))
     } else {
@@ -1210,7 +1210,7 @@ mod tests {
         assert!(capped.contains(&format!("\n{}\n</app_instructions>", "a".repeat(settings::APP_INSTRUCTIONS_MAX))) && !capped.contains(&"a".repeat(settings::APP_INSTRUCTIONS_MAX + 1)), "capped");
         s.cleanup.provider = "echotype".into();
         assert!(!system_prompt(&s).contains("app_instructions"), "the built-in cleaner keeps its trained prompt, as with custom instructions");
-        assert!(uses_writer(&s, &command_prompt(&s)), "an edit still goes to Echotype Writer");
+        assert!(uses_writer(&s, &command_prompt(&s)), "an edit still goes to Echotype One");
     }
 
     #[test]
@@ -1862,7 +1862,7 @@ mod tests {
     #[test]
     #[ignore]
     fn a_swap_waits_for_the_request_in_flight() {
-        assert!(llm::writer_installed(), "Echotype Writer is not downloaded");
+        assert!(llm::writer_installed(), "Echotype One is not downloaded");
         let mut s = Settings::default();
         s.cleanup.enabled = true;
         s.cleanup.provider = "echotype".into();
@@ -1897,7 +1897,7 @@ mod tests {
     #[ignore]
     fn command_mode_end_to_end() {
         let Ok(dir) = std::env::var("ECHOTYPE_TEST_WAVS") else { return eprintln!("skipped: no ECHOTYPE_TEST_WAVS") };
-        assert!(llm::writer_installed(), "Echotype Writer is not downloaded");
+        assert!(llm::writer_installed(), "Echotype One is not downloaded");
         let mut s = Settings::default();
         s.cleanup.enabled = true;
         s.cleanup.provider = "echotype".into();
@@ -2031,7 +2031,7 @@ mod tests {
     #[test]
     #[ignore]
     fn command_mode_uses_screen_context() {
-        assert!(llm::writer_installed(), "Echotype Writer is not downloaded");
+        assert!(llm::writer_installed(), "Echotype One is not downloaded");
         let mut s = echotype();
         let mut ask = |before: &str, selection: Option<&str>, instruction: &str| {
             s.screen.around = (before.into(), String::new());
@@ -2146,8 +2146,8 @@ mod tests {
     fn command_mode_needs_a_general_model_with_its_key() {
         let mut s = Settings::default();
         s.cleanup.provider = "echotype".into();
-        // The built-in provider edits with Echotype Writer once it is downloaded.
-        assert_eq!(command_blocked(&s, false).is_some_and(|w| w.contains("Echotype Writer")), !llm::writer_installed());
+        // The built-in provider edits with Echotype One once it is downloaded.
+        assert_eq!(command_blocked(&s, false).is_some_and(|w| w.contains("Echotype One")), !llm::writer_installed());
         for p in ["ollama", "lmstudio", "custom", "groq"] {
             s.cleanup.provider = p.into();
             assert_eq!(command_blocked(&s, false), None, "{p}");

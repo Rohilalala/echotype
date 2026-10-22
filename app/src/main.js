@@ -221,7 +221,7 @@ function stopRecording() {
 }
 const errEl = field => $(`#${field}Error`);
 // The built-in model can't follow an instruction (cleanup.rs command_blocked): Command Mode and transforms need another.
-// The Echotype model edits with Echotype Writer (Models page); until it is downloaded, edits can't run.
+// The Echotype model edits with Echotype One (Models page); until it is downloaded, edits can't run.
 const needsGeneral = () => S.cleanup.provider === 'echotype' && !sys?.writer?.installed;
 // Click `btn`, press a shortcut: it goes to setting `path` (see renderHotkey), errors to `err`.
 function listenShortcut(btn, path, err) {
@@ -374,7 +374,7 @@ const ACTIONS = {
   accessibility: ['Allow pasting', () => invoke('open_permission_settings', { kind: 'accessibility' })],
   model: ['Choose a model', () => go('speech')],
   cleanup: ['Open Cleanup', () => go('cleanup')],
-  writer: ['Get Echotype Writer', () => go('speech')],
+  writer: ['Get Echotype One', () => go('speech')],
   automatic: ['Switch to automatic', () => { S.advanced = false; syncBound(); save(); changed('advanced'); }],
   settings: ['Open Settings', () => go('settings')],
   update: ['Update', () => { go('account'); checkUpdate(); }],
@@ -780,35 +780,8 @@ function cleanerRow(c) {
     h('span', { className: 'actions' }, actions));
 }
 
-// Models → Writing model: Echotype Writer, which Command Mode and Transforms use with the
-// built-in provider. Nothing to pick: installed is ready.
-function writerRow(c) {
-  const p = progress[c.id], err = modelErr[c.id];
-  const del = h('button', { className: 'btn quiet danger', type: 'button' }, 'Delete');
-  del.onclick = async () => {
-    if (!del.dataset.armed) { del.dataset.armed = 1; del.textContent = 'Click again to delete'; return setTimeout(() => { del.textContent = 'Delete'; delete del.dataset.armed; }, 3000); }
-    try { await invoke('delete_model', { id: c.id }); } catch (e) { modelErr[c.id] = String(e); }
-    await refreshModels();
-  };
-  const actions = p != null ? [h('span', { className: 'pct', 'data-pct': c.id }, `${Math.round(p * 100)}%`),
-      h('span', { className: 'ring', role: 'progressbar', 'aria-label': `Downloading ${c.label}`, 'aria-valuenow': Math.round(p * 100), 'data-progress': c.id, style: `--p:${p}` })]
-    : !c.installed ? [c.downloadable ? h('button', { className: err ? 'btn' : 'round', type: 'button', title: 'Download', 'aria-label': `Download ${c.label}, ${fmtMB(c.size_mb)}`, onclick: () => download(c.id) }, err ? 'Retry' : svg(DOWN))
-      : h('span', { className: 'tag' }, 'Download coming soon')]
-    : [h('span', { className: 'in-use' }, svg(CHECK), 'Ready'), del];
-  return h('div', { className: 'row model' },
-    h('span', { className: 'tile', 'aria-hidden': 'true' }, svg(WAVE)),
-    h('span', { className: 'row-text' },
-      h('span', { className: 'model-name' }, c.label),
-      h('span', { className: 'row-desc' }, c.note),
-      h('span', { className: 'model-meta' }, h('span', {}, fmtMB(c.size_mb)), h('span', {}, `about ${fmtMB(c.ram_mb)} RAM, only while editing`)),
-      c.warning && h('span', { className: 'row-desc warn' }, c.warning),
-      err && h('span', { className: 'row-desc error', role: 'alert' }, err)),
-    h('span', { className: 'actions' }, actions));
-}
-
 function renderModels() {
   $('#cleanerList').replaceChildren(...(sys?.cleaners ?? []).map(cleanerRow));
-  $('#writerList').replaceChildren(...(sys?.writer ? [writerRow(sys.writer)] : []));
   renderAuto();
   $('#memline').hidden = $('#modelList').hidden = !S.advanced;
   $('#memline').replaceChildren('Free memory now ', h('b', {}, `${sys.available_ram_gb.toFixed(1)} GB`), ` of ${Math.round(sys.total_ram_gb)} GB. A model fits when it leaves 2 GB for everything else.`);
