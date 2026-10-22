@@ -160,6 +160,8 @@ nav .nav-foot { margin-top: auto; }
 .side-notice p { margin: 2px 0 0; color: var(--fg-2); }
 .side-notice .btn { margin-top: 8px; }
 .side-notice .notice-x { position: absolute; top: 6px; right: 6px; }
+.side-notice .notice-btns { display: flex; gap: 6px; }
+#learnWords { margin-top: 12px; }
 .retired { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 16px; background: color-mix(in srgb, var(--pane) 82%, transparent); backdrop-filter: blur(8px); }
 .retired[hidden] { display: none; }
 .retired-card { max-width: 360px; padding: 24px; border-radius: var(--r-card); background: var(--pane); border: 1px solid var(--line-strong); text-align: center; }
@@ -248,7 +250,7 @@ h1 + .group { margin-top: 16px; }
   min-height: 44px;
   padding: 10px 14px;
 }
-.row + .row::before, #apiBody > .row::before, #reps > .row::before, .group > #reps + .row::before, #appStyles > .row::before {
+.row + .row::before, #apiBody > .row::before, #reps > .row::before, .group > #reps + .row::before, #appStyles > .row::before, .group > #transforms:not(:empty) + .row::before {
   content: "";
   position: absolute;
   left: 14px;
@@ -450,13 +452,16 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 
 .drop-results { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
 .result { background: var(--pane); border: 1px solid var(--line-strong); border-radius: var(--r-card); padding: 12px 10px 12px 14px; }
-.result-head { display: flex; align-items: center; gap: 10px; }
-.result-name { font-weight: var(--fw-semi); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; } /* controls wrap below a long name at 720px */
+.result-name { font-weight: var(--fw-semi); flex: 1 1 8em; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .result-meta { color: var(--fg-3); font-size: 12px; font-variant-numeric: tabular-nums; }
 .result p { margin: 8px 4px 0 0; font-size: 13.5px; line-height: 1.55; white-space: pre-wrap; }
 .result.err p:not(.hint) { color: var(--bad); }
 .result .hint { color: var(--fg-2); font-size: 12px; margin-top: 2px; }
 .result .seg span { padding: 2px 9px; font-size: 12px; }
+.result-head select { width: auto; min-width: 0; flex: none; } /* Save as… beside Copy */
+#soundPackRow select { width: auto; } /* 45% of a shrink-to-fit .actions clipped “Classic” */
+.batch-head { padding: 0 4px 2px 0; } /* "Transcribing 4 files" above the queue */
 .working { color: var(--fg-2); }
 .working::after { content: ""; display: inline-block; width: 10px; height: 10px; margin-left: 8px; border: 1.5px solid var(--line-strong); border-top-color: var(--fg-2); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -1px; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -553,6 +558,13 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .rep { min-height: 44px; }
 .rep input { width: 100%; }
 
+/* Settings → Transforms: name and instruction on the left, shortcut and Remove on the right. */
+.transform { align-items: flex-start; }
+.transform .row-text { gap: 6px; }
+.transform input[type="text"] { font-weight: var(--fw-med); max-width: 260px; }
+.transform .actions { min-width: 200px; justify-content: flex-end; }
+#transformsNote { margin: 0 0 10px; }
+
 /* Settings */
 .hotkey {
   all: unset;
@@ -604,6 +616,7 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .history summary .tag { flex: none; }
 .history .detail .hint { color: var(--fg-2); font-size: 12px; margin: 0; }
 .history .detail > .btn, .history .detail > .rerun { align-self: flex-start; }
+.history .detail > audio { width: min(100%, 360px); height: 32px; }
 .history .fix { display: flex; flex-direction: column; gap: 8px; }
 .history .fix-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .history .learn { display: flex; flex-direction: column; gap: 6px; }
@@ -677,14 +690,14 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .ob-step .lede { font-size: 14.5px; line-height: 22px; margin: 0 0 14px; text-wrap: pretty; }
 .ob-orb { flex: none; }
 
-/* Steps 1 and 5: centred under a large orb. 2-4: the orb keeps a column on the left. */
+/* Steps 1 and 6: centred under a large orb. 2-5: the orb keeps a column on the left. */
 .ob-step.center { align-items: center; text-align: center; }
 .ob-step.center .ob-orb { width: 132px; height: 132px; margin-bottom: 18px; flex: none; }
 .ob-step.center .lede { max-width: 50ch; }
 /* Top-aligned, so a status or tip line appearing below never moves what's above it. */
 .ob-step.split { display: grid; grid-template-columns: 136px minmax(0, 1fr); column-gap: 28px; align-content: start; align-items: start; padding-top: clamp(8px, 7vh, 64px); }
 .ob-step.split .ob-orb { width: 104px; height: 104px; justify-self: center; margin-top: 2px; }
-.ob-step[data-step="4"] { padding-top: clamp(8px, 6vh, 48px); }
+.ob-step[data-step="5"] { padding-top: clamp(8px, 6vh, 48px); }
 /* The footer's "Finish and relaunch" is the relaunch here. */
 #obTalkStatus .btn.primary { display: none; }
 .ob-body { min-width: 0; padding: 2px; margin: -2px; }
@@ -701,7 +714,28 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .keys { display: inline-flex; gap: 3px; vertical-align: baseline; }
 .ob-say q { color: var(--fg); quotes: "“" "”"; }
 
-/* Step 2: the keys press down with the real ones (hotkey-state). */
+/* Step 2: the two language menus side by side, then the script choice, ticked, and a line in it. */
+.ob-langs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 2px 0 18px; }
+.ob-field { display: grid; gap: 6px; margin: 0; font-size: 12.5px; color: var(--fg-2); }
+.ob-field select { width: 100%; }
+.ob-script .ob-field { margin-bottom: 6px; }
+.ob-script .seg { display: flex; }
+.ob-script .seg label { flex: 1; }
+.ob-script .seg span { padding: 7px 12px; text-align: center; font-size: 13px; }
+.ob-script .seg input:checked + span::before {
+  content: "";
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 6px;
+  vertical-align: -1px;
+  background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 8.5l3 3 6-7'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 8.5l3 3 6-7'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+.ob-script .ob-result { margin-top: 10px; }
+
+/* Step 3: the keys press down with the real ones (hotkey-state). */
 .ob-keys { display: flex; gap: 10px; margin: 2px 0 16px; }
 .ob-keys kbd {
   font-size: 20px;
@@ -725,7 +759,7 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .ob-watch.pulse { animation: ob-watch 1.4s var(--ob-ease) both; }
 @keyframes ob-watch { 0% { opacity: 0; transform: translateY(-4px); } 25% { opacity: 1; transform: translateY(2px); } 45%, 100% { opacity: 1; transform: none; } }
 
-/* Step 3: a small picture of the switch to flip, looping every 2 s. */
+/* Step 4: a small picture of the switch to flip, looping every 2 s. */
 .ob-ax-demo { display: inline-flex; flex-direction: column; gap: 6px; margin: 0 0 12px; padding: 10px 12px; border-radius: var(--r-card); background: var(--soft); font-size: 12px; color: var(--fg-2); }
 .ob-ax-row { display: flex; align-items: center; gap: 8px; min-width: 220px; color: var(--fg); font-size: 13px; }
 .ob-ax-row img { border-radius: 5px; }
@@ -738,7 +772,7 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 #obAxTry .ob-say { font-size: 14.5px; line-height: 22px; color: var(--fg-2); margin: 0 0 10px; }
 #obAxTry .btn { margin-top: 12px; }
 
-/* Step 4: one question at a time, answered with one big control. */
+/* Step 5: one question at a time, answered with one big control. */
 .ob-count { margin: 0 0 6px; font-size: 12px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
 .ob-q .lede { max-width: 46ch; }
 .ob-q .lede:empty { display: none; }
@@ -785,7 +819,7 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .ob-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* The orb, colour and ball questions: heading on top, the orb large in the middle (orb.js follows
    .ob-centre), the choices in one row along the bottom. The left column's slot stays, unseen. */
-.ob-step[data-step="4"].ob-wide { grid-template-rows: minmax(0, 1fr); align-content: stretch; padding-bottom: 14px; }
+.ob-step[data-step="5"].ob-wide { grid-template-rows: minmax(0, 1fr); align-content: stretch; padding-bottom: 14px; }
 .ob-wide > .ob-orb { visibility: hidden; grid-row: 1; grid-column: 1; }
 .ob-wide > .ob-body { grid-column: 1 / -1; grid-row: 1; align-self: stretch; display: flex; flex-direction: column; text-align: center; }
 .ob-wide .ob-q:not([hidden]) { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; }
@@ -810,10 +844,8 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .ob-speed-fit[data-tone="warn"] { color: var(--warn); }
 .ob-speed-fit[data-tone="bad"] { color: var(--bad); }
 
-/* Languages: toggle chips, up to 3 pressed (Settings → Language and onboarding). */
+/* Languages: toggle chips, up to 3 pressed (Settings → Language). */
 .lang-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 14px 14px; }
-.ob-q .lang-chips { padding: 12px 0 0; }
-.ob-q .lang-chips ~ .ob-pick, .ob-q .lang-chips ~ .lede { margin-top: 14px; }
 .row .lang-chips { padding: 0; }
 .lang-chips button { all: unset; height: 28px; padding: 0 11px; border-radius: 14px; border: 1px solid var(--line-strong); font-size: 12.5px; color: var(--fg-2); cursor: default; transition: background var(--dur) ease, color var(--dur) ease, border-color var(--dur) ease; }
 .lang-chips button:hover { background: var(--hover); color: var(--fg); }
@@ -838,7 +870,7 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .ob-q.enter > * { animation: ob-in 240ms var(--ob-ease) both; animation-delay: calc(30ms + var(--i, 0) * 35ms); }
 :root.ob-back .ob-q.enter > * { animation-name: ob-in-back; }
 
-/* Step 5: settings rows inside the card. */
+/* Step 6: settings rows inside the card. */
 .ob-group { width: 100%; text-align: left; }
 .ob-group .row { min-height: 40px; padding: 8px 12px; gap: 12px; }
 .ob-group .row + .row::before { left: 12px; right: 12px; }
@@ -847,7 +879,7 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .ob-recap li { display: flex; align-items: center; gap: 10px; }
 .ob-recap .keys { min-width: 64px; justify-content: flex-end; color: var(--fg); }
 .ob-recap .times { font-size: 12px; color: var(--fg-2); margin-left: 2px; }
-.ob-step[data-step="5"] .ob-group { max-width: 460px; }
+.ob-step[data-step="6"] .ob-group { max-width: 460px; }
 
 .ob-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; height: 64px; padding: 0 16px 0 14px; }
 .ob-foot-end { display: flex; align-items: center; gap: 6px; }
@@ -910,7 +942,7 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 @media (max-width: 620px) {
   :root { --side-w: 52px; }
   .sidebar { padding-left: 8px; padding-right: 8px; }
-  .preview-note { display: none; }
+  .preview-note, .side-notice { display: none; } /* no room beside the icons */
   nav button { font-size: 0; justify-content: center; padding: 0; }
   main { padding: 40px 16px 32px; }
   .hero { margin-top: 4vh; }
@@ -982,6 +1014,17 @@ body[data-state="recording"] .mic .i-done { display: block; stroke-width: 2; }
 .snippet time { flex: none; color: var(--fg-3); font-variant-numeric: tabular-nums; }
 .snippet mark { background: var(--accent-weak); color: var(--fg); border-radius: 2px; }
 
+/* History search: the box and "12 of 340" beside it. */
+.history-search { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; }
+.history-search input { flex: 1; }
+.history-search .hint { flex: none; color: var(--fg-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+/* Notes (notes.js): the list, and one note's editor filling the page. */
+#notes .note-search { width: 100%; margin: 0 0 8px; }
+#notes .note-editor { display: block; min-height: max(280px, calc(100vh - 290px)); margin: 10px 0 0; padding: 12px 14px; font-size: 14px; line-height: 1.55; resize: none; }
+#notes .export select { width: auto; }
+#notes .note { margin: 10px 0 0; }
+
 /* The meeting window: the meeting view alone, edge to edge. */
 body.meeting-window { display: block; background: var(--pane); }
 body.meeting-window main { height: 100vh; box-sizing: border-box; padding: 20px 20px 32px; border: 0; border-radius: 0; }
@@ -1016,3 +1059,8 @@ html.film .film-shell { display: block; position: fixed; z-index: 0; opacity: 0;
 html.film .ob-top, html.film .ob-stage, html.film .ob-foot, html.film .ob-model { transition: opacity 450ms ease; }
 html.film-pre :is(.ob-top, .ob-stage, .ob-foot, .ob-model), html.film-out :is(.ob-top, .ob-stage, .ob-foot, .ob-model) { opacity: 0; pointer-events: none; }
 .film-canvas { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 20; transition: opacity 300ms ease; }
+
+/* An app's "More" options sit under its row, with no divider between them. */
+#appStyles > .app-more { justify-content: flex-end; gap: 8px; padding-top: 0; min-height: 0; }
+#appStyles > .app-more::before { display: none; }
+#appStyles > .app-instructions textarea { flex: 1; resize: vertical; }

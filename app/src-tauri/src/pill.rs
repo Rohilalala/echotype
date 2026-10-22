@@ -178,6 +178,9 @@ fn line(s: &DictationState) -> String {
 
 /// One line of 11 px SF Pro: about 6 pt a character plus 10 pt of padding each side.
 // ponytail: estimated, not measured; have overlay.js report its measured size if the edges ever feel off.
+/// The muted recording's line (overlay.js NO_SOUND); a click on it opens the microphone picker.
+const NO_SOUND: &str = "No sound from your microphone";
+
 fn text_w(chars: usize) -> f64 {
     (20.0 + 6.0 * chars as f64).min(MAX_W)
 }
@@ -208,7 +211,7 @@ struct Active {
 #[derive(Debug, Default)]
 pub struct Pill {
     active: Option<Active>,
-    /// The live recording reads "Is your mic muted?" instead of the waveform.
+    /// The live recording reads "No sound from your microphone" instead of the waveform.
     muted: bool,
     hover_since: Option<Instant>,
     last_tick: Option<Instant>,
@@ -355,7 +358,7 @@ impl Pill {
             None if expanded => (text_w(hint_chars), LINE_H),
             None => idle_hit(),
             // ✕ and ✓ (16 pt each) stay either side of the words.
-            Some(a) if a.recording && self.muted => (text_w("Is your mic muted?".len()) + 36.0, LINE_H),
+            Some(a) if a.recording && self.muted => (text_w(NO_SOUND.len()) + 36.0, LINE_H),
             Some(a) if a.recording && a.chars > 0 => (live_w(a.chars), ORB),
             Some(a) if a.recording => (REC_W, ORB),
             Some(Active { notice: None, .. }) => (ORB, ORB),
@@ -1097,6 +1100,7 @@ pub fn menu(app: &AppHandle, mics: &[String], bar: Option<Bar>) -> tauri::Result
         // Only after the guard pasted the words as spoken.
         &MenuItem::with_id(app, "pill-cleaned", "Copy cleaned version", lock(&state(app).last_cleaned).is_some(), None::<&str>)?,
         &MenuItem::with_id(app, "pill-meeting", crate::meeting::menu_label(), true, None::<&str>)?,
+        &MenuItem::with_id(app, "pill-note", "New note by voice", true, None::<&str>)?,
         &PredefinedMenuItem::separator(app)?,
     ])?;
     if bar.is_none() {
@@ -1132,6 +1136,7 @@ pub fn on_menu(app: &AppHandle, id: &str) {
                 Err(e) => crate::hint(e, None),
             }),
             "pill-meeting" => crate::meeting::toggle(app),
+            "pill-note" => crate::new_note(app),
             "pill-settings" => crate::open_page(app, "settings"),
             "pill-hide" => hide_for_hour(app),
             _ => {}

@@ -19,6 +19,7 @@
       <button data-page="language"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.75"/><ellipse cx="8" cy="8" rx="2.4" ry="5.75"/><path d="M2.4 8h11.2"/></svg>Language</button>
       <button data-page="dictionary"><svg viewBox="0 0 16 16"><path d="M3 12V4a1.5 1.5 0 0 1 1.5-1.5H13v9H4.5A1.5 1.5 0 0 0 3 13a1.5 1.5 0 0 0 1.5 1.5H13"/></svg>Dictionary</button>
       <button data-page="meetings"><svg viewBox="0 0 16 16"><circle cx="5.5" cy="5.5" r="2.25"/><path d="M1.75 13.5a3.75 3.75 0 0 1 7.5 0"/><circle cx="11.25" cy="6" r="1.75"/><path d="M10.5 10.1a3 3 0 0 1 3.75 2.9"/></svg>Meetings</button>
+      <button data-page="notes"><svg viewBox="0 0 16 16"><path d="M4 2.5h5.5l3 3V13a.5.5 0 0 1-.5.5H4a.5.5 0 0 1-.5-.5V3a.5.5 0 0 1 .5-.5Z"/><path d="M6 8.5h4M6 11h3"/></svg>Notes</button>
       <button data-page="history"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.75"/><path d="M8 4.8v3.4l2.2 1.4"/></svg>History</button>
       <button data-page="stats"><svg viewBox="0 0 16 16"><path d="M2.5 13.5h11"/><path d="M3 10.5l3-3.25 2.5 2L13 4.5"/></svg>Stats</button>
     </nav>
@@ -48,8 +49,9 @@
         <div class="composer-body">
           <div class="drop-idle">
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5v8M4.75 7.25 8 10.5l3.25-3.25"/><path d="M2.75 10.5v1.25a1.75 1.75 0 0 0 1.75 1.75h7a1.75 1.75 0 0 0 1.75-1.75V10.5"/></svg>
-            <span><strong>Drop a voice note here</strong>
-              <span>.opus, .m4a, .mp3 or .wav. You get a clean transcript to copy.</span></span>
+            <span><strong>Drop voice notes or recordings here</strong>
+              <span>Audio or video, one file or many. You get a clean transcript to copy or save.</span></span>
+            <button class="btn quiet" id="pickFiles" type="button">Choose files…</button>
           </div>
           <div class="drop-live"><span class="meter" id="heroMeter" aria-hidden="true"></span></div>
         </div>
@@ -108,6 +110,10 @@
       <h2 class="group-title">Cleanup models</h2>
       <p class="lede small">Echotype's own cleanup models, run on this Mac. To use one, pick Echotype model under Cleanup.</p>
       <div class="list" id="cleanerList"></div>
+
+      <h2 class="group-title">Writing model</h2>
+      <p class="lede small">Edits text you select when you ask: "make it formal", "shorter", "in Spanish". Command Mode and Transforms use it with the Echotype model. It loads only while editing.</p>
+      <div class="list" id="writerList"></div>
       <p class="note">More models coming soon.</p>
     </section>
 
@@ -148,6 +154,16 @@
           <div class="row" id="cleanupCloud" hidden></div>
         </div>
 
+        <h2 class="group-title">Level</h2>
+        <div class="group">
+          <div class="row"><span class="row-text"><span class="row-title" id="levelLabel">How much cleanup changes</span><span class="row-desc" id="levelDesc"></span></span>
+            <span class="seg" role="radiogroup" aria-labelledby="levelLabel">
+              <label><input type="radio" name="level" value="none" data-bind="cleanup.level" /><span>None</span></label>
+              <label><input type="radio" name="level" value="light" data-bind="cleanup.level" /><span>Light</span></label>
+              <label><input type="radio" name="level" value="medium" data-bind="cleanup.level" /><span>Medium</span></label>
+            </span></div>
+        </div>
+
         <h2 class="group-title">Style</h2>
         <div class="group" role="radiogroup" aria-label="Style">
           <label class="row choice"><input type="radio" name="style" value="default" data-bind="cleanup.style" /><span class="row-text"><span class="row-title">Default</span><span class="row-desc">Fixes fillers, corrections and punctuation. Keeps your wording.</span></span></label>
@@ -177,10 +193,14 @@
           <input type="checkbox" class="switch" id="langAuto" /></label>
         <div class="row col"><span class="row-text"><span class="row-title" id="langPickTitle">Languages you speak</span><span class="row-desc" id="langPickDesc"></span></span>
           <div class="lang-chips" id="langChips" role="group" aria-labelledby="langPickTitle"></div></div>
-        <label class="row"><span class="row-text"><span class="row-title">Translate to English</span><span class="row-desc">Speak Hindi, Hinglish or any language and get English. Turbo models can’t translate, so Echotype switches to a multilingual model you have downloaded.</span></span>
-          <input type="checkbox" class="switch" data-bind="translate_to_english" /></label>
+        <div class="row" id="scriptRow"><span class="row-text"><span class="row-title" id="scriptLabel">How should your words look?</span><span class="row-desc" id="scriptDesc" dir="auto"></span></span>
+          <span class="seg" role="radiogroup" aria-labelledby="scriptLabel">
+            <label><input type="radio" name="script" value="latin" data-bind="script" /><span>English letters</span></label>
+            <label><input type="radio" name="script" value="native" data-bind="script" /><span>Native script</span></label>
+          </span></div>
+        <label class="row"><span class="row-text"><span class="row-title">Type in English whatever language I speak</span><span class="row-desc">Speak Hindi, Hinglish or any language and get English. Your cleanup model (Echotype Writer, with the Echotype model) translates each dictation after cleanup, so text takes a moment longer.</span><span class="row-desc warn" id="translateNote" hidden>Needs Echotype Writer: download it on the Models page, or pick Ollama, LM Studio or an API key under Cleanup.</span></span>
+          <input type="checkbox" class="switch" id="langEnglish" /></label>
       </div>
-      <p class="note" id="translateNote" hidden></p>
     </section>
 
     <!-- Dictionary -->
@@ -194,18 +214,42 @@
           <button class="btn" type="submit">Add</button>
         </form>
       </div>
+      <div class="group" id="learnWords">
+        <label class="row"><span class="row-text"><span class="row-title">Learn words from my corrections</span><span class="row-desc">When you fix a name Echotype got wrong just after it pastes, it offers to add your spelling here. It reads back only the box it pasted into, never a password field, and adds nothing until you keep it.</span></span>
+          <input type="checkbox" class="switch" data-bind="learn_words" /></label>
+      </div>
+
+      <h2 class="group-title">Text on screen</h2>
+      <div class="group">
+        <label class="row"><span class="row-text"><span class="row-title">Use text on screen to spell names</span><span class="row-desc">As you start dictating, Echotype reads the words around your cursor, so names, files and code come out spelled the way they are there. In Command Mode it also reads the text around your selection, so “reply to this” knows what you are replying to. Never a password field, nothing is saved, and it stays on this Mac unless you allow it below.</span></span>
+          <input type="checkbox" class="switch" data-bind="screen_context" /></label>
+        <label class="row" id="screenSend" hidden><span class="row-text"><span class="row-title">Send text on screen to <span id="screenSendName">your cleanup provider</span></span><span class="row-desc">Your cleanup provider runs online. Turn this on to send it the names near your cursor as spelling hints and, in Command Mode, up to 600 characters around your selection with your request. Off, that text never leaves this Mac.</span></span>
+          <input type="checkbox" class="switch" data-bind="screen_context_cloud" /></label>
+      </div>
 
       <h2 class="group-title">Snippets</h2>
-      <p class="lede small">Your own shortcuts: say the phrase on the left and Echotype types the text on the right. Your email, phone number, address, a sign-off, anything. Matches whole words in any case.</p>
+      <p class="lede small">Say the phrase on the left and Echotype types the text on the right, exactly as you wrote it. Your email, a sign-off, or a word it keeps mishearing (“our nav” → “Arnav”). Matches whole words in any case; the longest phrase wins.</p>
       <div class="group">
         <div class="rep-head" aria-hidden="true"><span>When you say</span><span>Type</span><span></span></div>
         <div id="reps"></div>
         <div class="row"><button class="btn" id="addRep" type="button">Add snippet</button></div>
       </div>
+
+      <h2 class="group-title">Import and export</h2>
+      <div class="group">
+        <div class="row"><span class="row-text"><span class="row-title">Import</span><span class="row-desc" id="dictImportDesc">A .txt file with a word on each line, or a .csv with a word a row or “phrase, text” for a snippet. Up to 1,000 at a time; ones already here are skipped.</span></span>
+          <span class="actions"><button class="btn quiet" id="dictImportCancel" type="button" hidden>Cancel</button><button class="btn" id="dictImportAdd" type="button" hidden>Add</button><button class="btn" id="dictImport" type="button">Choose file…</button></span>
+          <input type="file" id="dictFile" accept=".txt,.csv,text/plain,text/csv" hidden /></div>
+        <div class="row"><span class="row-text"><span class="row-title">Export</span><span class="row-desc" id="dictExportDesc">Your words and snippets as a CSV file in Downloads, to keep or import elsewhere.</span></span>
+          <button class="btn" id="dictExport" type="button">Export</button></div>
+      </div>
     </section>
 
     <!-- Meetings (meetings.js) -->
     <section data-page="meetings" id="meetings" hidden></section>
+
+    <!-- Notes (notes.js) -->
+    <section data-page="notes" id="notes" hidden></section>
 
     <!-- History -->
     <section data-page="history" hidden>
@@ -219,13 +263,18 @@
         </span>
       </div>
       <p class="lede">Everything you dictated, newest first. Expand an entry to see what the speech model heard.</p>
+      <div class="history-search" id="historySearchRow" hidden>
+        <input type="search" id="historySearch" placeholder="Search history" aria-label="Search history" aria-describedby="historyCount" spellcheck="false" autocomplete="off" />
+        <span class="hint" id="historyCount" aria-live="polite"></span>
+      </div>
       <div id="historyList" class="history"></div>
     </section>
 
     <!-- Stats (stats.js): counts kept on this computer, never text -->
     <section data-page="stats" hidden>
-      <h1 id="statsTitle" tabindex="-1">Your stats</h1>
-      <p class="lede">Counted on this Mac from what you dictate. Nothing is sent anywhere, and no text is kept here.</p>
+      <div class="page-head"><h1 id="statsTitle" tabindex="-1">Your stats</h1>
+        <span class="actions" id="statsShare" hidden><button class="btn" id="shareCopy" type="button">Copy image</button><button class="btn" id="shareSave" type="button">Save image</button></span></div>
+      <p class="lede">Counted on this Mac from what you dictate, and no text is kept here. Nothing is sent anywhere unless you turn on Share anonymous usage stats in Settings, which sends daily counts, never your words.</p>
       <div class="notice" id="statsOff" hidden>
         <span class="notice-text">Usage stats are off, so nothing new is counted. What was counted stays until you clear it.</span>
         <span class="actions"><button class="btn" id="statsOn" type="button">Turn on</button></span>
@@ -306,10 +355,24 @@
           <span class="actions"><button class="hotkey" data-shortcut="paste_last_hotkey" type="button" aria-labelledby="pasteLabel"></button><button class="icon-btn" data-clear="paste_last_hotkey" type="button" aria-label="Turn off the paste last shortcut"></button></span></div>
         <div class="row"><span class="row-text"><span class="row-title" id="copyLabel">Copy last</span><span class="row-desc">Puts your last dictation on the clipboard.</span><span class="row-desc error" id="copy_last_hotkeyError" role="alert" hidden></span></span>
           <span class="actions"><button class="hotkey" data-shortcut="copy_last_hotkey" type="button" aria-labelledby="copyLabel"></button><button class="icon-btn" data-clear="copy_last_hotkey" type="button" aria-label="Turn off the copy last shortcut"></button></span></div>
-        <div class="row"><span class="row-text"><span class="row-title" id="commandLabel">Command Mode</span><span class="row-desc">Select text and say what to change: “more formal”, “shorter”, “translate to Spanish”. With nothing selected, say what to write.</span><span class="row-desc warn" id="commandNote" hidden>Needs a general model. The Echotype model only cleans up dictation: pick Ollama, LM Studio or an API key under Cleanup.</span><span class="row-desc error" id="command_hotkeyError" role="alert" hidden></span></span>
+        <div class="row"><span class="row-text"><span class="row-title" id="commandLabel">Command Mode</span><span class="row-desc">Select text and say what to change: “more formal”, “shorter”, “translate to Spanish”. With nothing selected, say what to write.</span><span class="row-desc warn" id="commandNote" hidden>Needs Echotype Writer: download it on the Models page, or pick Ollama, LM Studio or an API key under Cleanup.</span><span class="row-desc error" id="command_hotkeyError" role="alert" hidden></span></span>
           <span class="actions"><button class="hotkey" data-shortcut="command_hotkey" type="button" aria-labelledby="commandLabel"></button><button class="icon-btn" data-clear="command_hotkey" type="button" aria-label="Turn off the Command Mode shortcut"></button></span></div>
-        <label class="row"><span class="row-text"><span class="row-title">Voice commands</span><span class="row-desc">Say “new line”, “new paragraph”, “bullet point” or “next bullet”, and “scratch that” to drop the sentence before it. Said as a phrase of its own, so a sentence that only contains the words is typed as you said it.</span></span>
+        <div class="row"><span class="row-text"><span class="row-title" id="undoLabel">Undo cleanup</span><span class="row-desc">Copies your last dictation as you said it, before cleanup changed it; after Command Mode or a transform, the text before the edit. Undo in the app, then paste.</span><span class="row-desc error" id="undo_edit_hotkeyError" role="alert" hidden></span></span>
+          <span class="actions"><button class="hotkey" data-shortcut="undo_edit_hotkey" type="button" aria-labelledby="undoLabel"></button><button class="icon-btn" data-clear="undo_edit_hotkey" type="button" aria-label="Turn off the undo cleanup shortcut"></button></span></div>
+        <label class="row"><span class="row-text"><span class="row-title">Voice commands</span><span class="row-desc">Say “new line”, “new paragraph”, “bullet point” or “next bullet”, and “scratch that” to drop the sentence before it. Punctuation too: “comma”, “question mark”, “open quote”, and emoji: “thumbs up emoji”. Said as a phrase of its own, so a sentence that only contains the words is typed as you said it.</span></span>
           <input type="checkbox" class="switch" data-bind="voice_commands" /></label>
+        <label class="row"><span class="row-text"><span class="row-title">“Send it”</span><span class="row-desc">End a dictation with “send it” to paste it and press Return, as in a chat. Only as the last words, said on their own.</span></span>
+          <input type="checkbox" class="switch" data-bind="send_it" /></label>
+      </div>
+
+      <h2 class="group-title">Transforms</h2>
+      <p class="lede small">Saved rewrites. Select text in any app and press a transform’s shortcut: your cleanup model (Echotype Writer, with the Echotype model) rewrites it in place, as Command Mode would. On text you can’t edit, the result shows on the pill.</p>
+      <p class="note warn" id="transformsNote" hidden>Needs Echotype Writer: download it on the Models page, or pick Ollama, LM Studio or an API key under Cleanup.</p>
+      <div class="group">
+        <div id="transforms"></div>
+        <div class="row"><span class="row-text"><span class="row-title" id="autoTransformLabel">Apply to every dictation</span><span class="row-desc" id="autoTransformDesc">Runs after cleanup on everything you dictate.</span></span>
+          <select id="autoTransform" aria-labelledby="autoTransformLabel"></select></div>
+        <div class="row"><button class="btn" id="addTransform" type="button">Add transform</button></div>
       </div>
 
       <h2 class="group-title" id="pillTitle">Pill</h2>
@@ -395,6 +458,16 @@
           <select data-bind="call_start.other"><option value="ask">Ask</option><option value="start">Always start</option><option value="never">Never</option></select></label>
       </div>
 
+      <h2 class="group-title">Files</h2>
+      <div class="group">
+        <div class="row"><span class="row-text"><span class="row-title">Watched folder</span><span class="row-desc" id="watchDesc"></span><span class="row-desc error" id="watchError" role="alert" hidden></span></span>
+          <span class="actions"><button class="btn" id="watchPick" type="button">Choose…</button><button class="btn quiet" id="watchOff" type="button">Stop watching</button></span></div>
+        <label class="row" id="watchFormatRow"><span class="row-text"><span class="row-title">Transcript format</span></span>
+          <select data-bind="watch_format"><option value="txt">Text (.txt)</option><option value="md">Markdown (.md)</option><option value="docx">Word (.docx)</option><option value="html">Web page (.html)</option><option value="srt">Subtitles (.srt)</option><option value="vtt">WebVTT (.vtt)</option></select></label>
+        <label class="row" id="watchSubRow"><span class="row-text"><span class="row-title">Save in a Transcripts folder</span><span class="row-desc">Inside the watched folder. Off, each transcript goes next to its recording.</span></span>
+          <input type="checkbox" class="switch" data-bind="watch_subfolder" /></label>
+      </div>
+
       <h2 class="group-title">Appearance</h2>
       <div class="group">
         <div class="row"><span class="row-text"><span class="row-title" id="lookLabel">Theme</span><span class="row-desc">System follows your Mac's light or dark setting.</span></span>
@@ -417,8 +490,10 @@
 
       <h2 class="group-title">Privacy</h2>
       <div class="group">
-        <label class="row"><span class="row-text"><span class="row-title">Keep history</span><span class="row-desc">Stored on this Mac only.</span></span>
-          <input type="checkbox" class="switch" data-bind="history_enabled" /></label>
+        <label class="row"><span class="row-text"><span class="row-title">Keep history</span><span class="row-desc">Stored on this Mac only. Stats count your words either way.</span></span>
+          <select id="historyKeep"><option value="keep">Keep</option><option value="day">Delete after 24 hours</option><option value="off">Don't keep</option></select></label>
+        <label class="row" id="clipDaysRow"><span class="row-text"><span class="row-title">Keep dictation audio</span><span class="row-desc">To play a dictation back or re-run it from History. Older recordings are deleted; the text stays.</span></span>
+          <select data-bind="clip_days" data-num><option value="7">7 days</option><option value="14">14 days</option><option value="30">30 days</option><option value="0">Don't keep</option></select></label>
         <label class="row"><span class="row-text"><span class="row-title">Restore clipboard</span><span class="row-desc">Put back what you had copied after Echotype pastes.</span></span>
           <input type="checkbox" class="switch" data-bind="restore_clipboard" /></label>
         <label class="row"><span class="row-text"><span class="row-title">Share anonymous usage stats and crash reports</span><span class="row-desc">Off unless you turn it on. Once a day Echotype sends a random install ID that is not linked to you or your account, the app version, the system and chip type, and that day's counts: dictations, words, failures by kind, median speech and cleanup times, which speech and cleanup models are in use, and meetings started and finished. A crash adds the fixed wording of the error and where in Echotype's code it happened. Never audio, text, your dictionary, app names, file paths, names or emails.</span></span>
@@ -433,6 +508,13 @@
           <div class="row col"><div class="code-head"><span class="row-title">Try it</span><button class="btn" id="copyCurl" type="button">Copy</button></div>
             <pre class="code" id="curl"></pre></div>
         </div>
+      </div>
+
+      <h2 class="group-title" id="mcpTitle">Use with AI apps</h2>
+      <div class="group">
+        <div class="row col"><span class="row-text"><span class="row-title">Claude, Cursor and other MCP apps</span><span class="row-desc">Let an AI app search your dictation history and meeting notes, and read your Dictionary and stats. Read-only, and it works with Echotype closed. Paste this into the app's MCP settings (in Claude Desktop: Settings → Developer → Edit Config), then restart the app.</span></span>
+          <div class="code-head"><span class="row-title">Config</span><button class="btn" id="copyMcp" type="button">Copy</button></div>
+          <pre class="code" id="mcpConfig"></pre></div>
       </div>
 
       <h2 class="group-title">Advanced</h2>
@@ -459,12 +541,12 @@
     </section>
   </main>
 
-  <!-- First run: five steps in one card, with the orb (orb.js) moving between their .ob-orb slots. -->
+  <!-- First run: six steps in one card, with the orb (orb.js) moving between their .ob-orb slots. -->
   <div class="onboard" id="onboard" data-tauri-drag-region role="dialog" aria-modal="true" aria-labelledby="obT1" hidden>
     <div class="film-shell" id="filmShell" aria-hidden="true"><p class="film-welcome" id="filmWelcome">Welcome to Echotype</p></div>
     <div class="ob-card" data-tauri-drag-region>
       <div class="ob-top" data-tauri-drag-region>
-        <ol class="ob-dots" id="obDots" aria-label="Setup, step 1 of 5"><li></li><li></li><li></li><li></li><li></li></ol>
+        <ol class="ob-dots" id="obDots" aria-label="Setup, step 1 of 6"><li></li><li></li><li></li><li></li><li></li><li></li></ol>
         <button class="btn quiet" id="obSkip" type="button">Skip setup</button>
       </div>
 
@@ -479,7 +561,28 @@
           </div>
         </section>
 
-        <section class="ob-step split" data-step="2" aria-labelledby="obT2" hidden>
+        <!-- Before the try, so the first dictation already uses these languages. -->
+        <section class="ob-step split" data-step="2" aria-labelledby="obTLang" hidden>
+          <div class="ob-orb" aria-hidden="true"></div>
+          <div class="ob-body">
+            <h2 id="obTLang" tabindex="-1">Your languages. Your&nbsp;voice.</h2>
+            <p class="lede">Speak naturally, in one language or a mix of them, and Echotype writes it down. Tell it the languages you use most.</p>
+            <div class="ob-langs">
+              <label class="ob-field"><span>Primary language</span><select id="obLang1"></select></label>
+              <label class="ob-field"><span>Second language</span><select id="obLang2"></select></label>
+            </div>
+            <div class="ob-script" id="obScriptRow" hidden>
+              <p class="ob-field" id="obScriptLabel">How should your words look?</p>
+              <span class="seg" role="radiogroup" aria-labelledby="obScriptLabel">
+                <label><input type="radio" name="obScript" value="latin" data-bind="script" /><span>English letters</span></label>
+                <label><input type="radio" name="obScript" value="native" data-bind="script" /><span>Native script</span></label>
+              </span>
+              <p class="ob-result" id="obScriptSample" dir="auto"></p>
+            </div>
+          </div>
+        </section>
+
+        <section class="ob-step split" data-step="3" aria-labelledby="obT2" hidden>
           <div class="ob-orb" aria-hidden="true"></div>
           <div class="ob-body">
             <h2 id="obT2" tabindex="-1">Try it</h2>
@@ -492,7 +595,7 @@
           </div>
         </section>
 
-        <section class="ob-step split" data-step="3" aria-labelledby="obT3" hidden>
+        <section class="ob-step split" data-step="4" aria-labelledby="obT3" hidden>
           <div class="ob-orb" aria-hidden="true"></div>
           <div class="ob-body">
             <h2 id="obT3" tabindex="-1">Let Echotype type for&nbsp;you</h2>
@@ -514,9 +617,9 @@
           </div>
         </section>
 
-        <!-- Step 4 is a run of single questions (.ob-q), one at a time. A tile saves when picked and
+        <!-- Step 5 is a run of single questions (.ob-q), one at a time. A tile saves when picked and
              stays; Continue and Back walk the questions. -->
-        <section class="ob-step split" data-step="4" aria-labelledby="obT4" hidden>
+        <section class="ob-step split" data-step="5" aria-labelledby="obT4" hidden>
           <div class="ob-orb" aria-hidden="true"></div>
           <div class="ob-body">
             <p class="ob-count" id="obCount"></p>
@@ -535,17 +638,6 @@
               <h2 id="obT4" tabindex="-1">What should I call you?</h2>
               <input type="text" class="ob-name" id="obName" autocomplete="given-name" spellcheck="false" placeholder="Your first name" maxlength="40" aria-labelledby="obT4" aria-describedby="obHello" />
               <p class="ob-hello" id="obHello"></p>
-            </div>
-
-            <div class="ob-q" data-q="lang" hidden>
-              <h2 id="obQLang" tabindex="-1">What do you speak?</h2>
-              <div class="ob-tiles" role="radiogroup" aria-labelledby="obQLang">
-                <button type="button" class="ob-tile" role="radio" data-v="auto"><b>Any language</b><span>Detected each time you talk</span></button>
-                <button type="button" class="ob-tile" role="radio" data-v="mine"><b>My languages</b><span>Up to 3, fewer mix-ups</span></button>
-              </div>
-              <div class="lang-chips" id="obLangChips" role="group" aria-label="Languages you speak" hidden></div>
-              <label class="ob-pick" id="obHinglishRow" hidden><span>Type my Hindi in English letters</span><input type="checkbox" class="switch" id="obHinglish" /></label>
-              <p class="lede" id="obLangDesc"></p>
             </div>
 
             <div class="ob-q" data-q="speed" hidden>
@@ -667,7 +759,7 @@
           </div>
         </section>
 
-        <section class="ob-step center" data-step="5" aria-labelledby="obT5" hidden>
+        <section class="ob-step center" data-step="6" aria-labelledby="obT5" hidden>
           <div class="ob-orb" aria-hidden="true"></div>
           <h2 id="obT5" tabindex="-1">You're set</h2>
           <ul class="ob-recap" id="obRecap"></ul>

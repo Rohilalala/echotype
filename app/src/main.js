@@ -2,6 +2,7 @@
 const preview = !window.__TAURI__;
 if (preview) await import('./mock.js'); // browser preview for design QA
 const meetingsPage = await import('./meetings.js');
+const notesPage = await import('./notes.js');
 const { h, copyText } = await import('./dom.js');
 const { createOrb } = await import('./orb.js'); // onboarding's orb
 
@@ -113,18 +114,22 @@ function syncBound() {
     else if (el.type === 'radio') el.checked = el.value === v;
     else el.value = v ?? '';
   }
+  $('#historyKeep').value = !S.history_enabled ? 'off' : S.history_24h ? 'day' : 'keep';
 }
 function changed(p) {
   if (p === 'mode' || p === 'hotkey') renderHotkey();
   if (p === 'talk_key') saving.then(refreshStatus); // after the save, or the check re-applies the old key
   if (p === 'input_device' || p === 'prefer_builtin_mic') renderMicNote();
   if (p === 'cleanup.enabled') renderRaw();
-  if (p === 'translate_to_english') renderLangNote();
-  if (p === 'languages') { renderLanguages(); if (obStep === 4 && !$('#onboard').hidden) obLangRender(); }
+  if (p === 'screen_context') renderScreenSend();
+  if (p === 'languages' || p === 'script') { renderLanguages(); if (obStep === 2 && !$('#onboard').hidden) obLangsRender(); }
   if (p === 'cleanup.enabled') { setCleanupInert(); renderCloud(); refreshCloud(); }
   if (p === 'cleanup.match_app') refreshLastApp();
+  if (p === 'cleanup.level') renderLevel();
+  if (p === 'cleanup.enabled' || p === 'cleanup.level' || p === 'cleanup.style') renderAutoTransform();
   if (p.startsWith('local_api')) refreshApi();
-  if (p === 'history_enabled') renderHistory();
+  if (p === 'history_enabled') { renderHistory(); $('#clipDaysRow').hidden = !S.history_enabled; }
+  if (p === 'clip_days') renderHistory();
   if (p === 'pill_idle' || p === 'show_in') renderPill();
   if (p === 'pill_size' || p === 'ball_size') sizePreview();
   if (p === 'sounds') $('#soundPackRow').hidden = !S.sounds;
@@ -144,6 +149,7 @@ function go(page) {
   if (page === 'home') renderGreeting();
   if (page === 'history') renderHistory();
   if (page === 'meetings') meetingsPage.show();
+  if (page === 'notes') notesPage.show();
   if (page === 'settings') { refreshPerms(); refreshApi(); refreshStatus(); }
   if (page === 'account' || page === 'cleanup') refreshCloud(); // the account box moved to Account
   if (page === 'cleanup') { refreshLastApp(); refreshInstalled(); }
@@ -191,11 +197,12 @@ const DEFAULT_LAST = () => isMac ? ['CommandOrControl+Control+V', 'CommandOrCont
 function renderHotkey() {
   for (const btn of $$('[data-shortcut]')) {
     if (btn.classList.contains('listening')) continue;
-    const v = S[btn.dataset.shortcut];
+    const v = get(btn.dataset.shortcut); // a field, or a transform's "transforms.2.shortcut"
     btn.replaceChildren(...(v ? keycaps(v) : [h('span', { className: 'none' }, 'None')]));
   }
-  for (const b of $$('[data-clear]')) { b.hidden = !S[b.dataset.clear]; b.replaceChildren(svg(CROSS)); }
-  $('#commandNote').hidden = !S.command_hotkey || S.cleanup.provider !== 'echotype'; // cleanup.rs command_blocked
+  for (const b of $$('[data-clear]')) { b.hidden = !get(b.dataset.clear); b.replaceChildren(svg(CROSS)); }
+  $('#commandNote').hidden = !S.command_hotkey || !needsGeneral();
+  $('#transformsNote').hidden = !needsGeneral();
   $('#modeDesc').textContent = S.mode === 'toggle'
     ? 'Press once to start, again to stop. Esc cancels.'
     : 'Hold while you speak, let go to paste. Tap twice to go hands-free.';
@@ -213,11 +220,13 @@ function stopRecording() {
   renderHotkey();
 }
 const errEl = field => $(`#${field}Error`);
-for (const btn of $$('[data-shortcut]')) {
-  const field = btn.dataset.shortcut;
+// The built-in model can't follow an instruction (cleanup.rs command_blocked): Command Mode and transforms need another.
+// The Echotype model edits with Echotype Writer (Models page); until it is downloaded, edits can't run.
+const needsGeneral = () => S.cleanup.provider === 'echotype' && !sys?.writer?.installed;
+// Click `btn`, press a shortcut: it goes to setting `path` (see renderHotkey), errors to `err`.
+function listenShortcut(btn, path, err) {
   btn.addEventListener('click', () => {
     if (recording) { const same = recording.btn === btn; stopRecording(); if (same) return; }
-    const err = errEl(field);
     err.hidden = true;
     btn.classList.add('listening');
     btn.textContent = 'Press a shortcut…';
@@ -231,7 +240,7 @@ for (const btn of $$('[data-shortcut]')) {
         btn.textContent = r.mods.length ? r.mods.map(keyName).join(isMac ? ' ' : '+') + ' …' : 'Press a shortcut…';
         return;
       }
-      setShortcut(field, r.accel);
+      setShortcut(path, r.accel, err);
     };
     recording = { btn, fn };
     window.addEventListener('keydown', fn, true);
@@ -239,20 +248,83 @@ for (const btn of $$('[data-shortcut]')) {
   });
   btn.addEventListener('blur', stopRecording);
 }
+for (const btn of $$('[data-shortcut]')) listenShortcut(btn, btn.dataset.shortcut, errEl(btn.dataset.shortcut));
 for (const b of $$('[data-clear]')) b.addEventListener('click', () => setShortcut(b.dataset.clear, ''));
 
-async function setShortcut(field, accel) {
-  const prev = S[field], err = errEl(field);
-  S[field] = accel;
+async function setShortcut(field, accel, err = errEl(field)) {
+  const prev = get(field);
+  set(field, accel);
   stopRecording();
   const fail = await save(true);
   if (fail) {
-    S[field] = prev;
+    set(field, prev);
     err.textContent = accel ? `${hotkeyText(accel)} didn't work: ${fail}` : fail;
     err.hidden = false;
   }
   renderHotkey();
 }
+
+// ---------- transforms ----------
+const TRANSLATE = 'Translate to English'; // settings.rs TRANSLATE
+const MAX_TRANSFORMS = 12; // settings.rs MAX_TRANSFORMS
+// Each: its name, its instruction, its shortcut. Names are unique (settings.rs migrate drops a
+// repeated one), so a name another transform has is not saved until it is changed.
+function renderTransforms() {
+  const list = () => S.transforms; // S is replaced when a save comes back
+  fill($('#transforms'), list().map((t, i) => {
+    const path = `transforms.${i}.shortcut`, taken = status.unregistered_shortcuts?.includes(`transform:${t.name}`);
+    const err = h('span', { className: 'row-desc error', role: 'alert', hidden: !taken }, taken ? `${hotkeyText(t.shortcut)} isn't working: another app may be using it. Pick another.` : '');
+    const name = h('input', { type: 'text', value: t.name, maxLength: 40, spellcheck: false, 'aria-label': 'Transform name', oninput: e => {
+      const v = e.target.value.trim(), clash = list().some((o, j) => j !== i && o.name.toLowerCase() === v.toLowerCase());
+      err.textContent = !v ? 'Give it a name.' : clash ? 'Another transform has this name.' : '';
+      err.hidden = !err.textContent;
+      if (err.textContent) return;
+      if (S.auto_transform === list()[i].name) S.auto_transform = v;
+      list()[i].name = v;
+      saveSoon();
+      renderAutoTransform();
+    } });
+    const instruction = h('textarea', { rows: 3, value: t.instruction, 'aria-label': `What ${t.name} does`, placeholder: 'What to do with the selected text, for example: turn this into bullet points.',
+      oninput: e => { list()[i].instruction = e.target.value; saveSoon(); } });
+    const key = h('button', { className: 'hotkey', type: 'button', 'data-shortcut': path, 'aria-label': `${t.name} shortcut` });
+    listenShortcut(key, path, err);
+    return h('div', { className: 'row transform' }, h('span', { className: 'row-text' }, name, instruction, err),
+      h('span', { className: 'actions' }, key,
+        h('button', { className: 'icon-btn', type: 'button', 'data-clear': path, 'aria-label': `Turn off the ${t.name} shortcut`, onclick: () => setShortcut(path, '', err) }),
+        h('button', { className: 'btn quiet danger', type: 'button', 'aria-label': `Remove ${t.name}`, onclick: () => {
+          if (S.auto_transform === t.name && t.name !== TRANSLATE) S.auto_transform = ''; // Translate to English stays built in
+          list().splice(i, 1);
+          save();
+          renderTransforms();
+          renderLangNote();
+          renderChips();
+        } }, 'Remove')));
+  }));
+  $('#addTransform').disabled = list().length >= MAX_TRANSFORMS;
+  renderAutoTransform();
+  renderHotkey();
+}
+// "Apply to every dictation": none, or one transform (TRANSLATE stays offered once its row is gone).
+function renderAutoTransform() {
+  const names = S.transforms.map(t => t.name);
+  if (S.auto_transform === TRANSLATE && !names.includes(TRANSLATE)) names.push(TRANSLATE);
+  $('#autoTransform').replaceChildren(h('option', { value: '' }, 'None'), ...names.map(n => h('option', { value: n, selected: n === S.auto_transform }, n)));
+  // cleanup.rs run: it only runs with cleanup on, the user's choice to send text to that provider.
+  // cleanup.rs auto_transform_on: Level None and the Verbatim style skip the model, and so the transform.
+  const skip = S.cleanup.level === 'none' || S.cleanup.style === 'verbatim';
+  $('#autoTransformDesc').textContent = !S.cleanup.enabled ? 'Runs after cleanup, so turn Cleanup on to use it.'
+    : skip ? 'Runs after cleanup, so not at Level None or with the Verbatim style.' : 'Runs after cleanup on everything you dictate.';
+  $('#autoTransformDesc').classList.toggle('warn', (!S.cleanup.enabled || skip) && !!S.auto_transform);
+}
+$('#autoTransform').addEventListener('change', e => { S.auto_transform = e.target.value; save(); renderLangNote(); renderChips(); });
+$('#addTransform').addEventListener('click', () => {
+  let name = 'New transform';
+  for (let n = 2; S.transforms.some(t => t.name.toLowerCase() === name.toLowerCase()); n++) name = `New transform ${n}`;
+  S.transforms.push({ name, instruction: '', shortcut: '' });
+  save();
+  renderTransforms();
+  $$('#transforms textarea').at(-1).focus();
+});
 
 // ---------- talk key, Input Monitoring, Globe key ----------
 async function refreshStatus() {
@@ -284,7 +356,8 @@ function renderTalk() {
   }
   $('#obTalk').value = S.talk_key;
   if (!$('#onboard').hidden) obFoot(); // "Finish and relaunch" once the talk key needs it
-  for (const field of status.unregistered_shortcuts || []) {
+  renderTransforms(); // a transform's shortcut another app holds
+  for (const field of (status.unregistered_shortcuts || []).filter(f => !f.startsWith('transform:'))) {
     const err = errEl(field);
     if (err.hidden) { err.textContent = `${hotkeyText(S[field])} isn't working: another app may be using it. Pick another.`; err.hidden = false; }
   }
@@ -301,9 +374,11 @@ const ACTIONS = {
   accessibility: ['Allow pasting', () => invoke('open_permission_settings', { kind: 'accessibility' })],
   model: ['Choose a model', () => go('speech')],
   cleanup: ['Open Cleanup', () => go('cleanup')],
+  writer: ['Get Echotype Writer', () => go('speech')],
   automatic: ['Switch to automatic', () => { S.advanced = false; syncBound(); save(); changed('advanced'); }],
   settings: ['Open Settings', () => go('settings')],
   update: ['Update', () => { go('account'); checkUpdate(); }],
+  dictionary: ['Review', () => go('dictionary')],
 };
 const actionBtn = kind => ACTIONS[kind] && h('button', { className: 'btn', type: 'button', onclick: ACTIONS[kind][1] }, ACTIONS[kind][0]);
 let muted = false;
@@ -341,8 +416,8 @@ function renderHero() {
   mic.ariaDisabled = st === 'transcribing' || st === 'cleaning'; // not `disabled`: focus stays on it
   renderChips();
   if (st === 'recording') {
-    line.replaceChildren(muted ? 'Is your mic muted?' : 'Listening');
-    fill(sub, muted ? 'Echotype hears nothing from the microphone. It keeps recording.'
+    line.replaceChildren(muted ? 'No sound from your microphone' : 'Listening');
+    fill(sub, muted ? [h('span', {}, 'Echotype hears nothing from it. It keeps recording.'), h('button', { className: 'btn', type: 'button', onclick: () => { go('settings'); $('#mic').focus(); } }, 'Choose microphone')]
       : dictation.locked || S.mode === 'toggle' ? 'Press the key again to finish. Esc cancels.' : 'Let go to paste. Esc cancels.');
   } else if (st === 'transcribing' || st === 'cleaning') {
     line.replaceChildren(st === 'cleaning' ? 'Cleaning up…' : 'Transcribing…');
@@ -365,7 +440,7 @@ function renderChips() {
   const local = S.stt.provider === 'local';
   $('#chipModel').textContent = local ? sttModel()?.label ?? 'No model' : preset(S.stt.provider)?.label ?? S.stt.provider;
   const lang = S.languages.length ? S.languages.map(langName).join(', ') : 'Auto-detect';
-  $('#chipLang').textContent = S.translate_to_english ? `${lang} to English` : lang;
+  $('#chipLang').textContent = S.auto_transform === TRANSLATE ? `${lang} to English` : lang;
   $('#chipStyle').textContent = noCleanup() ? 'No cleanup' : STYLE_LABEL[S.cleanup.style] ?? S.cleanup.style;
   for (const b of $$('[data-go]')) b.ariaLabel = `${b.title}: ${b.textContent}`; // the chip opens that page
 }
@@ -429,44 +504,79 @@ function renderRecent() {
   const box = $('#recent');
   if (!recent.length) return box.replaceChildren(h('p', { className: 'empty' }, 'Your dictations show up here.'));
   box.replaceChildren(...recent.slice(0, 3).map(r => {
+    // A recovered dictation has no text yet: History transcribes it.
+    if (r.recovered) return h('div', { className: 'row entry' }, h('span', { className: 'text' }, 'Recovered dictation'), h('button', { className: 'btn quiet', type: 'button', onclick: () => go('history') }, 'Open History'));
     const copy = h('button', { className: 'btn quiet', type: 'button' }, 'Copy');
     copy.onclick = () => copyText(r.text, copy);
     return h('div', { className: 'row entry' }, h('span', { className: 'text' }, r.text.replace(/\s*\n\s*[-*•]?\s*/g, ' · ')), h('time', { className: 'when', title: fmtTime(r.ts).replace('\n', ' ') }, fmtAgo(r.ts)), copy);
   }));
 }
 
+// Transcribed files: the queue in files.rs reports each on "file-job" (queued, working, done,
+// error) and runs them one at a time; Save as writes any export format to Downloads.
+const FILE_FORMATS = [['txt', 'Text (.txt)'], ['md', 'Markdown (.md)'], ['docx', 'Word (.docx)'], ['html', 'Web page (.html)'], ['srt', 'Subtitles (.srt)'], ['vtt', 'WebVTT (.vtt)'], ['json', 'JSON (.json)']];
+const fileName = path => path.split(/[\\/]/).pop();
 function renderDrops() {
   const dismiss = r => h('button', { className: 'icon-btn', type: 'button', 'aria-label': `Dismiss ${r.name}`, onclick: () => { dropResults = dropResults.filter(x => x !== r); renderDrops(); } }, svg(CROSS));
-  $('#dropResults').replaceChildren(...dropResults.map((r, i) => {
-    if (r.pending) return h('div', { className: 'result' }, h('div', { className: 'result-head' }, h('span', { className: 'result-name working' }, `Transcribing ${r.name}`)));
+  const waiting = dropResults.filter(r => r.state === 'queued' && !r.watched).length;
+  const left = dropResults.filter(r => r.state === 'queued' || r.state === 'working').length;
+  const head = left > 1 && h('div', { className: 'result-head batch-head' },
+    h('span', { className: 'result-name working' }, `Transcribing ${left} files, one at a time`),
+    waiting > 0 && h('button', { className: 'btn quiet', type: 'button', onclick: cancelFiles }, waiting === 1 ? 'Cancel the next file' : `Cancel the next ${waiting}`));
+  $('#dropResults').replaceChildren(head || '', ...dropResults.map((r, i) => {
+    if (r.state === 'queued') return h('div', { className: 'result' }, h('div', { className: 'result-head' }, h('span', { className: 'result-name', title: r.path }, r.name), h('span', { className: 'result-meta' }, 'Waiting')));
+    if (r.state === 'working') return h('div', { className: 'result' }, h('div', { className: 'result-head' }, h('span', { className: 'result-name working', title: r.path }, `Transcribing ${r.name}`)));
+    if (r.state === 'cancelled') return h('div', { className: 'result' }, h('div', { className: 'result-head' }, h('span', { className: 'result-name', title: r.path }, r.name), h('span', { className: 'result-meta' }, 'Cancelled'), dismiss(r)));
     if (r.error) return h('div', { className: 'result err', role: 'alert' },
       h('div', { className: 'result-head' }, h('span', { className: 'result-name' }, `Couldn't transcribe ${r.name}`), dismiss(r)),
       h('p', {}, r.error),
-      h('p', { className: 'hint' }, 'Echotype reads .opus, .ogg, .m4a, .mp3, .wav and .flac files.'));
+      h('p', { className: 'hint' }, 'Echotype reads .opus, .ogg, .m4a, .mp3, .wav and .flac files, and the sound of .mp4 and .mov videos.'));
     const copy = h('button', { className: 'btn', type: 'button' }, 'Copy');
     copy.onclick = () => copyText(r.showRaw ? r.raw : r.text, copy);
+    const saveAs = h('select', { 'aria-label': `Save ${r.name} as`, onchange: e => {
+      const format = e.target.value;
+      e.target.value = '';
+      if (format) invoke('file_save', { path: r.path, text: r.showRaw ? r.raw : r.text, secs: r.secs || 0, format }).then(p => { r.savedTo = p; r.saveError = ''; renderDrops(); }, err => { r.saveError = String(err); renderDrops(); });
+    } }, h('option', { value: '' }, 'Save as…'), FILE_FORMATS.map(([v, l]) => h('option', { value: v }, l)));
     const differs = r.raw.trim() !== r.text.trim();
     const seg = differs && h('span', { className: 'seg', role: 'radiogroup', 'aria-label': 'Version' },
       ['Clean', 'Raw'].map(v => h('label', {}, h('input', { type: 'radio', name: 'v' + i, checked: (v === 'Raw') === !!r.showRaw, onchange: () => { r.showRaw = v === 'Raw'; renderDrops(); } }), h('span', {}, v))));
     const secs = ((r.stt_ms || 0) + (r.cleanup_ms || 0)) / 1000;
+    const saved = r.savedTo || r.saved;
     return h('div', { className: 'result' },
-      h('div', { className: 'result-head' }, h('span', { className: 'result-name', title: r.path }, r.name), h('span', { className: 'result-meta', title: timingTitle(r) }, `${secs.toFixed(1)} s`), seg, copy, dismiss(r)),
+      h('div', { className: 'result-head' }, h('span', { className: 'result-name', title: r.path }, r.name), h('span', { className: 'result-meta', title: timingTitle(r) }, `${secs.toFixed(1)} s`), seg, copy, saveAs, dismiss(r)),
       h('p', { className: 'text' }, r.showRaw ? r.raw : r.text),
-      r.warning && h('p', { className: 'hint' }, r.warning));
+      r.warning && h('p', { className: 'hint' }, r.warning),
+      saved && h('p', { className: 'hint' }, `${r.watched && !r.savedTo ? 'From the watched folder. Transcript saved' : 'Saved'} to ${saved}`),
+      r.saveError && h('p', { className: 'hint error', role: 'alert' }, r.saveError));
   }));
 }
 const timingTitle = r => `Speech ${r.stt_ms} ms` + (r.cleanup_ms ? `, cleanup ${r.cleanup_ms} ms` : '');
 
-async function transcribe(path) {
-  const r = { path, name: path.split(/[\\/]/).pop(), pending: true };
-  dropResults.unshift(r);
-  dropResults = dropResults.slice(0, 5);
-  renderDrops();
-  try { Object.assign(r, await invoke('transcribe_file', { path })); }
-  catch (e) { r.error = String(e); }
-  r.pending = false;
+// A file the queue reports on: new ones go on top; finished ones beyond the latest 20 drop off.
+function fileJob(job) {
+  let r = dropResults.find(x => x.id === job.id);
+  if (!r) dropResults.unshift(r = { name: fileName(job.path), state: 'queued' });
+  Object.assign(r, job);
+  const busy = x => x.state === 'queued' || x.state === 'working';
+  let kept = 0;
+  dropResults = dropResults.filter(x => busy(x) || kept++ < 20);
   renderDrops();
 }
+async function transcribe(paths) {
+  try { (await invoke('transcribe_files', { paths })).reverse().forEach(j => dropResults.some(x => x.id === j.id) || fileJob({ ...j, state: 'queued' })); }
+  catch (e) { fileJob({ id: `e${Date.now()}`, path: paths[0], state: 'error', error: String(e) }); }
+}
+async function cancelFiles() {
+  const ids = await invoke('cancel_files').catch(() => []);
+  for (const r of dropResults) if (ids.includes(r.id)) r.state = 'cancelled';
+  renderDrops();
+}
+listen('file-job', ({ payload }) => fileJob(payload));
+$('#pickFiles').onclick = async () => {
+  const paths = await invoke('pick_files', { folder: false }).catch(e => { fileJob({ id: `e${Date.now()}`, path: 'Files', state: 'error', error: String(e) }); return []; });
+  if (paths.length) transcribe(paths);
+};
 
 // ---------- providers & keys ----------
 const preset = id => presets.find(p => p.id === id);
@@ -484,6 +594,15 @@ function setProvider(kind, id) {
   refreshCloud();
 }
 
+// "Send text on screen to …" only for a cleanup provider off this Mac (cleanup.rs screen_ok).
+function renderScreenSend() {
+  const c = S.cleanup;
+  const local = ['echotype', 'ollama', 'lmstudio'].includes(c.provider)
+    || (c.provider === 'custom' && /^https?:\/\/(localhost|127\.[\d.]+|\[::1\])(:\d+)?(\/|$)/i.test((c.base_url || '').trim()));
+  $('#screenSend').hidden = local || !S.screen_context;
+  $('#screenSendName').textContent = preset(c.provider)?.label ?? c.provider;
+}
+
 function fillRemote(kind) {
   const cfg = S[kind], p = preset(cfg.provider), custom = cfg.provider === 'custom';
   const url = $(`#${kind}Url`);
@@ -494,7 +613,7 @@ function fillRemote(kind) {
   $(`#${kind}UrlDesc`).textContent = custom
     ? `Any OpenAI-compatible ${kind === 'stt' ? '/audio/transcriptions' : '/chat/completions'} endpoint.`
     : `Set by the ${p?.label ?? ''} preset.`;
-  if (kind === 'cleanup') renderCleaner();
+  if (kind === 'cleanup') { renderCleaner(); renderScreenSend(); }
   const model = $(`#${kind}Model`);
   model.value = cfg.model;
   const example = p?.[kind === 'stt' ? 'default_stt_model' : 'default_cleanup_model'];
@@ -502,7 +621,7 @@ function fillRemote(kind) {
   renderKey(kind);
 }
 for (const kind of ['stt', 'cleanup']) {
-  $(`#${kind}Url`).addEventListener('input', e => { if (S[kind].provider === 'custom') { S[kind].base_url = e.target.value.trim(); saveSoon(); } });
+  $(`#${kind}Url`).addEventListener('input', e => { if (S[kind].provider === 'custom') { S[kind].base_url = e.target.value.trim(); saveSoon(); if (kind === 'cleanup') renderScreenSend(); } });
 }
 
 async function renderKey(kind) {
@@ -599,8 +718,7 @@ function modelRow(m) {
     h('span', { className: 'row-text' },
       h('span', { className: 'model-name' }, m.label,
         m.recommended && h('span', { className: 'tag rec' }, 'Recommended'),
-        m.english_only && h('span', { className: 'tag' }, 'English only'),
-        m.translates && h('span', { className: 'tag' }, 'Translates')),
+        m.english_only && h('span', { className: 'tag' }, 'English only')),
       m.note && h('span', { className: 'row-desc' }, m.note),
       h('span', { className: 'model-meta' },
         h('span', {}, fmtMB(m.size_mb)),
@@ -662,8 +780,35 @@ function cleanerRow(c) {
     h('span', { className: 'actions' }, actions));
 }
 
+// Models → Writing model: Echotype Writer, which Command Mode and Transforms use with the
+// built-in provider. Nothing to pick: installed is ready.
+function writerRow(c) {
+  const p = progress[c.id], err = modelErr[c.id];
+  const del = h('button', { className: 'btn quiet danger', type: 'button' }, 'Delete');
+  del.onclick = async () => {
+    if (!del.dataset.armed) { del.dataset.armed = 1; del.textContent = 'Click again to delete'; return setTimeout(() => { del.textContent = 'Delete'; delete del.dataset.armed; }, 3000); }
+    try { await invoke('delete_model', { id: c.id }); } catch (e) { modelErr[c.id] = String(e); }
+    await refreshModels();
+  };
+  const actions = p != null ? [h('span', { className: 'pct', 'data-pct': c.id }, `${Math.round(p * 100)}%`),
+      h('span', { className: 'ring', role: 'progressbar', 'aria-label': `Downloading ${c.label}`, 'aria-valuenow': Math.round(p * 100), 'data-progress': c.id, style: `--p:${p}` })]
+    : !c.installed ? [c.downloadable ? h('button', { className: err ? 'btn' : 'round', type: 'button', title: 'Download', 'aria-label': `Download ${c.label}, ${fmtMB(c.size_mb)}`, onclick: () => download(c.id) }, err ? 'Retry' : svg(DOWN))
+      : h('span', { className: 'tag' }, 'Download coming soon')]
+    : [h('span', { className: 'in-use' }, svg(CHECK), 'Ready'), del];
+  return h('div', { className: 'row model' },
+    h('span', { className: 'tile', 'aria-hidden': 'true' }, svg(WAVE)),
+    h('span', { className: 'row-text' },
+      h('span', { className: 'model-name' }, c.label),
+      h('span', { className: 'row-desc' }, c.note),
+      h('span', { className: 'model-meta' }, h('span', {}, fmtMB(c.size_mb)), h('span', {}, `about ${fmtMB(c.ram_mb)} RAM, only while editing`)),
+      c.warning && h('span', { className: 'row-desc warn' }, c.warning),
+      err && h('span', { className: 'row-desc error', role: 'alert' }, err)),
+    h('span', { className: 'actions' }, actions));
+}
+
 function renderModels() {
   $('#cleanerList').replaceChildren(...(sys?.cleaners ?? []).map(cleanerRow));
+  $('#writerList').replaceChildren(...(sys?.writer ? [writerRow(sys.writer)] : []));
   renderAuto();
   $('#memline').hidden = $('#modelList').hidden = !S.advanced;
   $('#memline').replaceChildren('Free memory now ', h('b', {}, `${sys.available_ram_gb.toFixed(1)} GB`), ` of ${Math.round(sys.total_ram_gb)} GB. A model fits when it leaves 2 GB for everything else.`);
@@ -706,7 +851,11 @@ function renderCleanup() {
   setCleanupInert();
   fillRemote('cleanup');
   renderAppStyles();
+  renderLevel();
 }
+// cleanup.rs: None skips the model; Light keeps the model's text only when it barely changed the words.
+const LEVEL_DESC = { none: 'No model: your words as heard, with voice commands, snippets and capitals.', light: 'Removes fillers and repeats and fixes punctuation. Never rewords.', medium: 'Also applies “no wait” corrections, lists and grammar.' };
+const renderLevel = () => { $('#levelDesc').textContent = LEVEL_DESC[S.cleanup.level] ?? ''; };
 
 // "Match the app you're typing in": the user's style per app, and the app the last dictation went to.
 const APP_STYLE_OPTS = [['', 'Your style'], ['default', 'Default'], ['casual', 'Casual'], ['formal', 'Formal'], ['verbatim', 'Verbatim']];
@@ -716,10 +865,13 @@ function renderAppStyles() {
   box.hidden = !S.cleanup.match_app;
   const add = lastApp?.id && !list().some(a => a.id === lastApp.id) ? lastApp : null;
   const label = v => APP_STYLE_OPTS.find(o => o[0] === v)?.[1].toLowerCase() ?? v;
-  fill(box, list().map((a, i) => h('div', { className: 'row' },
-    h('span', { className: 'row-text' }, h('span', { className: 'row-title' }, a.name)),
+  fill(box, list().flatMap((a, i) => [h('div', { className: 'row' },
+    h('span', { className: 'row-text' }, h('span', { className: 'row-title' }, a.name), appExtras(a) && h('span', { className: 'row-desc' }, appExtras(a))),
     h('select', { 'aria-label': `Style in ${a.name}`, onchange: e => { list()[i].style = e.target.value; save(); } }, APP_STYLE_OPTS.map(([v, l]) => h('option', { value: v, selected: v === a.style }, l))),
-    h('button', { className: 'icon-btn', type: 'button', 'aria-label': `Remove ${a.name}`, onclick: () => { list().splice(i, 1); save(); renderAppStyles(); } }, svg(CROSS)))),
+    h('button', { className: 'btn quiet', type: 'button', 'aria-expanded': String(appMore.has(a.id)), onclick: () => { appMore.has(a.id) ? appMore.delete(a.id) : appMore.add(a.id); renderAppStyles(); } }, 'More'),
+    h('button', { className: 'icon-btn', type: 'button', 'aria-label': `Remove ${a.name}`, onclick: () => { list().splice(i, 1); save(); renderAppStyles(); } }, svg(CROSS))),
+    appMore.has(a.id) && appMoreRow(a, () => list()[i]),
+    appMore.has(a.id) && appInstructionsRow(a, () => list()[i])]).filter(Boolean),
   h('div', { className: 'row' },
     h('span', { className: 'row-text' }, h('span', { className: 'row-desc' }, add ? `Your last dictation went to ${add.name}, which uses ${label(add.style)}.` : 'Pick an app to set its style.')),
     add && h('button', { className: 'btn', type: 'button', onclick: () => { list().push({ id: add.id, name: add.name, style: add.style }); save(); renderAppStyles(); } }, `Add ${add.name}`),
@@ -728,6 +880,28 @@ function renderAppStyles() {
       if (a) { list().push({ id: a.id, name: a.name, style: a.style }); save(); }
       renderAppStyles();
     } }, h('option', { value: '' }, 'Add an app…'), installed.filter(a => !list().some(x => x.id === a.id)).map(a => h('option', { value: a.id }, a.name)))));
+}
+// "More" on an app's row: cleanup on or off and the languages spoken there, over the user's (settings::apply_app).
+const appMore = new Set();
+const appExtras = a => [a.cleanup === false && 'No cleanup', a.cleanup === true && 'Cleanup on', a.languages?.length && a.languages.map(c => c === 'auto' ? 'Any language' : langName(c)).join(', '), a.instructions?.trim() && 'Own instructions'].filter(Boolean).join(', ');
+// The app's own instructions, added to the cleanup and Command Mode prompts there (cleanup.rs app_block).
+// Saved as typed; no re-render, which would take the caret away.
+function appInstructionsRow(a, row) {
+  return h('div', { className: 'row app-more app-instructions' },
+    h('textarea', { rows: 2, maxLength: 300, value: a.instructions ?? '', 'aria-label': `Instructions for ${a.name}`, spellcheck: false,
+      placeholder: `Instructions for ${a.name}, in your words. For example: no full stop at the end, or sign off with “Best” and my name.`,
+      oninput: e => { row().instructions = e.target.value; saveSoon(); } }));
+}
+function appMoreRow(a, row) {
+  const langs = (a.languages ?? []).join(','), cleanup = a.cleanup == null ? '' : a.cleanup ? 'on' : 'off';
+  const changed = () => { save(); renderAppStyles(); };
+  return h('div', { className: 'row app-more' },
+    h('select', { 'aria-label': `Cleanup in ${a.name}`, onchange: e => { row().cleanup = { on: true, off: false }[e.target.value] ?? null; changed(); } },
+      [['', 'Cleanup as set'], ['on', 'Cleanup on'], ['off', 'No cleanup']].map(([v, l]) => h('option', { value: v, selected: v === cleanup }, l))),
+    h('select', { 'aria-label': `Languages in ${a.name}`, onchange: e => { row().languages = e.target.value ? e.target.value.split(',') : []; changed(); } },
+      h('option', { value: '' }, 'Your languages'),
+      langs.includes(',') && h('option', { value: langs, selected: true }, a.languages.map(langName).join(', ')),
+      LANGS.map(([v, l]) => h('option', { value: v, selected: v === langs }, v === 'auto' ? 'Any language' : l))));
 }
 let installed = [];
 async function refreshInstalled() {
@@ -983,10 +1157,8 @@ function langToggle(code) {
   if (!langFull) save();
   changed('languages');
 }
-// Onboarding's card fits the most spoken ones (plus any already picked); Settings lists them all.
-const OB_LANGS = ['en', 'hi', 'es', 'fr', 'de', 'pt', 'zh', 'ja', 'ar', 'bn', 'ta', 'te'];
-function langChips(box, only) {
-  const list = LANGS.filter(([v]) => v !== 'auto' && (!only || only.includes(v) || S.languages.includes(v)));
+function langChips(box) {
+  const list = LANGS.filter(([v]) => v !== 'auto');
   box.replaceChildren(...list.map(([v, l]) => h('button', { type: 'button', 'aria-pressed': String(S.languages.includes(v)), 'data-v': v }, l)));
 }
 function langDesc() {
@@ -994,11 +1166,30 @@ function langDesc() {
     : S.languages.length ? 'Each dictation is typed in whichever of these you spoke.'
     : `Up to ${LANG_MAX}. Picking yours stops short clips coming out in another language.`;
 }
+// How should your words look: a line in each script for the languages stt.rs ROMANISED or
+// translit.rs can type in English letters. The others are always typed in their own script.
+const SCRIPT_SAMPLE = {
+  hi: ['Namaste, aap kaise hain?', 'नमस्ते, आप कैसे हैं?'],
+  mr: ['Namaskar, tumhi kase aahat?', 'नमस्कार, तुम्ही कसे आहात?'],
+  ur: ['Assalam alaikum, aap kaise hain?', 'السلام علیکم، آپ کیسے ہیں؟'],
+  bn: ['Nomoskar, apni kemon achhen?', 'নমস্কার, আপনি কেমন আছেন?'],
+  gu: ['Namaste, kem cho?', 'નમસ્તે, કેમ છો?'],
+  pa: ['Sat sri akaal, kiven ho?', 'ਸਤ ਸ੍ਰੀ ਅਕਾਲ, ਕਿਵੇਂ ਹੋ?'],
+  ta: ['Vanakkam, eppadi irukkeenga?', 'வணக்கம், எப்படி இருக்கீங்க?'],
+  te: ['Namaskaaram, ela unnaaru?', 'నమస్కారం, ఎలా ఉన్నారు?'],
+  kn: ['Namaskaara, hegiddeera?', 'ನಮಸ್ಕಾರ, ಹೇಗಿದ್ದೀರಾ?'],
+  ml: ['Namaskaaram, sukhamaano?', 'നമസ്കാരം, സുഖമാണോ?'],
+};
+const scriptLang = () => S.languages.find(c => SCRIPT_SAMPLE[c]);
 function renderLanguages() {
   $('#langAuto').checked = !S.languages.length;
   langChips($('#langChips'));
   $('#langPickDesc').textContent = langDesc();
   $('#langPickDesc').classList.toggle('warn', langFull);
+  const c = scriptLang();
+  $('#scriptRow').hidden = !c;
+  if (c) $('#scriptDesc').textContent = SCRIPT_SAMPLE[c][S.script === 'latin' ? 0 : 1]
+    + (S.script === 'latin' && S.cleanup.provider === 'echotype' ? ' The built-in cleanup model is skipped: it was trained on English.' : '');
 }
 $('#langChips').addEventListener('click', e => { const b = e.target.closest('button'); if (b) langToggle(b.dataset.v); });
 $('#langAuto').addEventListener('change', e => {
@@ -1010,28 +1201,27 @@ $('#langAuto').addEventListener('change', e => {
   changed('languages');
 });
 
-// Translating needs a model that can; none of the offered local ones does yet (more coming).
-const canTranslate = () => S.stt.provider !== 'local' || models.some(m => m.translates);
+// "Type in English whatever language I speak": the Translate to English transform on every
+// dictation (cleanup.rs auto_transform). It needs a model that follows instructions.
 function renderLangNote() {
-  $('[data-bind="translate_to_english"]').closest('.row').hidden = !canTranslate();
-  const note = $('#translateNote');
-  const m = sttModel();
-  note.hidden = !(S.translate_to_english && S.stt.provider === 'local' && m && !m.translates);
-  if (note.hidden) return;
-  const alt = models.find(x => x.translates && x.downloaded);
-  note.classList.toggle('warn', !alt);
-  fill(note, alt
-    ? `${m.label} can't translate, so Echotype uses ${alt.label} while this is on.`
-    : `${m.label} can't translate, and no multilingual model is downloaded yet. Medium works best for Hinglish.`,
-  !alt && h('button', { className: 'btn', type: 'button', onclick: () => go('speech') }, 'Choose a model'));
+  $('#langEnglish').checked = S.auto_transform === TRANSLATE;
+  $('#translateNote').hidden = !(S.auto_transform === TRANSLATE && needsGeneral());
 }
+$('#langEnglish').addEventListener('change', e => {
+  S.auto_transform = e.target.checked ? TRANSLATE : S.auto_transform === TRANSLATE ? '' : S.auto_transform;
+  save();
+  renderLangNote();
+  renderTransforms();
+  renderChips();
+});
 
 // ---------- dictionary ----------
 // Placeholders only: what a snippet can be. Nothing is filled in for the user.
-const SNIPPET_EXAMPLES = [['my email address', 'you@example.com'], ['my phone number', '+91 98765 43210'], ['my home address', 'Street, city, postcode'], ['my sign-off', 'Thanks, talk soon']];
+const SNIPPET_EXAMPLES = [['my email address', 'you@example.com'], ['my sign-off', 'Thanks, talk soon'], ['what it hears', 'what you meant'], ['my phone number', '+91 98765 43210']];
 function renderDict() {
   $('#chips').replaceChildren(...S.dictionary.map((w, i) =>
-    h('span', { className: 'chip' }, w, h('button', { type: 'button', 'aria-label': `Remove ${w}`, onclick: () => { S.dictionary.splice(i, 1); save(); renderDict(); $('#newWord').focus(); } }, svg(CROSS)))));
+    h('span', { className: 'chip' }, w, h('button', { type: 'button', 'aria-label': `Remove ${w}`, onclick: () => { S.ignored_words.push(...S.dictionary.splice(i, 1)); save(); renderDict(); $('#newWord').focus(); } }, svg(CROSS))))); // removed: never suggested again
+  $('#dictExport').disabled = !S.dictionary.length && !S.replacements.some(r => r.from.trim());
   $('#reps').replaceChildren(...S.replacements.map((r, i) => {
     const field = (k, label) => h('input', { type: 'text', value: r[k], 'aria-label': label, spellcheck: false, placeholder: SNIPPET_EXAMPLES[i % SNIPPET_EXAMPLES.length][k === 'from' ? 0 : 1], oninput: e => { S.replacements[i][k] = e.target.value; saveSoon(); } }); // S, not r: a save's echo replaces S without re-rendering
     return h('div', { className: 'row rep' }, field('from', 'When you say'), field('to', 'Type'),
@@ -1041,13 +1231,57 @@ function renderDict() {
 $('#addWord').addEventListener('submit', e => {
   e.preventDefault();
   const w = $('#newWord').value.trim();
-  if (w && !S.dictionary.some(x => x.toLowerCase() === w.toLowerCase())) { S.dictionary.push(w); save(); renderDict(); }
+  if (w && !S.dictionary.some(x => x.toLowerCase() === w.toLowerCase())) {
+    S.dictionary.push(w);
+    S.ignored_words = S.ignored_words.filter(x => x.toLowerCase() !== w.toLowerCase());
+    save(); renderDict();
+  }
   $('#newWord').value = '';
 });
 $('#addRep').addEventListener('click', () => {
   S.replacements.push({ from: '', to: '' });
   renderDict();
   $$('#reps input').at(-2).focus();
+});
+
+// Import and export (wordlist.rs): a file is counted first and added on Add; the core parses it.
+const IMPORT_DESC = $('#dictImportDesc').textContent;
+let dictPending = null; // { text, csv } of the file waiting for Add
+const count = (n, one) => `${n.toLocaleString()} ${n === 1 ? one : `${one}s`}`;
+function dictImportShow(desc, pending = null) {
+  dictPending = pending;
+  $('#dictImportDesc').textContent = desc;
+  $('#dictImportAdd').hidden = $('#dictImportCancel').hidden = !pending;
+  $('#dictImport').hidden = !!pending;
+}
+$('#dictImport').addEventListener('click', () => $('#dictFile').click());
+$('#dictFile').addEventListener('change', async e => {
+  const f = e.target.files[0];
+  e.target.value = ''; // so picking the same file again still counts it
+  if (!f) return;
+  if (f.size > 2e6) return dictImportShow(`${f.name} is too big for a word list (2 MB at most).`);
+  const pending = { text: await f.text(), csv: /\.csv$/i.test(f.name) };
+  try {
+    const p = await invoke('dictionary_import_preview', pending);
+    const adds = [p.words.length && count(p.words.length, 'word'), p.snippets.length && count(p.snippets.length, 'snippet')].filter(Boolean);
+    const skips = [p.duplicates && count(p.duplicates, 'duplicate'), p.over && `${p.over.toLocaleString()} over the 1,000 limit`].filter(Boolean);
+    if (!adds.length) return dictImportShow(skips.length ? `Nothing new in ${f.name}: skips ${skips.join(' and ')}.` : `No words found in ${f.name}.`);
+    dictImportShow(`${f.name}: adds ${adds.join(', ')}${skips.length ? `, skips ${skips.join(' and ')}` : ''}.`, pending);
+    $('#dictImportAdd').focus();
+  } catch (err) { dictImportShow(`Couldn't read ${f.name}: ${err}`); }
+});
+$('#dictImportCancel').addEventListener('click', () => { dictImportShow(IMPORT_DESC); $('#dictImport').focus(); });
+$('#dictImportAdd').addEventListener('click', async () => {
+  try {
+    await save(true); // a snippet still being typed is saved first, so the import's echo can't drop it
+    const p = await invoke('dictionary_import', dictPending);
+    dictImportShow(`Added ${[count(p.words.length, 'word'), p.snippets.length && count(p.snippets.length, 'snippet')].filter(Boolean).join(' and ')}.`);
+  } catch (err) { dictImportShow(`Couldn't import: ${err}`); }
+  $('#dictImport').focus();
+});
+$('#dictExport').addEventListener('click', async () => {
+  try { $('#dictExportDesc').textContent = `Saved to Downloads as ${(await invoke('dictionary_export')).split(/[\\/]/).pop()}.`; }
+  catch (err) { $('#dictExportDesc').textContent = `Couldn't export: ${err}`; }
 });
 
 // ---------- history ----------
@@ -1071,18 +1305,32 @@ function fmtAgo(ts) {
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
+// The search box: every word, in the text or what was heard, any case or accent (settings.rs search_history).
+let historySeq = 0, historyTimer;
+$('#historySearch').addEventListener('input', () => { clearTimeout(historyTimer); historyTimer = setTimeout(renderHistory, 150); });
 async function renderHistory() {
-  const list = $('#historyList');
+  const list = $('#historyList'), q = $('#historySearch').value.trim(), seq = ++historySeq;
   if (!list.children.length) list.replaceChildren(h('p', { className: 'empty' }, 'Loading history…'));
-  let items;
-  try { items = await invoke('get_history', { limit: 200 }); }
+  let found;
+  try { found = await invoke('history_search', { query: q, limit: 200 }); }
   catch (e) {
     list.replaceChildren(h('p', { className: 'empty', role: 'alert' }, `Couldn't read history: ${e}`,
       h('button', { className: 'btn', type: 'button', onclick: renderHistory }, 'Try again')));
     return;
   }
-  $('#clearHistory').disabled = !items.length;
+  if (seq !== historySeq) return; // an older, slower search must not win
+  const { items, total, matched } = found;
+  $('#clearHistory').disabled = !total;
+  $('#historySearchRow').hidden = !total && !q;
+  $('#historyCount').textContent = q ? `${matched.toLocaleString()} of ${total.toLocaleString()}` : '';
   renderRerun();
+  const clips = new Set(await invoke('history_clips').catch(() => []));
+  if (q && !items.length) {
+    const clear = () => { $('#historySearch').value = ''; renderHistory(); $('#historySearch').focus(); };
+    list.replaceChildren(h('p', { className: 'empty' }, `Nothing you dictated has every word of “${q}”. Try fewer words or another spelling. `,
+      h('button', { className: 'btn', type: 'button', onclick: clear }, 'Clear search')));
+    return;
+  }
   if (!items.length) {
     list.replaceChildren(S.history_enabled
       ? h('p', { className: 'empty' }, 'Your dictations show up here. ', verb(), ' ', hotkeyText(S.hotkey), ' in any text field to start.')
@@ -1090,6 +1338,7 @@ async function renderHistory() {
     return;
   }
   list.replaceChildren(...items.map(it => {
+    if (it.recovered) return recoveredEntry(it, clips.has(it.ts));
     const copy = h('button', { className: 'btn quiet', type: 'button' }, 'Copy');
     copy.onclick = e => { e.preventDefault(); copyText(it.text, copy); };
     const text = h('span', { className: 'text' }, it.text);
@@ -1100,15 +1349,41 @@ async function renderHistory() {
     } }, 'Restore');
     return h('details', { ontoggle: e => e.target.open && addRerun(it, fix) },
       h('summary', {}, text, it.no_cleanup && h('span', { className: 'tag' }, 'No cleanup'), h('time', { className: 'when', title: fmtTime(it.ts).replace('\n', ' ') }, fmtAgo(it.ts)), copy),
-      h('div', { className: 'detail' }, fix,
+      h('div', { className: 'detail' }, fix, clips.has(it.ts) && playButton(it.ts),
         it.original && it.original !== it.text && h('p', { className: 'raw text' }, h('b', {}, 'Before re-run: '), it.original, ' ', restore),
-        it.raw !== it.text && h('p', { className: 'raw text' }, h('b', {}, 'Heard: '), it.raw),
+        it.raw !== it.text && h('p', { className: 'raw text' }, h('b', {}, 'Heard: '), it.raw, ' ', cleanedCopy(it.raw, 'Copy original')),
         it.cleaned && h('p', { className: 'raw text' }, h('b', {}, 'Cleanup had (not pasted): '), it.cleaned, ' ', cleanedCopy(it.cleaned)),
         h('span', { className: 'timing' },
           h('span', {}, `Speech ${it.stt_ms} ms${it.stt_provider ? ` (${it.stt_provider})` : ''}`),
           it.cleanup_provider && h('span', {}, `Cleanup ${it.cleanup_ms} ms (${it.cleanup_provider})`)),
         it.no_cleanup && noCleanup() && h('p', { className: 'hint' }, 'Kept as you said it because cleanup is off. ', h('button', { className: 'btn quiet', type: 'button', onclick: () => go('cleanup') }, 'Set up cleanup'))));
   }));
+}
+// Play: the entry's kept audio (settings.rs clips, Settings → Keep dictation audio), fetched as
+// bytes and played inline. ponytail: each play's blob URL lives until the window reloads.
+function playButton(ts) {
+  const b = h('button', { className: 'btn', type: 'button', onclick: async () => {
+    let buf;
+    try { buf = await invoke('history_audio', { ts }); }
+    catch (e) { b.textContent = String(e); b.disabled = true; return; }
+    const player = h('audio', { controls: true, src: URL.createObjectURL(new Blob([buf], { type: 'audio/wav' })), 'aria-label': 'Recording' });
+    b.replaceWith(player);
+    player.play().catch(() => {});
+  } }, 'Play');
+  return b;
+}
+// A dictation the app quit or crashed during (settings.rs recover): its audio, to transcribe now.
+function recoveredEntry(it, audio) {
+  const run = h('button', { className: 'btn primary', type: 'button', onclick: () => {
+    rerunPending = true;
+    run.disabled = true;
+    invoke('rerun', { id: 'same', ts: it.ts }).catch(err => { rerunPending = false; run.disabled = false; dictation = { state: 'error', error: String(err) }; renderHero(); });
+  } }, 'Transcribe');
+  return h('details', { open: true },
+    h('summary', {}, h('span', { className: 'text' }, 'Recovered dictation'), h('span', { className: 'tag' }, 'Not transcribed'), h('time', { className: 'when', title: fmtTime(it.ts).replace('\n', ' ') }, fmtAgo(it.ts))),
+    h('div', { className: 'detail' },
+      h('p', { className: 'hint' }, audio ? 'Echotype closed while you were dictating. It kept what it recorded.' : 'Echotype closed while you were dictating. The recording is no longer kept.'),
+      audio && h('span', { className: 'actions' }, run, playButton(it.ts))));
 }
 // Fix: edit an entry's text in place, save it, then offer to learn the names it corrected.
 function startFix(it, textEl, fixBtn) {
@@ -1187,8 +1462,8 @@ function fixSuggestions(before, after) {
   return out;
 }
 
-function cleanedCopy(text) {
-  const b = h('button', { className: 'btn quiet', type: 'button' }, 'Copy');
+function cleanedCopy(text, label = 'Copy') {
+  const b = h('button', { className: 'btn quiet', type: 'button' }, label);
   b.onclick = () => copyText(text, b);
   return b;
 }
@@ -1224,6 +1499,15 @@ $('#rerunLast').addEventListener('change', e => {
   if (!id) return;
   rerunPending = true;
   invoke('rerun', { id }).catch(err => { rerunPending = false; dictation = { state: 'error', error: String(err) }; renderHero(); });
+});
+
+// Keep history: three choices on two settings. "Don't keep" is history off, as it always was.
+$('#historyKeep').addEventListener('change', async e => {
+  S.history_enabled = e.target.value !== 'off';
+  S.history_24h = e.target.value === 'day';
+  await save();
+  changed('history_enabled'); // after the save: choosing 24 hours prunes what History lists
+  invoke('get_history', { limit: 3 }).then(r => { recent = r; renderRecent(); }).catch(() => {});
 });
 
 const confirmClear = on => { $('#clearHistory').hidden = on; $('#clearConfirm').hidden = !on; (on ? $('#clearCancel') : $('#clearHistory')).focus(); };
@@ -1277,6 +1561,23 @@ $('#upgradeYes').addEventListener('click', () => {
   renderHotkey();
 });
 $('#upgradeNo').addEventListener('click', () => dismiss('upgrade_offer'));
+
+// Settings → Files: new recordings in the watched folder get a transcript (files.rs).
+function renderWatch() {
+  const on = !!S.watch_folder;
+  $('#watchDesc').textContent = on
+    ? `${S.watch_folder}. New recordings that appear here get a transcript; what was already there is left alone, and your recordings are never changed.`
+    : 'Off. Pick a folder and every new audio or video file that appears in it is transcribed. Echotype only reads your recordings.';
+  $('#watchOff').hidden = $('#watchFormatRow').hidden = $('#watchSubRow').hidden = !on;
+}
+$('#watchPick').onclick = async () => {
+  $('#watchError').hidden = true;
+  try {
+    const [dir] = await invoke('pick_files', { folder: true });
+    if (dir) { S.watch_folder = dir; save(); renderWatch(); }
+  } catch (e) { $('#watchError').textContent = String(e); $('#watchError').hidden = false; }
+};
+$('#watchOff').onclick = () => { S.watch_folder = ''; save(); renderWatch(); };
 
 function renderStartup() {
   const ok = sys.can_autostart;
@@ -1354,6 +1655,11 @@ $('#showToken').addEventListener('click', () => { tokenShown = !tokenShown; refr
 $('#copyToken').addEventListener('click', e => copyText(apiStatus?.token || '', e.currentTarget));
 $('#copyCurl').addEventListener('click', e => copyText(curl(apiStatus?.port || S.local_api.port, apiStatus?.token || ''), e.currentTarget));
 
+// Settings → Use with AI apps: `echotype --mcp` (mcp.rs), as Claude Desktop and Cursor configure a server.
+const MCP_CONFIG = JSON.stringify({ mcpServers: { echotype: { command: '/Applications/Echotype.app/Contents/MacOS/echotype', args: ['--mcp'] } } }, null, 2);
+$('#mcpConfig').textContent = MCP_CONFIG;
+$('#copyMcp').addEventListener('click', e => copyText(MCP_CONFIG, e.currentTarget));
+
 // [badge, badge style, show the Open Settings button]
 const MIC = { granted: ['Allowed', '', false], denied: ['Blocked', 'bad', true], unknown: ['Asked on first use', 'muted', false] };
 async function refreshPerms() {
@@ -1393,8 +1699,8 @@ window.addEventListener('focus', () => S && refreshStatus()); // Input Monitorin
 for (const b of $$('[data-perm]')) b.addEventListener('click', () => invoke('open_permission_settings', { kind: b.dataset.perm }));
 
 // ---------- onboarding ----------
-// Five steps in one card (.notes/ONBOARDING.md): the microphone with a sound check, a practice
-// dictation into a field here, Accessibility and a real paste in another app, a few personal
+// Six steps in one card (.notes/ONBOARDING.md): the microphone with a sound check, the user's
+// languages, a practice dictation into a field here, Accessibility and a real paste in another app, a few personal
 // touches, then the recap. The orb (orb.js) moves between the steps' .ob-orb slots. The speech
 // model downloads from the first frame, tiny.en first when nothing is on this Mac yet, so the
 // practice run needn't wait for the big one (Automatic uses whatever is downloaded).
@@ -1406,7 +1712,7 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
 const local = (k, v) => { try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { return null; } };
 let obStep = 1, orb = null, obPoll = 0, obSeq = 0;
 const obT = {}; // timers by name
-const ob = { cleanHow: 'off', mic: null, heard: 0, checked: false, quiet: false, paused: false, ax: null, axSince: 0, asked: false, pressed: false, offerClick: false, watched: false, recAt: 0, secs: 0, hinglish: false, mine: false, wispr: '' };
+const ob = { cleanHow: 'off', mic: null, heard: 0, checked: false, quiet: false, paused: false, ax: null, axSince: 0, asked: false, pressed: false, offerClick: false, watched: false, recAt: 0, secs: 0, wispr: '' };
 const later = (name, ms, fn) => { clearTimeout(obT[name]); obT[name] = setTimeout(fn, ms); };
 // Show something that appears within a step with a short rise.
 function pop(el, on = true) {
@@ -1431,18 +1737,48 @@ async function refreshNotices() {
 // One notice at a time above Account and Settings: its button and a ✕ that dismisses it for good.
 function renderNotice() {
   const box = $('#sideNotice');
-  const n = (notices.notices || []).find(x => !S.dismissed.includes(`notice:${x.id}`));
+  const n = languageOffer() || (notices.notices || []).find(x => !S.dismissed.includes(`notice:${x.id}`));
   $('#retired').hidden = !notices.blocked;
+  if (S.learned.length) return learnedNotice(box);
   box.hidden = !n;
   if (!n) return box.replaceChildren();
   box.replaceChildren(
-    h('button', { className: 'icon-btn notice-x', type: 'button', 'aria-label': `Dismiss: ${n.title}`, onclick: () => { dismiss(`notice:${n.id}`); renderNotice(); } }, svg(CROSS)),
+    h('button', { className: 'icon-btn notice-x', type: 'button', 'aria-label': `Dismiss: ${n.title}`, onclick: () => { n.dismiss ? n.dismiss() : dismiss(`notice:${n.id}`); renderNotice(); } }, svg(CROSS)),
     h('b', {}, n.title),
     n.body && h('p', {}, n.body),
     n.action_label && n.action && h('button', { className: 'btn', type: 'button', onclick: () => noticeAction(n.action) }, n.action_label));
 }
+// Words learn.rs picked up from the user's own corrections: kept into the Dictionary or, on Undo,
+// never offered again. Shown before any app.json notice.
+function learnedNotice(box) {
+  const w = S.learned, one = w.length === 1;
+  const done = keep => {
+    if (keep) S.dictionary.push(...w.filter(x => !S.dictionary.some(d => d.toLowerCase() === x.toLowerCase())));
+    else S.ignored_words.push(...w);
+    S.learned = [];
+    save(); renderDict(); renderNotice();
+  };
+  box.hidden = false;
+  box.replaceChildren(
+    h('b', {}, `Echotype learned ${one ? 'a word' : `${w.length} words`}`),
+    h('p', {}, `${w.join(', ')}. Keep ${one ? 'it' : 'them'}?`),
+    h('div', { className: 'notice-btns' },
+      h('button', { className: 'btn', type: 'button', onclick: () => done(true) }, 'Keep'),
+      h('button', { className: 'btn quiet', type: 'button', onclick: () => done(false) }, 'Undo')));
+}
+
+// stt.rs language_to_offer: a language the detector heard clearly, offered once as a notice of our own.
+function languageOffer() {
+  const c = S.language_offer;
+  if (!c || S.languages.includes(c)) return null;
+  let name = langName(c);
+  if (name === c) try { name = new Intl.DisplayNames(['en'], { type: 'language' }).of(c); } catch {}
+  const done = add => { if (add && S.languages.length < LANG_MAX) S.languages.push(c); S.language_offer = ''; save(); renderNotice(); renderLanguages(); renderChips(); };
+  return { title: `Sounds like you speak ${name}`, body: 'Add it to your languages?', action_label: 'Add', action: () => done(true), dismiss: () => done(false) };
+}
 // "update", "page:<page>" or an https link; anything else does nothing.
 function noticeAction(a) {
+  if (typeof a === 'function') return a();
   if (a === 'update') return ACTIONS.update[1]();
   if (a.startsWith('page:')) return go(a.slice(5));
   if (/^https:\/\//.test(a)) invoke('plugin:opener|open_url', { url: a }).catch(() => {});
@@ -1564,9 +1900,9 @@ async function obFilmEnd(show) {
 // one's children come in, staggered, live. Without them the same in two beats; reduced motion
 // swaps at once and fades. The orb is outside the steps and follows its slot either way.
 function obShow(n, first = false) {
-  n = Math.max(1, Math.min(5, n));
-  // Step 3 is macOS's Accessibility switch; elsewhere pasting needs nothing, so the flow steps over it.
-  if (n === 3 && !isMac) n = n > obStep ? 4 : 2;
+  n = Math.max(1, Math.min(6, n));
+  // Step 4 is macOS's Accessibility switch; elsewhere pasting needs nothing, so the flow steps over it.
+  if (n === 4 && !isMac) n = n > obStep ? 5 : 3;
   const from = $(`.ob-step[data-step="${obStep}"]`), to = $(`.ob-step[data-step="${n}"]`);
   document.documentElement.classList.toggle('ob-back', n < obStep);
   obStep = n;
@@ -1588,26 +1924,27 @@ function obShow(n, first = false) {
 function obEnter(n) {
   const to = $(`.ob-step[data-step="${n}"]`);
   if (S.onboard_step !== n) { S.onboard_step = n; save(true); } // a relaunch resumes here
-  if (filming()) invoke('film_float', { on: n !== 3 }).catch(() => {}); // step 3 brings System Settings in front
+  if (filming()) invoke('film_float', { on: n !== 4 }).catch(() => {}); // step 4 brings System Settings in front
   $$('#obDots li').forEach((li, i) => { li.className = i + 1 === n ? 'on' : i + 1 < n ? 'done' : ''; });
-  $('#obDots').ariaLabel = `Setup, step ${n} of 5`;
+  $('#obDots').ariaLabel = `Setup, step ${n} of 6`;
   orb.slot(to.querySelector('.ob-orb'));
   orb.progress(null);
   for (const k of ['adv', 'click', 'quiet', 'pause']) clearTimeout(obT[k]);
   if (n !== 1) obListen(false);
   // Permissions are polled while their step shows, so a grant in System Settings carries on by itself.
   clearInterval(obPoll);
-  if (n === 1 || n === 3) { obPoll = setInterval(obTick, n === 1 ? 700 : 500); obTick(); }
+  if (n === 1 || n === 4) { obPoll = setInterval(obTick, n === 1 ? 700 : 500); obTick(); }
   if (n === 1) { if (ob.mic === 'granted' && !ob.checked && !ob.listening) obListen(true); obMicRender(); } // back here before the check finished
-  if (n === 2) {
+  if (n === 2) obLangsRender();
+  if (n === 3) {
     renderObKeys();
     obTryRender();
     if (!ob.pressed) later('click', 8000, () => { ob.offerClick = true; obFoot(); }); // the hotkey never fired
   }
-  if (n === 3) { ob.axSince = Date.now(); $('#obStale').hidden = true; renderObKeys(); obAxRender(); }
-  if (n === 4) obPrefsRender();
-  else orb.style(null); // step 4 wears the user's orb; the other steps the default, in ink
-  if (n === 5) obDoneRender();
+  if (n === 4) { ob.axSince = Date.now(); $('#obStale').hidden = true; renderObKeys(); obAxRender(); }
+  if (n === 5) obPrefsRender();
+  else orb.style(null); // step 5 wears the user's orb; the other steps the default, in ink
+  if (n === 6) obDoneRender();
   if (n !== 1 && !BUSY.includes(dictation.state)) orb.set('orb');
   obFoot();
   renderObModel();
@@ -1619,7 +1956,7 @@ function obFoot() {
   if ($('#onboard').hidden) return;
   const next = $('#obNext'), alt = $('#obAlt');
   $('#obBack').textContent = obStep === 1 ? 'Quit' : 'Back';
-  $('#obSkip').hidden = obStep === 1 || obStep === 5;
+  $('#obSkip').hidden = obStep === 1 || obStep === 6;
   let label = 'Continue', extra = '';
   next.hidden = next.disabled = false;
   if (obStep === 1) {
@@ -1628,12 +1965,14 @@ function obFoot() {
     next.disabled = ob.mic === 'asking' || ob.mic == null;
     if (ob.mic === 'granted' && !ob.checked) extra = ob.paused ? 'Listen again' : $('#obMicPickRow').hidden ? 'Wrong microphone?' : '';
   } else if (obStep === 2) {
-    if (ob.offerClick) extra = dictation.state === 'recording' ? 'Click to finish' : 'Click to start instead';
+    extra = 'Skip for now';
   } else if (obStep === 3) {
-    if (!ob.ax) { label = 'Open System Settings'; extra = 'Not now: keep text on the clipboard'; }
+    if (ob.offerClick) extra = dictation.state === 'recording' ? 'Click to finish' : 'Click to start instead';
   } else if (obStep === 4) {
+    if (!ob.ax) { label = 'Open System Settings'; extra = 'Not now: keep text on the clipboard'; }
+  } else if (obStep === 5) {
     if (obQ < obQs().length - 1) extra = 'Skip the rest';
-  } else if (obStep === 5) label = obRelaunch() ? 'Finish and relaunch' : 'Finish';
+  } else if (obStep === 6) label = obRelaunch() ? 'Finish and relaunch' : 'Finish';
   next.textContent = label;
   alt.textContent = extra;
   alt.hidden = !extra;
@@ -1651,24 +1990,23 @@ $('#obNext').addEventListener('click', async () => {
       return obTick();
     }
   }
-  if (obStep === 3 && !ob.ax) {
+  if (obStep === 4 && !ob.ax) {
     ob.asked = true;
     obAxRender();
     return invoke('open_permission_settings', { kind: 'accessibility' }).catch(() => {});
   }
-  if (obStep === 5) return obFinish();
-  if (obStep === 4 && obQ < obQs().length - 1) return obQShow(obQ + 1);
+  if (obStep === 6) return obFinish();
+  if (obStep === 5 && obQ < obQs().length - 1) return obQShow(obQ + 1);
   obShow(obStep + 1);
 });
 $('#obAlt').addEventListener('click', () => {
   if (obStep === 1 && ob.paused) { obListen(true); return obMicRender(); }
   if (obStep === 1) { pop($('#obMicPickRow')); $('#obMicPick').focus(); return obFoot(); }
-  if (obStep === 2) return invoke('toggle_dictation').catch(() => {});
-  if (obStep === 3) obShow(4);
-  else if (obStep === 4) obShow(5);
+  if (obStep === 3) return invoke('toggle_dictation').catch(() => {});
+  if (obStep === 2 || obStep === 4 || obStep === 5) obShow(obStep + 1); // skip for now, not now, skip the rest
 });
-// Back (and Esc) walk back through step 4's questions before leaving it.
-const obBackOne = () => (obStep === 4 && obQ > 0 ? obQShow(obQ - 1) : obShow(obStep - 1));
+// Back (and Esc) walk back through step 5's questions before leaving it.
+const obBackOne = () => (obStep === 5 && obQ > 0 ? obQShow(obQ - 1) : obShow(obStep - 1));
 $('#obBack').addEventListener('click', () => (obStep === 1 ? invoke('quit_app').catch(() => {}) : obBackOne()));
 $('#obSkip').addEventListener('click', () => finishOnboarding('home'));
 // Enter is the primary action; Esc and ⌘[ go back. Esc never closes onboarding, and does
@@ -1690,7 +2028,7 @@ async function obTick() {
   let p;
   try { p = await invoke('check_permissions'); } catch { return; }
   if (obStep === 1) obMicStatus(p);
-  if (obStep === 3) obAxStatus(!!p.accessibility);
+  if (obStep === 4) obAxStatus(!!p.accessibility);
 }
 
 // ----- 1: the microphone -----
@@ -1754,7 +2092,28 @@ function obMicRender() {
   obFoot();
 }
 
-// ----- 2: try it -----
+// ----- 2: languages -----
+// Two menus over `languages` (Auto-detect is the empty list; a third picked in Settings stays) and,
+// for a language stt.rs can type in English letters, the script choice with a line in it.
+function obLangsRender() {
+  const [a = 'auto', b = ''] = S.languages, opt = ([v, l]) => h('option', { value: v }, l);
+  $('#obLang1').replaceChildren(...LANGS.map(opt));
+  $('#obLang2').replaceChildren(opt(['', 'None']), ...LANGS.filter(([v]) => v !== 'auto' && v !== a).map(opt));
+  $('#obLang1').value = a;
+  $('#obLang2').value = b;
+  $('#obLang2').disabled = a === 'auto';
+  const c = scriptLang();
+  pop($('#obScriptRow'), !!c); // rises in when a language with English letters is picked
+  if (c) $('#obScriptSample').textContent = SCRIPT_SAMPLE[c][S.script === 'latin' ? 0 : 1];
+}
+for (const el of [$('#obLang1'), $('#obLang2')]) el.addEventListener('change', () => {
+  const a = $('#obLang1').value;
+  S.languages = a === 'auto' ? [] : [...new Set([a, $('#obLang2').value, ...S.languages.slice(2)].filter(Boolean))].slice(0, LANG_MAX);
+  save();
+  changed('languages');
+});
+
+// ----- 3: try it -----
 function renderObKeys() {
   $('#obSay').replaceChildren(`${verb()} `, h('span', { className: 'keys' }, talkCaps()), ' and say: ', h('q', {}, SAY));
   $('#obKeys').replaceChildren(...talkCaps().map(k => { k.classList.toggle('wide', k.textContent.length > 2); return k; }));
@@ -1770,12 +2129,12 @@ function obTryRender() {
 }
 listen('hotkey-state', ({ payload: down }) => {
   $('#obKeys').classList.toggle('down', !!down);
-  if (down && obStep === 2) { ob.pressed = true; clearTimeout(obT.click); }
+  if (down && obStep === 3) { ob.pressed = true; clearTimeout(obT.click); }
 });
 
 function obDictation(p) {
   if ($('#onboard').hidden) return;
-  if (obStep === 2) obPractice(p);
+  if (obStep === 3) obPractice(p);
   else return;
   if (p.state !== 'recording') orb.level(0);
   obFoot();
@@ -1807,7 +2166,7 @@ function obPractice(p) {
     ob.tried = true;
     obReveal(p.text);
     orb.set('check');
-    later('orb', 1600, () => obStep === 2 && !BUSY.includes(dictation.state) && orb.set('orb'));
+    later('orb', 1600, () => obStep === 3 && !BUSY.includes(dictation.state) && orb.set('orb'));
     const n = p.text.split(/\s+/).filter(Boolean).length;
     say(`That’s it. ${n} ${n === 1 ? 'word' : 'words'}${ob.secs >= 0.3 ? ` in ${ob.secs.toFixed(1)} s` : ''}.`);
     $('#obTryState').dataset.tone = 'ok';
@@ -1826,7 +2185,7 @@ function obReveal(text) {
   $('#obResult').replaceChildren(...words.flatMap((w, i) => [i ? ' ' : '', h('span', { className: 'w', style: `--d:${Math.round(i * step)}ms` }, w)]));
 }
 
-// ----- 3: Accessibility -----
+// ----- 4: Accessibility -----
 // Once it's on, the step says so and moves on by itself; no trial paste in another app.
 function obAxStatus(on) {
   const was = ob.ax;
@@ -1837,8 +2196,8 @@ function obAxStatus(on) {
     invoke('focus_main').catch(() => {});
     invoke('play_sound', { name: 'lock' }).catch(() => {});
     orb.set('check');
-    later('orb', 1400, () => obStep === 3 && !BUSY.includes(dictation.state) && orb.set('orb'));
-    later('adv', 1600, () => obStep === 3 && obShow(4));
+    later('orb', 1400, () => obStep === 4 && !BUSY.includes(dictation.state) && orb.set('orb'));
+    later('adv', 1600, () => obStep === 4 && obShow(5));
   }
   obAxRender();
 }
@@ -1856,7 +2215,7 @@ $('#obReset').addEventListener('click', async () => {
   catch (e) { $('#obAxState').textContent = String(e); }
 });
 
-// ----- 4: make it yours -----
+// ----- 5: make it yours -----
 // One question at a time (.ob-q). A tile saves as it's picked and stays on screen, so every
 // choice can be tried; Continue moves on. The pill's questions are macOS-only (data-only).
 let obQ = 0;
@@ -1864,21 +2223,13 @@ const obQs = () => $$('.ob-q').filter(q => (q.dataset.q !== 'wispr' || !!wispr) 
 function obPrefsRender() {
   $('#obName').value = S.display_name || '';
   obHello();
-  // Hindi among the Mac's languages: Hinglish is likely, so it starts selected (once).
-  if (local('ob-lang') == null && !(S.languages.includes('hi') && S.translate_to_english) && navigator.languages?.some(l => /^hi\b/i.test(l))) {
-    if (!S.languages.includes('hi')) S.languages = ['en', 'hi'];
-    ob.mine = true;
-    save();
-    obLang('hinglish');
-  }
-  obLangRender();
   if (wispr) $('#obWisprList').replaceChildren(...wisprLines(wispr).map(([k, v]) => h('li', {}, h('b', {}, `${k}: `), v)));
   renderObSpeed();
   obCleanRender();
   // Back from the recap lands on the last question.
   obQShow(document.documentElement.classList.contains('ob-back') ? obQs().length - 1 : 0, true);
   // The name is typed straight onto the card, so the caret is there waiting (labelled by the heading).
-  if (obQ === 0) setTimeout(() => obStep === 4 && obQ === 0 && $('#obName').focus({ preventScroll: true }));
+  if (obQ === 0) setTimeout(() => obStep === 5 && obQ === 0 && $('#obName').focus({ preventScroll: true }));
 }
 // Under the name, the greeting Home will give, fading in once there's a name (and out, as it was).
 function obHello() {
@@ -1908,15 +2259,12 @@ function obQShow(i, first = false) {
   if (!first) q.querySelector('.ob-tile[tabindex="0"], input').focus({ preventScroll: true });
 }
 
-const obHinglishOn = () => ob.hinglish || (S.languages.includes('hi') && S.translate_to_english);
-const obMine = () => ob.mine || S.languages.length > 0;
 const obVal = (t, key) => ({ true: true, false: false })[t.dataset.v] ?? (key === 'ball_size' ? Number(t.dataset.v) : t.dataset.v);
 function obTilesRender() {
   for (const g of $$('.ob-q .ob-tiles')) {
     const key = g.dataset.key, q = g.closest('.ob-q').dataset.q, v = t => t.dataset.v;
     const on = t => key === 'ball_size' ? Math.abs(S.ball_size - obVal(t, key)) < 0.1
       : key ? S[key] === obVal(t, key)
-      : q === 'lang' ? v(t) === (obMine() ? 'mine' : 'auto')
       : q === 'wispr' ? v(t) === ob.wispr
       : q === 'clean' ? (v(t) === 'yes' ? obCleanOn() : !obCleanOn() && !S.cleanup.enabled)
       : v(t) === (S.sounds ? S.sound_pack : 'off'); // sound
@@ -1930,7 +2278,6 @@ function obTilesRender() {
 function obPick(g, t) {
   const key = g.dataset.key, q = g.closest('.ob-q').dataset.q, v = obVal(t, key);
   if (key) { S[key] = v; save(); syncBound(); changed(key); }
-  else if (q === 'lang') obLangPick(v);
   else if (q === 'wispr') obWisprPick(v);
   else if (q === 'clean') obCleanPick(v === 'yes');
   else { // sound: tapping one plays it, again if it's already the one
@@ -1967,60 +2314,12 @@ for (const g of $$('.ob-q .ob-tiles')) {
 // The card's orb is the user's: their style in their colour on the pill's dark disc and, on the
 // ball question, the resting ball at the pill's real size. `key`/`v`: a tile being looked at.
 function obOrbPreview(key, v) {
-  if (!orb || obStep !== 4 || $('#onboard').hidden) return;
+  if (!orb || obStep !== 5 || $('#onboard').hidden) return;
   const pill = isMac && S.show_in !== 'menubar', o = { orb_listen: S.orb_listen, orb_color: S.orb_color, ball_size: S.ball_size };
   if (key) o[key] = v;
   const ball = pill && obQs()[obQ]?.dataset.q === 'ball';
   orb.style(pill ? { listen: o.orb_listen, think: S.orb_think, detail: S.orb_detail, color: o.orb_color, pill: ball ? { size: o.ball_size, zoom: S.pill_size } : null } : null);
   if (!BUSY.includes(dictation.state)) orb.set(ball ? 'ball' : 'orb');
-}
-
-// Hinglish: Hindi + English, typed as English. It needs a model that translates (Medium, or Small
-// if Medium doesn't fit), so it switches on once that model is on this Mac.
-const obHinglishModel = () => ['medium', 'small'].map(id => models.find(m => m.id === id)).find(m => m && (m.fits || m.downloaded));
-function obLang(v) {
-  local('ob-lang', v);
-  ob.hinglish = v === 'hinglish';
-  const m = obHinglishModel();
-  if (ob.hinglish && m) { if (m.downloaded) obModelLanded(m.id); else obFetch(m.id); }
-  if (!ob.hinglish && S.translate_to_english) { S.translate_to_english = false; syncBound(); save(); renderLangNote(); }
-  obLangRender();
-}
-// "Any language" clears the list; "My languages" opens the chips, starting from this Mac's
-// languages (up to 3, else English).
-function obLangPick(v) {
-  ob.mine = v === 'mine';
-  langFull = false;
-  if (!ob.mine) {
-    S.languages = [];
-    if (obHinglishOn()) obLang('en');
-  } else if (!S.languages.length) {
-    const mac = (navigator.languages ?? []).map(l => LANGS.find(([c]) => c !== 'auto' && l.toLowerCase().startsWith(c))?.[0]).filter(Boolean);
-    S.languages = [...new Set(mac)].slice(0, LANG_MAX);
-    if (!S.languages.length) S.languages = ['en'];
-  }
-  save();
-  changed('languages');
-}
-$('#obLangChips').addEventListener('click', e => {
-  const b = e.target.closest('button');
-  if (!b) return;
-  langToggle(b.dataset.v);
-  if (!S.languages.includes('hi') && obHinglishOn()) obLang('en'); // Hinglish needs Hindi
-});
-$('#obHinglish').addEventListener('change', e => obLang(e.target.checked ? 'hinglish' : 'en'));
-function obLangRender() {
-  obTilesRender();
-  $('#obLangChips').hidden = !obMine();
-  if (obMine()) langChips($('#obLangChips'), OB_LANGS);
-  $('#obHinglishRow').hidden = !S.languages.includes('hi') || !obHinglishModel();
-  $('#obHinglish').checked = obHinglishOn();
-  const m = obHinglishModel();
-  $('#obLangDesc').classList.toggle('warn', langFull);
-  $('#obLangDesc').textContent = !obHinglishOn() ? (obMine() ? `${langDesc()} More in Settings → Language.` : '')
-    : !m ? 'Hinglish needs the Medium model, and this Mac is short of memory for it right now.'
-    : m.downloaded ? `Typed in English, with ${m.label}.`
-    : `Typed in English, once ${m.label} (${fmtMB(m.size_mb)}) has downloaded.`;
 }
 
 // The built-in cleanup model, when it's installed and fits. Otherwise "Yes" means setting up a
@@ -2047,12 +2346,12 @@ function obCleanRender() {
 }
 $('#obCleanHow').addEventListener('click', () => { ob.cleanHow = ob.cleanHow === 'key' ? 'local' : 'key'; obCleanRender(); obTilesRender(); });
 
-// ----- 5: you're set -----
+// ----- 6: you're set -----
 function obDoneRender() {
   $('#obT5').textContent = firstName() ? `You're set, ${firstName()}.` : "You're set.";
   const toggle = S.mode === 'toggle', [pasteKey] = DEFAULT_LAST();
   const item = (keys, text) => h('li', {}, h('span', { className: 'keys' }, keys), h('span', {}, text));
-  fill($('#obRecap'), // the hands-free line is `false` in toggle mode, which step 4 offers
+  fill($('#obRecap'), // the hands-free line is `false` in toggle mode, which step 5 offers
     item(talkCaps(), toggle ? 'Press to talk, again to type' : 'Hold to talk, let go to type'),
     !toggle && item([...talkCaps(), h('span', { className: 'times' }, '×2')], 'Keep talking hands-free'),
     item([h('kbd', {}, 'esc')], 'Cancel while you talk'),
@@ -2063,7 +2362,7 @@ function obDoneRender() {
 }
 
 async function obFinish() {
-  const how = ob.cleanHow; // a local server or a key, picked in step 4 when there's no built-in model
+  const how = ob.cleanHow; // a local server or a key, picked in step 5 when there's no built-in model
   if (how !== 'off') { setupCleanup(how); return finishOnboarding('cleanup'); } // a key or a server to set up
   const relaunch = obRelaunch();
   // The orb folds back into the ball and drops out of the card, towards the real pill.
@@ -2199,19 +2498,8 @@ function obStartModel() {
   if (tiny && !models.some(m => m.downloaded)) { local('ob-tiny', '1'); obFetch(tiny.id, want.id); }
   else obFetch(want.id);
 }
-function obModelLanded(id) {
-  const m = obHinglishModel();
-  if (ob.hinglish && m?.id === id && m.downloaded) {
-    if (!S.languages.includes('hi')) S.languages = [...S.languages.slice(0, LANG_MAX - 1), 'hi'];
-    S.translate_to_english = true;
-    syncBound();
-    save();
-    renderLangNote();
-  }
-  if (obStep === 4 && !$('#onboard').hidden) {
-    obLangRender();
-    if (document.activeElement !== $('#obSpeed')) renderObSpeed(); // "already on this Mac", not mid-drag
-  }
+function obModelLanded() {
+  if (obStep === 5 && !$('#onboard').hidden && document.activeElement !== $('#obSpeed')) renderObSpeed(); // "already on this Mac", not mid-drag
   obDropTiny();
 }
 // tiny.en was only for the first practice run: once the real model is here and onboarding is
@@ -2236,13 +2524,14 @@ function renderObModel() {
   else if (modelErr[want.id]) fill(el, `Couldn't download ${want.label}: ${modelErr[want.id]} `, h('button', { className: 'link', type: 'button', onclick: () => obFetch(want.id) }, 'Try again'));
   else if (obReady() && dl) fill(el, `Ready to practise. Getting the full model · `, h('span', { className: 'pct' }, pct(dl)));
   else fill(el, 'Getting your speech model ready · ', h('span', { className: 'pct' }, dl ? pct(dl) : '0%'), ' ', api);
-  if (obStep === 2) obTryRender();
+  if (obStep === 3) obTryRender();
 }
 
 // ---------- clipboard ----------
 
 // ---------- events ----------
 meetingsPage.init({ $, h, invoke, listen, copyText });
+notesPage.init({ $, h, invoke, listen, copyText });
 listen('dictation-state', ({ payload }) => {
   dictation = payload;
   renderHero();
@@ -2280,7 +2569,7 @@ listen('model-download', ({ payload: p }) => {
   if (p.error) { delete progress[p.id]; modelErr[p.id] = p.error; renderModels(); renderObModel(); return; }
   if (p.done) {
     delete progress[p.id];
-    refreshModels().then(() => { renderObModel(); obModelLanded(p.id); });
+    refreshModels().then(() => { renderObModel(); obModelLanded(); });
     return;
   }
   const frac = p.total ? p.downloaded / p.total : 0;
@@ -2295,7 +2584,14 @@ listen('model-download', ({ payload: p }) => {
 });
 
 // The pill's menu (History, Settings) and its notices open a page here.
-listen('navigate', ({ payload }) => { if ($('#onboard').hidden) go(payload); });
+listen('navigate', ({ payload }) => {
+  if (!$('#onboard').hidden) return;
+  // "No sound from your microphone" on the pill: Settings, on the microphone picker.
+  if (payload !== 'mic') return go(payload);
+  go('settings');
+  $('#mic').scrollIntoView({ block: 'center' });
+  $('#mic').focus();
+});
 
 listen('tauri://drag-enter', () => $('#drop').classList.add('over'));
 listen('tauri://drag-leave', () => $('#drop').classList.remove('over'));
@@ -2303,7 +2599,7 @@ listen('tauri://drag-drop', ({ payload }) => {
   $('#drop').classList.remove('over');
   if (!payload?.paths?.length) return;
   if ($('#onboard').hidden) go('home');
-  payload.paths.forEach(transcribe);
+  transcribe(payload.paths);
 });
 
 // ---------- boot ----------
@@ -2323,6 +2619,9 @@ if (!isMac) for (const w = document.createTreeWalker(document.body, NodeFilter.S
 if (isMac && !preview) document.documentElement.dataset.vibrant = '';
 S.dictionary ??= [];
 S.replacements ??= [];
+S.learned ??= [];
+S.ignored_words ??= [];
+S.transforms ??= [];
 S.dismissed ??= [];
 base = clone(S);
 recent = await invoke('get_history', { limit: 3 }).catch(() => []);
@@ -2370,6 +2669,7 @@ function renderAll() {
   renderRaw();
   renderUpgrade();
   renderStartup();
+  renderWatch();
   renderMicNote();
   renderTalk();
   renderStt();
@@ -2378,7 +2678,10 @@ function renderAll() {
   renderLangNote();
   renderLanguages();
   renderDict();
+  renderTransforms();
   renderAdvanced();
+  renderNotice();
+  $('#clipDaysRow').hidden = !S.history_enabled; // no history, no audio kept
 }
 
 bindAll();

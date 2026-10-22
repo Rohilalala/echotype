@@ -44,17 +44,46 @@ pub struct Settings {
     /// Builds before 2026-10-16 saved one code or "auto" here; migrate() moves it into `languages`.
     #[serde(skip_serializing)]
     pub language: String,
+    /// How a language with its own script is typed: "native" (हिंदी) or "latin" (English letters,
+    /// "Hinglish"). Only the languages in stt::ROMANISED have a "latin"; the rest stay native.
+    pub script: String,
+    /// Builds before 2026-10-22 had Whisper translate here; migrate() turns it into
+    /// `auto_transform` = TRANSLATE, which translates the cleaned text with the cleanup provider.
+    #[serde(skip_serializing)]
     pub translate_to_english: bool,
     pub local_api: LocalApi,
     pub stt: Stt,
     pub cleanup: Cleanup,
     pub dictionary: Vec<String>,
+    /// "Use text on screen to spell names": names and identifiers near the caret go into the local
+    /// speech model's prompt (context.rs). Read through Accessibility; never saved or sent. On for upgraders too.
+    pub screen_context: bool,
+    /// "Send text on screen to <provider>": names on screen (as spelling hints) and, in Command
+    /// Mode, the text around the selection also go to an online cleanup provider. Off by default;
+    /// a provider on this Mac gets them anyway (cleanup::screen_ok).
+    pub screen_context_cloud: bool,
+    /// What the screen showed for this one dictation (lib.rs read_screen). Never saved.
+    #[serde(skip)]
+    pub screen: crate::context::Screen,
     pub replacements: Vec<Replacement>,
+    /// "Learn words from my corrections": a while after a paste, the field is read back and the
+    /// names the user re-spelled are offered for the Dictionary (learn.rs). On for upgraders too.
+    pub learn_words: bool,
+    /// Words a correction taught, waiting for Keep or Undo. None is used until it is kept.
+    pub learned: Vec<String>,
+    /// Words removed from the Dictionary or undone from `learned`: never suggested again.
+    pub ignored_words: Vec<String>,
     pub restore_clipboard: bool,
+    /// Settings → Keep history: off is "Don't keep". With `history_24h` it is "Delete after 24
+    /// hours": entries and their audio go a day after they were recorded (prune_history).
     pub history_enabled: bool,
+    pub history_24h: bool,
     /// Spoken "new line", "new paragraph", "bullet point" and "scratch that" act as commands in a
     /// dictation (cleanup::voice_commands). On for upgraders too.
     pub voice_commands: bool,
+    /// A live dictation ending in "send it" or "send that" pastes without those words, then presses
+    /// Return (cleanup::send_command). On for upgraders too.
+    pub send_it: bool,
     /// Count words and speaking speed on this computer (stats.rs). Counts only; on for upgraders too.
     pub usage_stats: bool,
     /// Opt-in anonymous usage counts and crash reports for the beta (telemetry.rs). Off unless
@@ -63,7 +92,7 @@ pub struct Settings {
     /// Shown on the Stats page ("Aditya's stats"). Stays on this computer.
     pub display_name: String,
     pub onboarded: bool,
-    /// The onboarding step on screen (1-5), so a relaunch resumes there. From step 3 on, a
+    /// The onboarding step on screen (1-6), so a relaunch resumes there. From step 4 on, a
     /// dictation into another app is pasted (the real-app try); before it, it only lands in
     /// onboarding's practice field.
     pub onboard_step: u8,
@@ -78,12 +107,24 @@ pub struct Settings {
     /// Command Mode: held like the dictation shortcut, it applies the spoken instruction to the
     /// selected text (or writes what it asks for). "" is unbound.
     pub command_hotkey: String,
+    /// Undo the AI edit: the last dictation's words as heard, before cleanup, onto the clipboard. "" is unbound.
+    pub undo_edit_hotkey: String,
+    /// Saved rewrites (Settings → Transforms): select text, press a transform's shortcut, and the
+    /// cleanup provider applies its instruction as Command Mode would. Names are unique, at most
+    /// MAX_TRANSFORMS; upgraders get TRANSFORMS.
+    pub transforms: Vec<Transform>,
+    /// The transform applied to every dictation after cleanup, by name; "" is none. Language's
+    /// "Type in English whatever language I speak" is this set to TRANSLATE.
+    pub auto_transform: String,
     /// Launch at login. Off for upgraders; onboarding offers it pre-checked.
     pub autostart: bool,
     /// Start, stop and lock sounds.
     pub sounds: bool,
     /// One-time notices already dismissed: "upgrade_offer", "bluetooth_tip", "no_cleanup_banner".
     pub dismissed: Vec<String>,
+    /// A language the speech detector heard clearly that is not in `languages`, offered once in
+    /// the sidebar ("" = none). Offering it adds "lang_offer:<code>" to `dismissed`.
+    pub language_offer: String,
     /// The idle pill (macOS): a thin bar bottom-centre while not dictating. On for upgraders too.
     pub pill_idle: bool,
     /// "Hide for 1 hour": the idle pill stays away until this time (ms since the epoch); 0 = not hidden.
@@ -149,6 +190,15 @@ pub struct Settings {
     /// Meeting audio is deleted this many days after the meeting ends (7 or 30); 0 keeps it.
     /// The transcript, speakers and summary stay either way (meeting.rs prune_audio).
     pub meeting_audio_days: u32,
+    /// A dictation's audio (play and Re-run in History) is deleted this many days after it was
+    /// recorded (7, 14 or 30); 0 keeps none. Only while history is on (prune_clips).
+    pub clip_days: u32,
+    /// Settings → Files: new recordings in this folder are transcribed (files.rs); empty is off.
+    pub watch_folder: String,
+    /// The watched folder's transcripts: "txt" | "md" | "srt" | "vtt" | "docx".
+    pub watch_format: String,
+    /// Into a "Transcripts" folder inside the watched one rather than beside each recording.
+    pub watch_subfolder: bool,
 }
 
 /// Per calling app: "ask" (offer notes) | "start" (start them) | "never". calls::choice maps a call to its field.
@@ -210,6 +260,9 @@ pub struct Cleanup {
     pub base_url: String,
     /// "default" | "casual" | "formal" | "verbatim".
     pub style: String,
+    /// How much the model may change: "none" (no model: voice commands, replacements and capitals
+    /// only) | "light" (fillers, repeats and punctuation, never rewording) | "medium" (everything).
+    pub level: String,
     pub custom_instructions: String,
     /// "Match the app you're typing in": the style comes from the app in front when recording
     /// starts (app_style). Off for everyone until switched on.
@@ -217,6 +270,10 @@ pub struct Cleanup {
     /// The user's picks per app, over APP_STYLES. A list, not a map: merge() and main.js merge3
     /// replace lists whole, so a removed row stays removed.
     pub app_styles: Vec<AppStyle>,
+    /// The app in front's own instructions (AppStyle::instructions), set by apply_app for one
+    /// dictation or edit. Never saved.
+    #[serde(skip)]
+    pub app_instructions: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -227,7 +284,17 @@ pub struct AppStyle {
     pub name: String,
     /// A style, or "" for the user's own `Cleanup::style`.
     pub style: String,
+    /// Cleanup on or off in this app; None: as `Cleanup::enabled`.
+    pub cleanup: Option<bool>,
+    /// The languages spoken in this app, ["auto"] for any; empty: the user's `Settings::languages`.
+    pub languages: Vec<String>,
+    /// The user's own words for how to write in this app ("no full stop at the end"), added to the
+    /// cleanup and Command Mode prompts there (cleanup::app_block). "" for none.
+    pub instructions: String,
 }
+
+/// The most of an app's instructions a prompt gets (the field holds no more either).
+pub const APP_INSTRUCTIONS_MAX: usize = 300;
 
 /// Built-in styles by bundle id (an id ending in '.' matches the prefix). Browsers and every
 /// other app keep the user's style.
@@ -267,6 +334,56 @@ pub fn app_style<'a>(c: &'a Cleanup, id: Option<&str>) -> &'a str {
     }
 }
 
+/// What the user asked for in app `id` (AppStyle::instructions), while "Match the app" is on.
+pub fn app_instructions<'a>(c: &'a Cleanup, id: &str) -> &'a str {
+    c.app_styles.iter().find(|a| a.id == id && c.match_app).map_or("", |a| &a.instructions)
+}
+
+/// A dictation into app `id` with that app's style, cleanup switch, languages and instructions over the user's,
+/// while "Match the app" is on (app_style).
+pub fn apply_app(s: &mut Settings, id: &str) {
+    s.cleanup.style = app_style(&s.cleanup, Some(id)).to_string();
+    let Some(a) = s.cleanup.app_styles.iter().find(|a| a.id == id).filter(|_| s.cleanup.match_app) else { return };
+    s.cleanup.app_instructions = a.instructions.clone();
+    if let Some(on) = a.cleanup {
+        s.cleanup.enabled = on;
+    }
+    match &a.languages[..] {
+        [] => {}
+        [auto] if auto == "auto" => s.languages.clear(),
+        l => s.languages = l.to_vec(),
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct Transform {
+    pub name: String,
+    /// What to do with the selected text, as it would be said in Command Mode.
+    pub instruction: String,
+    /// Its global shortcut, pressed and let go with text selected; "" is unbound.
+    pub shortcut: String,
+}
+
+pub const MAX_TRANSFORMS: usize = 12;
+pub const TRANSLATE: &str = "Translate to English";
+
+/// The built-in transforms, every install's starting list. Each can be edited or removed.
+pub const TRANSFORMS: [(&str, &str); 5] = [
+    ("Polish", "Fix grammar, spelling and flow. Keep the meaning, the tone and the writer's voice, and change as little as needed."),
+    ("Make it formal", "Rewrite this in a formal, professional tone. Keep the meaning and every detail."),
+    ("Make it shorter", "Make this shorter and tighter. Keep every key point and the writer's voice."),
+    (TRANSLATE, "Translate this into natural English. If it is already English, return it unchanged."),
+    ("Prompt engineer", "Rewrite these rough notes as a clear prompt for an AI assistant: the goal, the context, any constraints and the output wanted, using only what the notes say. Output only the prompt."),
+];
+
+/// The instruction of the transform called `name`: the user's own, else a built-in one (so
+/// TRANSLATE works even after its row was removed). None for an unknown name.
+pub fn transform_instruction(s: &Settings, name: &str) -> Option<String> {
+    let mine = s.transforms.iter().find(|t| t.name == name).map(|t| t.instruction.clone());
+    mine.or_else(|| TRANSFORMS.iter().find(|(n, _)| *n == name).map(|(_, i)| i.to_string()))
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(default)]
 pub struct Replacement {
@@ -284,15 +401,24 @@ impl Default for Settings {
             pause_music: false,
             languages: vec![],
             language: String::new(),
+            script: "native".into(),
             translate_to_english: false,
             local_api: LocalApi::default(),
             stt: Stt::default(),
             cleanup: Cleanup::default(),
             dictionary: vec![],
+            screen_context: true,
+            screen_context_cloud: false,
+            screen: Default::default(),
             replacements: vec![],
+            learn_words: true,
+            learned: vec![],
+            ignored_words: vec![],
             restore_clipboard: true,
             history_enabled: true,
+            history_24h: false,
             voice_commands: true,
+            send_it: true,
             usage_stats: true,
             share_telemetry: false,
             display_name: String::new(),
@@ -303,9 +429,13 @@ impl Default for Settings {
             copy_last_hotkey: String::new(),
             // macOS only: elsewhere ⌥⇧ switches keyboard layouts, and no modifier wait guards the ⌘C.
             command_hotkey: if cfg!(target_os = "macos") { "Alt+Shift+Space" } else { "" }.into(),
+            undo_edit_hotkey: String::new(),
+            transforms: TRANSFORMS.iter().map(|(n, i)| Transform { name: n.to_string(), instruction: i.to_string(), shortcut: String::new() }).collect(),
+            auto_transform: String::new(),
             autostart: false,
             sounds: true,
             dismissed: vec![],
+            language_offer: String::new(),
             pill_idle: true,
             pill_hidden_until: 0,
             pill_in_recordings: false,
@@ -335,6 +465,10 @@ impl Default for Settings {
             meeting_auto_stop: true,
             meeting_end: String::new(),
             meeting_audio_days: 30,
+            clip_days: 14,
+            watch_folder: String::new(),
+            watch_format: "txt".into(),
+            watch_subfolder: false,
         }
     }
 }
@@ -368,9 +502,11 @@ impl Default for Cleanup {
             model: "gemma3:1b".into(),
             base_url: String::new(),
             style: "default".into(),
+            level: "medium".into(),
             custom_instructions: String::new(),
             match_app: false,
             app_styles: vec![],
+            app_instructions: String::new(),
         }
     }
 }
@@ -412,6 +548,26 @@ impl Settings {
             true
         });
         self.languages.truncate(3);
+        if std::mem::take(&mut self.translate_to_english) && self.auto_transform.is_empty() {
+            self.auto_transform = TRANSLATE.into();
+        }
+        // Names are how auto_transform and the shortcut slots find a transform: trimmed, unique.
+        let mut names = vec![];
+        self.transforms.retain_mut(|t| {
+            t.name = t.name.trim().to_string();
+            let k = t.name.to_lowercase();
+            !k.is_empty() && !names.contains(&k) && {
+                names.push(k);
+                true
+            }
+        });
+        self.transforms.truncate(MAX_TRANSFORMS);
+        if transform_instruction(self, &self.auto_transform).is_none() {
+            self.auto_transform.clear();
+        }
+        if !matches!(self.script.as_str(), "native" | "latin") {
+            self.script = "native".into();
+        }
         if !matches!(self.look.as_str(), "system" | "light" | "dark") {
             self.look = "system".into(); // the Classic, Ink and Foundry looks are gone: follow macOS
         }
@@ -436,11 +592,17 @@ impl Settings {
         if !SOUND_PACKS.contains(&self.sound_pack.as_str()) {
             self.sound_pack = "classic".into();
         }
+        if !matches!(self.cleanup.level.as_str(), "none" | "light" | "medium") {
+            self.cleanup.level = "medium".into();
+        }
         if !matches!(self.cleaner_memory.as_str(), "save" | "ready") {
             self.cleaner_memory = "ready".into();
         }
         if !matches!(self.meeting_audio_days, 0 | 7 | 30) {
             self.meeting_audio_days = 30;
+        }
+        if !matches!(self.clip_days, 0 | 7 | 14 | 30) {
+            self.clip_days = 14;
         }
         // No Echotype Cloud in this build: its users land on this Mac's own models, on Automatic.
         if !CLOUD && self.stt.provider == "cloud" {
@@ -653,6 +815,9 @@ pub struct HistoryEntry {
     /// The text before the first Re-run from History, so the user can go back to it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original: Option<String>,
+    /// Audio from a dictation the app quit or crashed during (recover): no text until it is transcribed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recovered: bool,
 }
 
 fn history_path() -> PathBuf {
@@ -683,6 +848,48 @@ pub fn get_history(limit: usize) -> Vec<HistoryEntry> {
     s.lines().rev().filter_map(|l| serde_json::from_str(l).ok()).take(limit).collect()
 }
 
+/// The History page's search box: up to `limit` entries holding every word of `query` in their
+/// text, what was heard, the text before a re-run or the rejected cleanup, newest first.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct HistorySearch {
+    /// Entries kept, matching or not ("12 of 340").
+    pub total: usize,
+    pub matched: usize,
+    pub items: Vec<HistoryEntry>,
+}
+
+pub fn search_history(query: &str, limit: usize) -> HistorySearch {
+    search_history_in(&history_path(), query, limit)
+}
+
+// ponytail: reads all of history.jsonl (HISTORY_CAP entries at most) per keystroke, after a debounce.
+fn search_history_in(path: &Path, query: &str, limit: usize) -> HistorySearch {
+    let all: Vec<HistoryEntry> = std::fs::read_to_string(path).unwrap_or_default().lines().rev().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let has = word_match(query);
+    // A recovered dictation has no text yet: listed with the rest, never a match for a word.
+    let hits: Vec<HistoryEntry> = all.iter().filter(|e| query.trim().is_empty() || has(&[&e.text, &e.raw, e.original.as_deref().unwrap_or(""), e.cleaned.as_deref().unwrap_or("")].join("\n"))).cloned().collect();
+    HistorySearch { total: all.len(), matched: hits.len(), items: hits.into_iter().take(limit).collect() }
+}
+
+/// Search's word match, shared by History, Notes and the MCP tools: whether a text holds every
+/// word of `query` (any text for ""), in any case and with or without accents ("cafe" finds "Café").
+pub fn word_match(query: &str) -> impl Fn(&str) -> bool {
+    let words: Vec<String> = query.split_whitespace().map(fold).collect();
+    move |text| {
+        let t = fold(text);
+        words.iter().all(|w| t.contains(w.as_str()))
+    }
+}
+
+// ponytail: Latin accents only, one char for one; Unicode decomposition (a new crate) if other scripts need it.
+const ACCENTED: &str = "àáâãäåāăąçćĉċčďđèéêëēĕėęěĝğġģĥìíîïĩīĭįıĵķĺļľŀłñńņňòóôõöøōŏőŕŗřśŝşšţťùúûüũūŭůűųŵýÿŷźżž";
+const PLAIN: &str = "aaaaaaaaacccccddeeeeeeeeegggghiiiiiiiiijklllllnnnnooooooooorrrssssttuuuuuuuuuuwyyyzzz";
+
+/// Lowercase without accents, for word_match.
+fn fold(s: &str) -> String {
+    s.chars().flat_map(char::to_lowercase).map(|c| ACCENTED.chars().position(|a| a == c).and_then(|i| PLAIN.chars().nth(i)).unwrap_or(c)).collect()
+}
+
 /// A fix from the History page: replaces the text of the entry recorded at `ts`.
 /// Replaces one entry's text; returns the text it had, so the in-memory "last transcript" can follow.
 pub fn update_history(ts: u64, text: &str) -> Result<String, String> {
@@ -700,7 +907,8 @@ pub fn rerun_history(new: &HistoryEntry) -> Result<(), String> {
 }
 
 fn rerun_history_in(path: &Path, new: &HistoryEntry) -> Result<(), String> {
-    edit_history_in(path, new.ts, |e| *e = HistoryEntry { original: e.original.take().or_else(|| Some(e.text.clone())), ..new.clone() }).map(drop)
+    // A recovered dictation had no text to go back to.
+    edit_history_in(path, new.ts, |e| *e = HistoryEntry { original: e.original.take().or_else(|| Some(e.text.clone()).filter(|t| !t.is_empty())), ..new.clone() }).map(drop)
 }
 
 /// Changes the entry recorded at `ts` and returns it as it was.
@@ -735,10 +943,35 @@ pub fn clear_history() -> Result<(), String> {
     }
 }
 
-// ---------- the audio of recent dictations, for Re-run in History ----------
+/// "Delete after 24 hours": drops the entries recorded more than a day ago, with their audio.
+/// Run at launch, hourly, on choosing it and before History is read.
+pub fn prune_history() {
+    prune_history_in(&history_path(), &clips_dir(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64));
+}
 
-/// How many dictations keep their audio (16 kHz 16-bit WAV, about 1 MB a 30 s dictation).
-const CLIPS_KEPT: usize = 20;
+fn prune_history_in(path: &Path, clips: &Path, now_ms: u64) {
+    let _g = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
+    prune_clips_in(clips, 1, now_ms);
+    let Ok(old) = std::fs::read_to_string(path) else { return };
+    let young = |l: &&str| serde_json::from_str::<HistoryEntry>(l).is_ok_and(|e| now_ms.saturating_sub(e.ts) <= DAY_MS);
+    let kept: Vec<&str> = old.lines().filter(young).collect();
+    if kept.len() < old.lines().filter(|l| !l.trim().is_empty()).count() {
+        let _ = write_atomic(path, &kept.iter().map(|l| format!("{l}\n")).collect::<String>());
+    }
+}
+
+/// Whether entry `ts` is still kept under these settings: what the History page and the MCP
+/// server show between two prunes, and nothing at all once history is off ("Don't keep").
+pub fn history_keeps(s: &Settings, ts: u64, now_ms: u64) -> bool {
+    s.history_enabled && (!s.history_24h || now_ms.saturating_sub(ts) <= DAY_MS)
+}
+
+// ---------- the audio of recent dictations, for play and Re-run in History ----------
+
+/// At most this many dictations keep their audio (16 kHz 16-bit WAV, about 320 KB a 10 s
+/// dictation), however recent: the History page lists 200.
+const CLIPS_KEPT: usize = 200;
+const DAY_MS: u64 = 86_400_000;
 
 fn clips_dir() -> PathBuf {
     data_dir().join("clips")
@@ -754,14 +987,15 @@ pub fn save_clip(ts: u64, wav: &[u8]) -> Result<(), String> {
     save_clip_in(&clips_dir(), ts, wav)
 }
 
+/// Every kept clip in `dir` as (ts, path); a recording in progress (`<ts>.part.wav`) is not one.
+fn clips_in(dir: &Path) -> Vec<(u64, PathBuf)> {
+    std::fs::read_dir(dir).map(|rd| rd.filter_map(|f| f.ok().map(|f| f.path())).filter_map(|p| Some((p.file_stem()?.to_str()?.parse().ok()?, p))).collect()).unwrap_or_default()
+}
+
 fn save_clip_in(dir: &Path, ts: u64, wav: &[u8]) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     std::fs::write(dir.join(format!("{ts}.wav")), wav).map_err(|e| e.to_string())?;
-    let mut kept: Vec<(u64, PathBuf)> = std::fs::read_dir(dir)
-        .map_err(|e| e.to_string())?
-        .filter_map(|f| f.ok().map(|f| f.path()))
-        .filter_map(|p| Some((p.file_stem()?.to_str()?.parse().ok()?, p)))
-        .collect();
+    let mut kept = clips_in(dir);
     kept.sort_unstable_by_key(|(ts, _)| std::cmp::Reverse(*ts));
     for (_, p) in kept.iter().skip(CLIPS_KEPT) {
         let _ = std::fs::remove_file(p);
@@ -769,9 +1003,64 @@ fn save_clip_in(dir: &Path, ts: u64, wav: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// The ts of every entry whose audio is kept (History shows a play button for them).
+pub fn kept_clips() -> Vec<u64> {
+    clips_in(&clips_dir()).into_iter().map(|(ts, _)| ts).collect()
+}
+
+/// Deletes the audio of dictations recorded more than `days` ago (Settings → Keep dictation
+/// audio); 0 deletes all of it. The entries and their text stay.
+pub fn prune_clips(days: u32) {
+    prune_clips_in(&clips_dir(), days, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64));
+}
+
+fn prune_clips_in(dir: &Path, days: u32, now_ms: u64) {
+    for (ts, p) in clips_in(dir) {
+        if now_ms.saturating_sub(ts) > u64::from(days) * DAY_MS {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
 /// Every kept clip: history was cleared or switched off.
 pub fn clear_clips() {
     let _ = std::fs::remove_dir_all(clips_dir());
+}
+
+// ---------- recovery: a dictation the app quit or crashed during ----------
+
+/// Where recording `ts` is written while it goes (lib.rs Spool); deleted once it is transcribed.
+pub fn recording_path(ts: u64) -> PathBuf {
+    clips_dir().join(format!("{ts}.part.wav"))
+}
+
+/// Under 0.3 s of audio (WAV header + 16-bit samples) is nothing to transcribe.
+const MIN_RECOVERED_BYTES: u64 = 44 + 2 * 16_000 * 3 / 10;
+
+/// At launch: each recording left behind becomes that entry's audio and a "Recovered dictation"
+/// in History, to transcribe from there. With `keep` off (history off, or no audio kept) they are
+/// deleted. Returns the entries added.
+pub fn recover(keep: bool) -> Vec<u64> {
+    recover_in(&clips_dir(), &history_path(), keep)
+}
+
+fn recover_in(dir: &Path, history: &Path, keep: bool) -> Vec<u64> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return vec![] };
+    let parts: Vec<(u64, PathBuf)> = rd.filter_map(|f| f.ok().map(|f| f.path())).filter_map(|p| Some((p.file_name()?.to_str()?.strip_suffix(".part.wav")?.parse().ok()?, p))).collect();
+    let mut out = vec![];
+    for (ts, part) in parts {
+        let big = std::fs::metadata(&part).is_ok_and(|m| m.len() >= MIN_RECOVERED_BYTES);
+        if !keep || !big || std::fs::rename(&part, dir.join(format!("{ts}.wav"))).is_err() {
+            let _ = std::fs::remove_file(&part);
+            continue;
+        }
+        let entry = HistoryEntry { ts, raw: String::new(), text: String::new(), stt_ms: 0, cleanup_ms: 0, stt_provider: String::new(), cleanup_provider: None, no_cleanup: false, cleaned: None, original: None, recovered: true };
+        match append_history_to(history, &entry) {
+            Ok(()) => out.push(ts),
+            Err(e) => eprintln!("echotype: could not add a recovered dictation to history: {e}"),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -789,6 +1078,8 @@ mod tests {
         assert_eq!(s.cleanup.provider, "ollama");
         assert_eq!(s.cleanup.model, "gemma3:1b");
         assert_eq!(s.cleanup.style, "default");
+        assert_eq!(s.cleanup.level, "medium", "today's cleanup");
+        assert!(s.send_it && s.undo_edit_hotkey.is_empty() && s.language_offer.is_empty());
         assert_eq!(s.local_api, LocalApi { enabled: false, port: 7811 });
         assert!(!s.onboarded);
         assert!(s.detect_meetings && s.call_start == CallStart::default() && s.call_start.zoom == "ask", "calls are offered, never recorded unasked");
@@ -823,6 +1114,7 @@ mod tests {
         assert!(s.prefer_builtin_mic && s.input_device.is_none(), "System default skips Bluetooth mics for upgraders too");
         assert!(!s.pause_music, "music is never paused unasked");
         assert!(s.sounds && s.dismissed.is_empty());
+        assert!(s.send_it && s.cleanup.level == "medium" && s.undo_edit_hotkey.is_empty(), "upgraders get \"send it\", today's cleanup and no new shortcut");
         assert!(s.pill_idle && s.pill_hidden_until == 0 && !s.pill_in_recordings, "the idle pill is on for upgraders, hidden from capture");
         assert!(s.live_text, "upgraders see their words as they speak");
         assert_eq!(s.look, "system", "upgraders follow the system appearance");
@@ -837,6 +1129,29 @@ mod tests {
         assert!(!s.cleanup.match_app && s.cleanup.app_styles.is_empty(), "upgraders keep one style everywhere");
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn transforms_load_unique_and_whisper_translation_becomes_the_translate_transform() {
+        let mut s: Settings = serde_json::from_str(r#"{"translate_to_english":true}"#).unwrap();
+        s.migrate();
+        assert_eq!(s.transforms.len(), TRANSFORMS.len(), "upgraders get the built-ins");
+        assert_eq!(s.auto_transform, TRANSLATE, "Translate to English keeps translating");
+        assert!(!serde_json::to_string(&s).unwrap().contains("translate_to_english"), "the old field is never written back");
+        let t = |name: &str| Transform { name: name.into(), instruction: "x".into(), shortcut: String::new() };
+        s.transforms = vec![t(" Polish "), t("polish"), t(""), t("Summarize")];
+        s.auto_transform = "Gone".into();
+        s.migrate();
+        assert_eq!(s.transforms.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Polish", "Summarize"], "trimmed, blank and repeated names dropped");
+        assert_eq!(s.auto_transform, "", "an unknown auto transform is switched off");
+        s.auto_transform = TRANSLATE.into();
+        s.migrate();
+        assert_eq!(s.auto_transform, TRANSLATE, "a removed built-in still applies by name");
+        assert!(transform_instruction(&s, TRANSLATE).unwrap().contains("English"));
+        assert_eq!(transform_instruction(&s, "Summarize").as_deref(), Some("x"), "the user's own instruction");
+        s.transforms = (0..20).map(|i| t(&format!("T{i}"))).collect();
+        s.migrate();
+        assert_eq!(s.transforms.len(), MAX_TRANSFORMS);
     }
 
     #[test]
@@ -879,6 +1194,18 @@ mod tests {
     }
 
     #[test]
+    fn the_script_choice_defaults_to_native() {
+        let load = |j: &str| {
+            let mut s: Settings = serde_json::from_str(j).unwrap();
+            s.migrate();
+            s.script
+        };
+        assert_eq!(load("{}"), "native", "upgraders keep their language's own script");
+        assert_eq!(load(r#"{"script":"latin"}"#), "latin");
+        assert_eq!(load(r#"{"script":"cyrillic"}"#), "native", "an unknown value loads as native");
+    }
+
+    #[test]
     fn a_stale_save_keeps_what_rust_wrote_and_applies_what_the_window_changed() {
         let base = Settings::default(); // what the window loaded
         let mut current = base.clone(); // Rust wrote since then
@@ -909,7 +1236,7 @@ mod tests {
         assert_eq!(app_style(&c, Some("com.google.Chrome")), "formal", "browsers keep the user's style");
         assert_eq!(app_style(&c, Some("")), "formal");
         assert_eq!(app_style(&c, None), "formal", "Echotype itself or not known");
-        let row = |id: &str, style: &str| AppStyle { id: id.into(), name: id.into(), style: style.into() };
+        let row = |id: &str, style: &str| AppStyle { id: id.into(), name: id.into(), style: style.into(), ..Default::default() };
         c.app_styles = vec![row("com.tinyspeck.slackmacgap", "formal"), row("com.apple.Terminal", ""), row("com.google.Chrome", "verbatim")];
         assert_eq!(app_style(&c, slack), "formal", "the user's pick beats the built-in one");
         assert_eq!(app_style(&c, Some("com.apple.Terminal")), "formal", "\"\" is the user's style");
@@ -919,11 +1246,43 @@ mod tests {
     }
 
     #[test]
+    fn an_apps_own_cleanup_and_languages_beat_the_users() {
+        let mut s = Settings { languages: vec!["en".into()], ..Settings::default() };
+        s.cleanup.enabled = true;
+        let row = |id: &str, cleanup, languages: &[&str]| AppStyle { id: id.into(), name: id.into(), cleanup, languages: languages.iter().map(|l| l.to_string()).collect(), ..Default::default() };
+        s.cleanup.app_styles = vec![row("com.apple.Terminal", Some(false), &[]), row("net.whatsapp.WhatsApp", None, &["hi", "en"]), row("com.apple.mail", Some(true), &["auto"])];
+        let run = |s: &Settings, id: &str| {
+            let mut s = s.clone();
+            apply_app(&mut s, id);
+            (s.cleanup.enabled, s.languages, s.cleanup.style)
+        };
+        assert_eq!(run(&s, "com.apple.Terminal"), (true, vec!["en".into()], "default".into()), "off: the user's everything");
+        s.cleanup.match_app = true;
+        assert_eq!(run(&s, "com.apple.Terminal"), (false, vec!["en".into()], "default".into()), "no cleanup, the user's languages and style (\"\")");
+        assert_eq!(run(&s, "net.whatsapp.WhatsApp"), (true, vec!["hi".into(), "en".into()], "default".into()), "the user's cleanup, the app's languages");
+        assert_eq!(run(&s, "com.apple.mail"), (true, vec![], "default".into()), "\"auto\": any language");
+        assert_eq!(run(&s, "com.googlecode.iterm2"), (true, vec!["en".into()], "verbatim".into()), "no row: the user's, in the built-in style");
+        s.cleanup.enabled = false;
+        assert!(run(&s, "com.apple.mail").0, "an app can turn cleanup on too");
+        s.cleanup.app_styles[0].instructions = "No full stop at the end".into();
+        let mut t = s.clone();
+        apply_app(&mut t, "com.apple.Terminal");
+        assert_eq!((t.cleanup.app_instructions.as_str(), app_instructions(&s.cleanup, "com.apple.Terminal")), ("No full stop at the end", "No full stop at the end"));
+        apply_app(&mut t, "com.apple.mail");
+        assert_eq!(t.cleanup.app_instructions, "", "another app's own, or none");
+        s.cleanup.match_app = false;
+        assert_eq!(app_instructions(&s.cleanup, "com.apple.Terminal"), "", "only while Match the app is on");
+        let old: AppStyle = serde_json::from_str(r#"{"id":"com.apple.mail","name":"Mail","style":""}"#).unwrap();
+        assert_eq!(old.instructions, "", "rows saved before instructions read as none");
+        assert!(!serde_json::to_string(&s).unwrap().contains("app_instructions"), "the app's instructions for one run are never saved");
+    }
+
+    #[test]
     fn settings_round_trip() {
         let mut s = Settings::default();
         s.dictionary = vec!["Arnav".into()];
         s.replacements = vec![Replacement { from: "my email".into(), to: "me@example.com".into() }];
-        s.cleanup.app_styles = vec![AppStyle { id: "com.apple.mail".into(), name: "Mail".into(), style: "casual".into() }];
+        s.cleanup.app_styles = vec![AppStyle { id: "com.apple.mail".into(), name: "Mail".into(), style: "casual".into(), cleanup: Some(false), languages: vec!["hi".into()], instructions: "Sign off with Best, Aditya".into() }];
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
     }
@@ -990,7 +1349,7 @@ mod tests {
                 let path = path.clone();
                 std::thread::spawn(move || {
                     for i in 0..25u64 {
-                        let e = HistoryEntry { ts: t * 1000 + i, raw: "r".into(), text: "t".into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false, cleaned: None, original: None };
+                        let e = HistoryEntry { ts: t * 1000 + i, raw: "r".into(), text: "t".into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false, cleaned: None, original: None, recovered: false };
                         append_history_to(&path, &e).unwrap();
                     }
                 })
@@ -1008,10 +1367,38 @@ mod tests {
     }
 
     #[test]
+    fn word_match_needs_every_word_in_any_case_and_with_or_without_accents() {
+        assert_eq!(ACCENTED.chars().count(), PLAIN.chars().count(), "one plain letter per accented one");
+        let has = word_match("CAFE  résumé");
+        assert!(has("Lunch at the Café, then fix my resume"));
+        assert!(!has("Lunch at the café"), "every word");
+        assert!(word_match("")("anything") && word_match("Łódź")("lodz") && word_match("ok")("Ökonomie"));
+    }
+
+    #[test]
+    fn history_search_finds_words_in_any_text_an_entry_kept() {
+        let path = scratch("history-search").join("history.jsonl");
+        let e = |ts: u64, raw: &str, text: &str| HistoryEntry { ts, raw: raw.into(), text: text.into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false, cleaned: None, original: None, recovered: false };
+        append_history_to(&path, &e(1, "um invoice for arnav", "Invoice for Arnav.")).unwrap();
+        append_history_to(&path, &HistoryEntry { original: Some("Ship the Café menu".into()), ..e(2, "ship it", "Ship it.") }).unwrap();
+        append_history_to(&path, &HistoryEntry { cleaned: Some("Call Midhun at noon.".into()), ..e(3, "call midhun at noon", "call midhun at noon") }).unwrap();
+        append_history_to(&path, &HistoryEntry { recovered: true, ..e(4, "", "") }).unwrap();
+        let ts = |q: &str, limit| search_history_in(&path, q, limit).items.iter().map(|e| e.ts).collect::<Vec<_>>();
+        assert_eq!(ts("", 10), [4, 3, 2, 1], "no query: all, newest first, a recovered one too");
+        assert_eq!(ts("INVOICE arnav", 10), [1]);
+        assert_eq!(ts("cafe menu", 10), [2], "the text before a re-run, without its accent");
+        assert_eq!(ts("noon", 10), [3]);
+        assert_eq!(ts("um invoice", 10), [1], "what was heard");
+        assert_eq!(ts("invoice ship", 10), Vec::<u64>::new(), "every word in one entry");
+        let r = search_history_in(&path, "i", 1);
+        assert_eq!((r.total, r.matched, r.items.len()), (4, 3, 1), "counts past the limit");
+    }
+
+    #[test]
     fn update_history_changes_only_that_entry() {
         let path = scratch("history-update").join("history.jsonl");
         for ts in 1..=3u64 {
-            let e = HistoryEntry { ts, cleaned: None, raw: format!("r{ts}"), text: format!("t{ts}"), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false, original: None };
+            let e = HistoryEntry { ts, cleaned: None, raw: format!("r{ts}"), text: format!("t{ts}"), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false, original: None, recovered: false };
             append_history_to(&path, &e).unwrap();
         }
         let before: Vec<String> = std::fs::read_to_string(&path).unwrap().lines().map(String::from).collect();
@@ -1027,7 +1414,7 @@ mod tests {
     #[test]
     fn a_rerun_replaces_the_entry_and_keeps_its_first_text() {
         let path = scratch("history-rerun").join("history.jsonl");
-        let e = |ts, text: &str| HistoryEntry { ts, raw: "r".into(), text: text.into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "local:tiny.en".into(), cleanup_provider: None, no_cleanup: false, cleaned: None, original: None };
+        let e = |ts, text: &str| HistoryEntry { ts, raw: "r".into(), text: text.into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "local:tiny.en".into(), cleanup_provider: None, no_cleanup: false, cleaned: None, original: None, recovered: false };
         for ts in 1..=2 {
             append_history_to(&path, &e(ts, "first")).unwrap();
         }
@@ -1044,14 +1431,98 @@ mod tests {
     #[test]
     fn only_the_newest_clips_are_kept() {
         let dir = scratch("clips");
-        for ts in (1..=25u64).rev().chain([30]) {
+        let n = CLIPS_KEPT as u64;
+        for ts in (1..=n + 5).rev().chain([n + 10]) {
             save_clip_in(&dir, ts * 1000, b"RIFF").unwrap();
         }
         std::fs::write(dir.join("notes.txt"), "").unwrap(); // not a clip: never counted or removed
-        let mut kept: Vec<u64> = std::fs::read_dir(&dir).unwrap().filter_map(|f| f.unwrap().path().file_stem()?.to_str()?.parse().ok()).collect();
+        std::fs::write(dir.join("1.part.wav"), "").unwrap(); // a recording in progress, likewise
+        let mut kept: Vec<u64> = clips_in(&dir).into_iter().map(|(ts, _)| ts).collect();
         kept.sort();
-        assert_eq!(kept, (7..=25).chain([30]).map(|t| t * 1000).collect::<Vec<_>>(), "the 20 newest by time, whatever order they were written in");
-        assert!(dir.join("notes.txt").exists());
+        assert_eq!(kept, (7..=n + 5).chain([n + 10]).map(|t| t * 1000).collect::<Vec<_>>(), "the newest by time, whatever order they were written in");
+        assert!(dir.join("notes.txt").exists() && dir.join("1.part.wav").exists());
+    }
+
+    #[test]
+    fn old_clips_go_after_their_days_and_zero_keeps_none() {
+        let dir = scratch("clips-prune");
+        let now = 100 * DAY_MS;
+        for days_ago in [1, 6, 8, 13, 15, 29, 31] {
+            save_clip_in(&dir, now - days_ago * DAY_MS, b"RIFF").unwrap();
+        }
+        std::fs::write(dir.join(format!("{}.part.wav", now - 40 * DAY_MS)), "").unwrap();
+        let left = |days| {
+            prune_clips_in(&dir, days, now);
+            let mut v: Vec<u64> = clips_in(&dir).into_iter().map(|(ts, _)| (now - ts) / DAY_MS).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(left(30), [1, 6, 8, 13, 15, 29]);
+        assert_eq!(left(14), [1, 6, 8, 13]);
+        assert_eq!(left(7), [1, 6]);
+        assert_eq!(left(0), Vec::<u64>::new(), "0: no audio kept");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "the recording in progress is not pruned");
+    }
+
+    #[test]
+    fn delete_after_24_hours_drops_older_entries_and_their_audio() {
+        let dir = scratch("history-24h");
+        let (path, clips) = (dir.join("history.jsonl"), dir.join("clips"));
+        let now = 100 * DAY_MS;
+        for ago in [DAY_MS + 1, DAY_MS, 60_000] {
+            let e = HistoryEntry { ts: now - ago, raw: "r".into(), text: "t".into(), stt_ms: 1, cleanup_ms: 0, stt_provider: "x".into(), cleanup_provider: None, no_cleanup: false, cleaned: None, original: None, recovered: false };
+            append_history_to(&path, &e).unwrap();
+            save_clip_in(&clips, now - ago, b"RIFF").unwrap();
+        }
+        std::fs::write(clips.join(format!("{}.part.wav", now - 2 * DAY_MS)), "").unwrap(); // a recording in progress
+        prune_history_in(&path, &clips, now);
+        let left: Vec<u64> = std::fs::read_to_string(&path).unwrap().lines().map(|l| now - serde_json::from_str::<HistoryEntry>(l).unwrap().ts).collect();
+        assert_eq!(left, [DAY_MS, 60_000], "a day old stays until it is older");
+        let mut audio: Vec<u64> = clips_in(&clips).into_iter().map(|(ts, _)| now - ts).collect();
+        audio.sort();
+        assert_eq!(audio, [60_000, DAY_MS], "their audio goes with them");
+        assert!(clips.join(format!("{}.part.wav", now - 2 * DAY_MS)).exists());
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        prune_history_in(&path, &clips, now);
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before, "nothing to drop: not rewritten");
+        prune_history_in(&dir.join("none.jsonl"), &dir.join("no-clips"), now); // no history yet: fine
+        assert!(!dir.join("none.jsonl").exists());
+    }
+
+    #[test]
+    fn keep_history_has_three_choices_on_two_fields() {
+        let now = 10 * DAY_MS;
+        let s = |on, day| Settings { history_enabled: on, history_24h: day, ..Default::default() };
+        assert!(history_keeps(&s(true, false), 0, now), "Keep: forever");
+        assert!(history_keeps(&s(true, true), now - DAY_MS, now) && !history_keeps(&s(true, true), now - DAY_MS - 1, now), "Delete after 24 hours");
+        assert!(!history_keeps(&s(false, false), now, now) && !history_keeps(&s(false, true), now, now), "Don't keep");
+        let old: Settings = serde_json::from_str(r#"{"history_enabled":false}"#).unwrap();
+        assert!(!old.history_enabled && !old.history_24h, "upgraders keep what they chose");
+    }
+
+    #[test]
+    fn a_recording_left_behind_comes_back_as_a_recovered_entry() {
+        let dir = scratch("recover");
+        let history = dir.join("history.jsonl");
+        let clips = dir.join("clips");
+        std::fs::create_dir_all(&clips).unwrap();
+        let wav = crate::audio::wav_bytes(&vec![0.1; 16_000]);
+        std::fs::write(clips.join("5000.part.wav"), &wav).unwrap();
+        std::fs::write(clips.join("6000.part.wav"), crate::audio::wav_bytes(&[0.1; 100])).unwrap(); // under 0.3 s
+        std::fs::write(clips.join("7000.wav"), &wav).unwrap(); // an ordinary kept clip
+        assert_eq!(recover_in(&clips, &history, true), [5000]);
+        assert_eq!(std::fs::read(clips.join("5000.wav")).unwrap(), wav, "the audio becomes the entry's clip");
+        assert!(!clips.join("5000.part.wav").exists() && !clips.join("6000.part.wav").exists());
+        let e: HistoryEntry = serde_json::from_str(std::fs::read_to_string(&history).unwrap().trim()).unwrap();
+        assert!(e.recovered && e.ts == 5000 && e.text.is_empty());
+        assert!(recover_in(&clips, &history, true).is_empty(), "only once");
+        // Transcribing it replaces the entry; there was no text to keep as the original.
+        rerun_history_in(&history, &HistoryEntry { text: "Hello".into(), raw: "hello".into(), recovered: false, ..e }).unwrap();
+        let e: HistoryEntry = serde_json::from_str(std::fs::read_to_string(&history).unwrap().trim()).unwrap();
+        assert!(!e.recovered && e.text == "Hello" && e.original.is_none());
+        std::fs::write(clips.join("8000.part.wav"), &wav).unwrap();
+        assert!(recover_in(&clips, &history, false).is_empty() && !clips.join("8000.part.wav").exists(), "history off: deleted, not kept");
+        assert!(clips.join("7000.wav").exists());
     }
 
     #[test]

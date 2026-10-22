@@ -4,10 +4,15 @@ mod calls;
 mod capture;
 mod cleanup;
 mod cloud;
+mod context;
+mod files;
 mod hotkey;
+mod learn;
 mod llm;
+mod mcp;
 mod meeting;
 mod music;
+mod notes;
 mod notices;
 mod pill;
 mod platform;
@@ -16,8 +21,10 @@ mod stats;
 mod speakers;
 mod stt;
 mod telemetry;
+mod translit;
 mod tray;
 mod wispr;
+mod wordlist;
 
 use audio::{LevelStats, Quality};
 use hotkey::{Act, Ev};
@@ -96,12 +103,16 @@ struct AppState {
     /// The last dictated text, for paste-last and copy-last. Memory only, so it works with history
     /// off; cleared with history and when history is switched off.
     last_output: Mutex<Option<String>>,
+    /// The last dictation's words as heard, for the undo-edit shortcut. Memory only, cleared with last_output.
+    last_raw: Mutex<Option<String>>,
     /// The app the last dictation went to, with "Match the app you're typing in" on (Cleanup page: add it).
     last_app: Mutex<Option<platform::FrontApp>>,
     /// Model downloads in flight: id → fraction done, so a press can say "Model downloading 42%".
     downloads: Mutex<HashMap<String, f64>>,
     /// The mic is open, so paste-last must not replace the recording pill with its notice.
     recording: AtomicBool,
+    /// The note editor has focus, with its selection ("" for none); notes.js sends it (notes_target).
+    note: Mutex<Option<String>>,
 }
 
 enum Cmd {
@@ -117,6 +128,8 @@ enum Cmd {
     Lost(u64),
     /// Recording `n` survived SHOW_AFTER: show it and play the start (or, once locked, the lock) sound.
     Show(u64, bool),
+    /// A transform's shortcut came up: apply it, by name, to the selection.
+    Transform(String),
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -202,7 +215,7 @@ fn chip(quality: Option<Quality>, no_cleanup: bool) -> Option<&'static str> {
 
 /// Which window page fixes an error, from the error text the pipeline produced.
 fn error_action(e: &str) -> Option<&'static str> {
-    if e.starts_with("Not enough free memory") || e.contains("could not load") || e.contains("Choose a speech model") || e.contains("multilingual model") {
+    if e.starts_with("Not enough free memory") || e.contains("could not load") || e.contains("Choose a speech model") {
         Some("model")
     } else {
         None
@@ -271,6 +284,66 @@ struct Live {
     command: bool,
     /// Set as the recording ends: the partials loop stops and a partial in flight aborts.
     partials: Arc<AtomicBool>,
+    /// The app in front and the names around its caret, filled in while the user speaks (read_screen).
+    screen: Arc<Mutex<context::Screen>>,
+    /// The recording on disk as it goes, for recovery after a quit or crash.
+    spool: Option<Spool>,
+}
+
+/// How often a recording's new audio is written to its recovery file.
+const SPOOL_EVERY: Duration = Duration::from_secs(1);
+
+/// A recording written to `settings::recording_path` as it goes, so a quit or crash mid-dictation
+/// loses at most SPOOL_EVERY of it: the next launch puts it in History (settings::recover).
+/// Dropped once the dictation is done with (transcribed, discarded, silent), it deletes the file.
+struct Spool {
+    stop: mpsc::Sender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    path: std::path::PathBuf,
+}
+
+impl Spool {
+    fn start(tap: audio::Tap, path: std::path::PathBuf) -> Self {
+        let (stop, stopped) = mpsc::channel::<()>();
+        let p = path.clone();
+        let thread = std::thread::spawn(move || {
+            let (mut wav, mut at, mut rate) = (None::<meeting::Wav>, 0, 0);
+            let mut rs = audio::StreamResampler::new(audio::RATE, audio::RATE);
+            while let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(SPOOL_EVERY) {
+                let (mut new, r) = tap.since(at);
+                if r != rate {
+                    // The first write, or a reopen resampled the recording: (re)write it whole.
+                    (rate, at, rs, wav) = (r, 0, audio::StreamResampler::new(r, audio::RATE), None);
+                    new = tap.since(0).0;
+                }
+                at += new.len();
+                let res = match wav.as_mut() {
+                    Some(w) => w.append(&rs.push(&new)),
+                    None => meeting::Wav::create(&p).and_then(|mut w| w.append(&rs.push(&new)).map(|()| wav = Some(w))),
+                };
+                if let Err(e) = res {
+                    eprintln!("echotype: could not write the recording for recovery: {e}");
+                    return;
+                }
+            }
+        });
+        Self { stop, thread: Some(thread), path }
+    }
+
+    /// The mic is closed: no more to write. Non-blocking, so it adds nothing to the time to text.
+    fn halt(&self) {
+        let _ = self.stop.send(());
+    }
+}
+
+impl Drop for Spool {
+    fn drop(&mut self) {
+        self.halt();
+        if let Some(t) = self.thread.take() {
+            let _ = t.join(); // so the file cannot be written again after it is gone
+        }
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 /// One thread owns the recorder and the talk-key state machine, so every key, click, Esc and
@@ -317,6 +390,13 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                     }
                     continue;
                 }
+                // Like a retry: never over a recording or another result still on its way.
+                Cmd::Transform(name) => {
+                    if live.is_none() && !busy.load(Ordering::SeqCst) {
+                        process_edit(&app, busy.clone(), move |app, s| run_transform(app, s, &name));
+                    }
+                    continue;
+                }
                 Cmd::Rerun(r, entry) => {
                     if live.is_none() && !busy.load(Ordering::SeqCst) {
                         let kept = match entry {
@@ -342,7 +422,14 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                 Act::Start { id, locked } => match command_ready(&s, command).and_then(|()| start_recording(&app, &s, id)) {
                     Ok(mut l) => {
                         l.command = command;
-                        llm::prewarm(&s); // warm while the user talks, not after
+                        l.screen = read_screen(&app, &s, command);
+                        if !command {
+                            // Command Mode instructions are never kept, so there is nothing to recover.
+                            if s.history_enabled && s.clip_days > 0 {
+                                l.spool = Some(Spool::start(l.rec.tap(), settings::recording_path(now_ms())));
+                            }
+                        }
+                        llm::prewarm(&s, command); // warm while the user talks, not after
                         // Recording before anything shows, so the pill loop takes Esc for it (pill.rs owns Esc).
                         state(&app).recording.store(true, Ordering::SeqCst);
                         let _ = state(&app).pill_wake.send(());
@@ -411,6 +498,10 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                     let Some(l) = live.take() else { continue };
                     l.partials.store(true, Ordering::SeqCst); // first: a partial in flight lets go of the model
                     state(&app).recording.store(false, Ordering::SeqCst);
+                    if let Some(sp) = &l.spool {
+                        sp.halt();
+                    }
+                    let fallback = l.rec.fallback.clone();
                     let pcm = l.rec.stop();
                     music::set(false); // the mic is closed: the music needn't wait for transcription
                     let _ = state(&app).pill_wake.send(());
@@ -423,11 +514,11 @@ fn spawn_dictation(app: AppHandle) -> mpsc::Sender<Cmd> {
                         emit_state(&app, hint("No audio. Check your mic", Some("microphone")));
                         continue;
                     }
-                    let warning = l.lost.load(Ordering::SeqCst).then(|| "Microphone disconnected. Transcribed what was captured.".to_string());
-                    let clip = Clip { quality: st.quality(), muted_seen: st.muted_seen(), warning, speaking_ms: st.speaking_ms(), snr_db: st.floor_and_speech().map(|(floor, speech)| speech - floor), front: l.front.clone(), entry: None };
+                    let warning = l.lost.load(Ordering::SeqCst).then(|| "Microphone disconnected. Transcribed what was captured.".to_string()).or_else(|| fallback_once(fallback));
+                    let clip = Clip { quality: st.quality(), muted_seen: st.muted_seen(), warning, speaking_ms: st.speaking_ms(), snr_db: st.floor_and_speech().map(|(floor, speech)| speech - floor), front: l.front.clone(), entry: None, screen: lock(&l.screen).clone(), spool: l.spool };
                     drop(st);
                     if l.command {
-                        process_command(&app, pcm, busy.clone());
+                        process_command(&app, pcm, busy.clone(), clip.screen);
                     } else {
                         process(&app, pcm, busy.clone(), clip, true, None);
                     }
@@ -450,6 +541,7 @@ fn show_later(app: &AppHandle, id: u64, locked: bool, after: Duration) {
 /// what can't be transcribed). The error is the state to show.
 fn start_recording(app: &AppHandle, s: &Settings, id: u64) -> Result<Live, DictationState> {
     platform::wake_accessibility(); // ready by the time the words are pasted
+    learn::interrupt(); // the last paste's field is read once more before these words land
     if notices::blocked() {
         return Err(hint("This version of Echotype is retired. Update it in Account to keep dictating.", Some("update")));
     }
@@ -484,13 +576,37 @@ fn start_recording(app: &AppHandle, s: &Settings, id: u64) -> Result<Live, Dicta
             if s.live_text && s.stt.provider == "local" {
                 spawn_partials(app, s, rec.tap(), partials.clone());
             }
-            Ok(Live { id, shown: false, locked: false, rec, stats, lost, front: None, command: false, partials })
+            Ok(Live { id, shown: false, locked: false, rec, stats, lost, front: None, command: false, partials, spool: None, screen: Default::default() })
         }
         Err(_) if platform::microphone_status() == "denied" => {
             Err(DictationState { state: "error", error: Some("Microphone access is off".into()), action: Some("microphone"), ..Default::default() })
         }
         Err(e) => Err(DictationState { state: "error", error: Some(e), action: Some("microphone"), ..Default::default() }),
     }
+}
+
+/// The app in front, and with "Use text on screen" the names around its caret (for a local speech
+/// model, or the cleanup provider where it may see them) or, for Command Mode, the text around the
+/// selection (cleanup::screen_ok), read on another thread so the mic opens at once. A dictation
+/// that ends first goes without. Echotype's own window (no front app) and password managers are not read.
+fn read_screen(app: &AppHandle, s: &Settings, command: bool) -> Arc<Mutex<context::Screen>> {
+    let out = Arc::new(Mutex::new(context::Screen::default()));
+    let ok = cleanup::screen_ok(s);
+    let read = s.screen_context && (ok || !command && s.stt.provider == "local");
+    let (app, o) = (app.clone(), out.clone());
+    std::thread::spawn(move || {
+        let Some(front) = platform::frontmost_app(&app) else { return };
+        let private = context::private(&front.id);
+        lock(&o).app = front.id;
+        if let Some((before, sel, after)) = (read && !private).then(|| context::read(true)).flatten() {
+            let mut o = lock(&o);
+            o.words = context::tokens(&before, &format!("{sel}{after}"));
+            if command && ok {
+                o.around = (before, after);
+            }
+        }
+    });
+    out
 }
 
 /// Whether to start a partial now, with `secs` recorded and the last one started `since` ago
@@ -516,8 +632,8 @@ fn last_words(text: &str, max: usize) -> String {
 fn spawn_partials(app: &AppHandle, s: &Settings, tap: audio::Tap, stop: Arc<AtomicBool>) {
     let (app, s) = (app.clone(), s.clone());
     std::thread::spawn(move || {
-        let Ok((model, _)) = stt::pick_local_model(&s) else { return };
-        let (prompt, vad) = (stt::prompt(&s.dictionary), speakers::vad());
+        let Ok(model) = stt::pick_local_model(&s) else { return };
+        let (prompt, vad) = (stt::prompt(&s), speakers::vad());
         let mut last: Option<Instant> = None;
         while !stop.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(100));
@@ -526,12 +642,12 @@ fn spawn_partials(app: &AppHandle, s: &Settings, tap: audio::Tap, stop: Arc<Atom
             }
             last = Some(Instant::now());
             let pcm = tap.tail(PARTIAL_TAIL.as_secs_f32());
-            let Ok(text) = stt::transcribe_partial(&model, &pcm, &s.languages, s.translate_to_english, &prompt, vad.as_deref(), &stop) else { continue };
+            let Ok(text) = stt::transcribe_partial(&model, &pcm, &stt::languages(&s), &prompt, vad.as_deref(), &stop) else { continue };
             // Silence keeps the words already up.
             if stop.load(Ordering::SeqCst) || !cleanup::has_speech(&text) {
                 continue;
             }
-            let text = last_words(&stt::collapse_loops(&text), PARTIAL_CHARS);
+            let text = last_words(&stt::collapse_loops(&translit::apply(&s, &text)), PARTIAL_CHARS);
             lock(&state(&app).pill).set_partial(text.chars().count());
             let _ = app.emit_to("overlay", "dictation-partial", &text);
             let _ = state(&app).pill_wake.send(());
@@ -553,6 +669,24 @@ struct Clip {
     front: Option<platform::FrontApp>,
     /// The history entry this audio was recorded as: a re-run replaces its result.
     entry: Option<u64>,
+    /// Live::screen as the recording ended. A retry or re-run has none.
+    screen: context::Screen,
+    /// Live::spool, kept until the dictation is done with (its drop deletes the recovery file).
+    #[allow(dead_code)] // held for its Drop
+    spool: Option<Spool>,
+}
+
+/// Says that another mic stood in only the first time it happens for that mic, not every dictation.
+fn fallback_once(note: Option<String>) -> Option<String> {
+    static SAID: Mutex<Option<String>> = Mutex::new(None);
+    let mut said = lock(&SAID);
+    let note = note.filter(|n| said.as_ref() != Some(n))?;
+    *said = Some(note.clone());
+    Some(note)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 /// A dictation's audio kept in memory (AppState last_clip).
@@ -581,6 +715,8 @@ pub enum Rerun {
     /// A downloaded local speech model.
     Model(String),
     NoCleanup,
+    /// As set now: a recovered dictation's first transcription (History → Transcribe).
+    Same,
 }
 
 impl Rerun {
@@ -589,6 +725,7 @@ impl Rerun {
             Rerun::Lang(c) => format!("lang:{c}"),
             Rerun::Model(m) => format!("model:{m}"),
             Rerun::NoCleanup => "raw".into(),
+            Rerun::Same => "same".into(),
         }
     }
 
@@ -597,6 +734,7 @@ impl Rerun {
             Some(("lang", c)) => Some(Rerun::Lang(c.into())),
             Some(("model", m)) => Some(Rerun::Model(m.into())),
             None if id == "raw" => Some(Rerun::NoCleanup),
+            None if id == "same" => Some(Rerun::Same),
             _ => None,
         }
     }
@@ -612,6 +750,7 @@ impl Rerun {
                 s.stt.rerun_model = Some(m.clone());
             }
             Rerun::NoCleanup => s.cleanup.enabled = false,
+            Rerun::Same => {}
         }
     }
 }
@@ -619,9 +758,19 @@ impl Rerun {
 /// Clears the busy flag when dropped, so even a panicking worker can't leave dictation stuck.
 struct Busy(Arc<AtomicBool>);
 
+/// `busy` for code outside the dictation thread: a dictation or edit is being transcribed,
+/// cleaned or pasted.
+static PROCESSING: AtomicBool = AtomicBool::new(false);
+
+/// The mic is open for a dictation or one is being processed: a meeting summary waits between parts.
+pub(crate) fn dictating(app: &AppHandle) -> bool {
+    state(app).recording.load(Ordering::SeqCst) || PROCESSING.load(Ordering::SeqCst)
+}
+
 impl Drop for Busy {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
+        PROCESSING.store(false, Ordering::SeqCst);
     }
 }
 
@@ -629,11 +778,17 @@ fn main_window_focused(app: &AppHandle) -> bool {
     app.get_webview_window("main").is_some_and(|w| w.is_focused().unwrap_or(false))
 }
 
+/// The note editor's selection when it has focus in Echotype's own focused window: dictation and
+/// Command Mode go into the note (deliver), not to the clipboard.
+fn note_target(app: &AppHandle) -> Option<String> {
+    lock(&state(app).note).clone().filter(|_| main_window_focused(app))
+}
+
 /// Whether a finished dictation is pasted into the app in front rather than copied: never into
-/// Echotype's own window, and during onboarding only from its real-app step (3) on, so practice
+/// Echotype's own window, and during onboarding only from its real-app step (4) on, so practice
 /// runs land in the practice field.
 fn pastes(s: &Settings, main_focused: bool) -> bool {
-    (s.onboarded || s.onboard_step >= 3) && !main_focused
+    (s.onboarded || s.onboard_step >= 4) && !main_focused
 }
 
 /// STT + cleanup + paste + history on a worker thread, so the hotkey stays responsive.
@@ -647,15 +802,17 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
         return;
     }
     busy.store(true, Ordering::SeqCst);
+    PROCESSING.store(true, Ordering::SeqCst);
     let app = app.clone();
     let speaking_ms = clip.speaking_ms.unwrap_or(pcm.len() as u64 * 1000 / audio::RATE as u64); // a retry has no level stats
     std::thread::spawn(move || {
         let guard = Busy(busy);
         let mut s = current_settings(&app);
         if let Some(f) = clip.front.clone() {
-            s.cleanup.style = settings::app_style(&s.cleanup, Some(&f.id)).to_string();
+            settings::apply_app(&mut s, &f.id);
             *lock(&state(&app).last_app) = Some(f);
         }
+        s.screen = clip.screen.clone();
         if let Some(r) = &rerun {
             r.apply(&mut s); // after the app's style: "Without cleanup" wins
         }
@@ -667,6 +824,7 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
         }))
         .unwrap_or_else(|_| Err("Transcription crashed unexpectedly".into()));
         let failed = result.is_err();
+        let heard = result.as_ref().is_ok_and(|o| !o.text.is_empty());
         // Keep the audio for retry_last (failed) and Re-run last; it replaces the one before.
         *lock(&state(&app).last_clip) = keep(pcm, failed, clip.entry);
         let ev = match result {
@@ -682,14 +840,24 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
             Ok(out) => {
                 *lock(&state(&app).last_output) = Some(out.text.clone());
                 *lock(&state(&app).last_cleaned) = out.cleaned.clone();
-                let paste = paste && pastes(&s, main_window_focused(&app));
+                *lock(&state(&app).last_raw) = Some(out.raw.clone());
+                let note = paste && note_target(&app).is_some();
+                let paste = note || paste && pastes(&s, main_window_focused(&app));
                 let warning = out.warning.clone().or(clip.warning);
                 let chip = chip(clip.quality, out.no_cleanup && out.warning.is_none());
                 // Nothing focused takes text (the desktop, a list, Accessibility off): no ⌘V into nowhere.
-                let nowhere = paste && platform::paste_target() == platform::Target::Card;
+                let nowhere = paste && !note && platform::paste_target() == platform::Target::Card;
                 let res = deliver(&app, &s, &out.text, paste, nowhere);
+                // "Send it": Return only once the text is in the app.
+                if res.is_ok() && paste && !note && out.send && rerun.is_none() && let Err(e) = platform::press_return(&app) {
+                    eprintln!("echotype: send it: {e}");
+                }
+                // A sent message has nothing left to correct.
+                if res.is_ok() && paste && !nowhere && !note && !out.send && rerun.is_none() && s.learn_words {
+                    learn::watch(&app, out.text.clone());
+                }
                 // After the paste, not before: the disk writes took 15-20 ms off the time to text.
-                if rerun.is_none() {
+                if rerun.is_none() || rerun == Some(Rerun::Same) {
                     record_stats(&app, &s, stats::Source::Dictation, &out.text, speaking_ms); // a re-run's words were counted once
                     telemetry::dictation(&s, stats::words(&out.text), out.stt_ms, out.cleanup_ms);
                 }
@@ -705,7 +873,7 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
                     let mut kept = lock(&st.last_clip);
                     let k = kept.as_mut()?;
                     k.entry = Some(ts);
-                    clip.entry.is_none().then(|| (ts, audio::wav_bytes(&k.pcm)))
+                    (clip.entry.is_none() && s.clip_days > 0).then(|| (ts, audio::wav_bytes(&k.pcm)))
                 });
                 // A new entry keeps its audio on disk too, for Re-run in History.
                 if let Some(Err(e)) = wav.map(|(ts, wav)| settings::save_clip(ts, &wav)) {
@@ -737,13 +905,32 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
         };
         drop(guard);
         emit_state(&app, ev);
+        if heard && rerun.is_none() {
+            offer_language(&app, &s); // after the paste: it runs the tiny language model again
+        }
+    });
+}
+
+/// A language the detector heard clearly that is not one of the user's: offered once in the
+/// sidebar (Settings.language_offer), never again for that language.
+fn offer_language(app: &AppHandle, s: &Settings) {
+    let Some(code) = lock(&state(app).last_clip).as_ref().and_then(|k| stt::language_to_offer(s, &k.pcm)) else { return };
+    let _ = commit_settings(app, |old| {
+        let mut new = old.clone();
+        new.dismissed.push(format!("lang_offer:{code}"));
+        new.language_offer = code.clone();
+        new
     });
 }
 
 /// Pastes `text`, or copies it when `paste` is off. `nowhere`: nothing focused takes text.
 /// The error says whether the text is on the clipboard, as platform::paste does.
 fn deliver(app: &AppHandle, s: &Settings, text: &str, paste: bool, nowhere: bool) -> Result<(), (String, bool)> {
-    if nowhere && !platform::accessibility_granted() {
+    if paste && main_window_focused(app) {
+        // Only the note editor pastes into Echotype's own window (note_target): notes.js puts the
+        // text in at the cursor, with no ⌘V and the clipboard left alone.
+        app.emit_to("main", "note-insert", text).map_err(|e| (e.to_string(), false))
+    } else if nowhere && !platform::accessibility_granted() {
         // As before: on the clipboard, since there is no way to paste it.
         platform::copy(text).map_err(|e| (e, false)).and(Err(("Accessibility is off, so Echotype copied instead of pasting".into(), true)))
     } else if nowhere {
@@ -765,7 +952,7 @@ fn command_ready(s: &Settings, command: bool) -> Result<(), DictationState> {
         return Err(hint("Command Mode needs Accessibility to read your selection", Some("accessibility")));
     }
     match cleanup::command_blocked(s, cleanup::keyless(s)) {
-        Some(why) => Err(hint(why, Some("cleanup"))),
+        Some(why) => Err(hint(why, Some(if s.cleanup.provider == "echotype" { "writer" } else { "cleanup" }))),
         None => Ok(()),
     }
 }
@@ -774,67 +961,138 @@ fn command_ready(s: &Settings, command: bool) -> Result<(), DictationState> {
 /// cleanup provider apply it and paste the result over the selection. On any failure the user's
 /// text stays as it was and the pill says why.
 // ponytail: results stay out of history and stats; add them if people want edits counted.
-fn process_command(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>) {
+fn process_command(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, screen: context::Screen) {
     if pcm.len() < MIN_SAMPLES {
         emit_state(app, hint("Didn't catch that", None));
         return;
     }
+    process_edit(app, busy, move |app, s| run_command(app, s, &pcm, screen));
+}
+
+/// Command Mode or a transform on a worker thread, busy meanwhile; a panic is an error state.
+fn process_edit(app: &AppHandle, busy: Arc<AtomicBool>, run: impl FnOnce(&AppHandle, &Settings) -> DictationState + Send + 'static) {
     busy.store(true, Ordering::SeqCst);
+    PROCESSING.store(true, Ordering::SeqCst);
     let app = app.clone();
     std::thread::spawn(move || {
         let guard = Busy(busy);
-        let s = current_settings(&app);
-        let ev = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_command(&app, &s, &pcm)))
+        let mut s = current_settings(&app);
+        // The app's own instructions (Cleanup → Style per app), read now: the edit goes to the app in front.
+        if let Some(f) = platform::frontmost_app(&app).filter(|_| s.cleanup.match_app) {
+            s.cleanup.app_instructions = settings::app_instructions(&s.cleanup, &f.id).to_string();
+        }
+        let ev = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&app, &s)))
             .unwrap_or_else(|_| DictationState { state: "error", error: Some("Command Mode crashed unexpectedly. Your text is unchanged.".into()), ..Default::default() });
         drop(guard);
         emit_state(&app, ev);
     });
 }
 
-fn run_command(app: &AppHandle, s: &Settings, pcm: &[f32]) -> DictationState {
-    let error = |e: String| DictationState { state: "error", error: Some(e), ..Default::default() };
-    // The selection first, while it is still the one the user meant. Echotype's own window, or
-    // focus that takes no text: nothing to read, so the instruction is something to write.
+fn edit_error(e: String) -> DictationState {
+    DictationState { state: "error", error: Some(e), ..Default::default() }
+}
+
+/// Where an edit's result goes (`paste`, `nowhere` as in deliver) and the selected text. Read
+/// first, while it is still the one the user meant. Echotype's own window: nothing to read.
+/// Focus that takes no text (a web page) can still have a selection: it is read, and the result
+/// shows on the card.
+// ponytail: on the desktop ⌘C copies a selected file's name, which then reads as the selection;
+// the result only goes to the card. Skip the read when nothing has focus if that confuses anyone.
+fn edit_target(app: &AppHandle, s: &Settings) -> Result<(bool, bool, Option<String>), DictationState> {
+    // The note editor says what is selected; ⌘C into Echotype's own webview is not needed.
+    if let Some(sel) = note_target(app) {
+        return Ok((true, false, Some(sel).filter(|t| !t.trim().is_empty())));
+    }
     let paste = pastes(s, main_window_focused(app));
     let nowhere = paste && platform::paste_target() == platform::Target::Card;
-    let selection = if !paste || nowhere {
-        None
-    } else if !platform::wait_for_modifiers_up(Duration::from_millis(500)) {
-        return error("Let go of the shortcut to edit. Your text is unchanged.".into()); // a ⌘C now would carry its modifiers
-    } else {
-        match platform::copy_selection(app) {
-            Ok(t) => t,
-            Err(e) => return error(format!("Couldn't read the selection: {e}. Your text is unchanged.")),
-        }
+    if !paste {
+        return Ok((paste, nowhere, None));
+    }
+    if !platform::wait_for_modifiers_up(Duration::from_millis(500)) {
+        return Err(edit_error("Let go of the shortcut to edit. Your text is unchanged.".into())); // a ⌘C now would carry its modifiers
+    }
+    match platform::copy_selection(app) {
+        Ok(t) => Ok((paste, nowhere, t.filter(|t| !t.trim().is_empty()))),
+        Err(e) => Err(edit_error(format!("Couldn't read the selection: {e}. Your text is unchanged."))),
+    }
+}
+
+/// `screen`: read as the recording started (read_screen), for the edit only, not the instruction.
+fn run_command(app: &AppHandle, s: &Settings, pcm: &[f32], screen: context::Screen) -> DictationState {
+    let (paste, nowhere, selection) = match edit_target(app, s) {
+        Ok(t) => t,
+        Err(e) => return e,
     };
     emit_state(app, simple("transcribing"));
-    // The instruction as spoken: no cleanup pass, which would "clean" it into something else.
+    // The instruction as spoken: no cleanup pass or transform, which would turn it into something else.
     let mut raw = s.clone();
     raw.cleanup.enabled = false;
+    raw.auto_transform.clear();
     let instruction = match cleanup::run(&raw, pcm, false, || {}) {
         Ok(out) if !out.text.is_empty() => out.text,
         Ok(_) => return hint("Didn't catch that", None),
-        Err(e) => return DictationState { action: error_action(&e), ..error(e) },
+        Err(e) => return DictationState { action: error_action(&e), ..edit_error(e) },
     };
+    let s = Settings { screen, ..s.clone() };
+    apply_edit(app, &s, "Command", selection.as_deref(), &instruction, paste, nowhere)
+}
+
+/// A transform's shortcut: its instruction on the selected text, as Command Mode would apply it.
+fn run_transform(app: &AppHandle, s: &Settings, name: &str) -> DictationState {
+    if let Err(e) = command_ready(s, true) {
+        return e;
+    }
+    let Some(instruction) = settings::transform_instruction(s, name).filter(|i| !i.trim().is_empty()) else {
+        return hint(format!("Add an instruction to {name} in Settings"), Some("settings"));
+    };
+    // The text around the selection, read before ⌘C, once: no time to wait for a slow app here.
+    let mut s = s.clone();
+    if cleanup::screen_ok(&s) && platform::frontmost_app(app).is_some_and(|f| !context::private(&f.id)) {
+        s.screen.around = context::read(false).map(|(before, _, after)| (before, after)).unwrap_or_default();
+    }
+    let s = &s;
+    match edit_target(app, s) {
+        Ok((paste, nowhere, Some(sel))) => apply_edit(app, s, name, Some(&sel), &instruction, paste, nowhere),
+        Ok(_) => hint(format!("Select some text, then use {name}"), None),
+        Err(e) => e,
+    }
+}
+
+/// The cleanup provider applies `instruction` (to `selection`, if any) and the result replaces
+/// the selection. With nothing to paste into (a web page, the desktop), the card shows it.
+/// `what` names the edit in errors ("Command", a transform's name).
+fn apply_edit(app: &AppHandle, s: &Settings, what: &str, selection: Option<&str>, instruction: &str, paste: bool, nowhere: bool) -> DictationState {
     emit_state(app, simple("cleaning"));
     let provider = settings::preset(&s.cleanup.provider).map_or(s.cleanup.provider.clone(), |p| p.label.to_string());
-    let text = match cleanup::chat(s, cleanup::COMMAND_PROMPT, &cleanup::command_input(selection.as_deref(), &instruction), Duration::from_secs(60)) {
+    let text = match cleanup::edit(s, selection, instruction) {
         Ok(t) if !t.is_empty() => t,
-        Ok(_) => return error(format!("{provider} returned nothing. Your text is unchanged.")),
-        Err(e) => return DictationState { action: Some("cleanup"), ..error(format!("Command failed: {provider}: {}. Your text is unchanged.", e.lines().next().unwrap_or_default().trim_end_matches('.'))) },
+        Ok(_) => return edit_error(format!("{provider} returned nothing. Your text is unchanged.")),
+        Err(e) => return DictationState { action: Some("cleanup"), ..edit_error(format!("{what} failed: {provider}: {}. Your text is unchanged.", e.lines().next().unwrap_or_default().trim_end_matches('.'))) },
     };
     *lock(&state(app).last_output) = Some(text.clone());
+    // Undo edit then copies the text as it was before this edit, not an older dictation.
+    *lock(&state(app).last_raw) = selection.map(str::to_string);
+    if llm::wanted(s) {
+        // The edit swapped Echotype Writer in; have the cleaner back before the next dictation.
+        let s = s.clone();
+        std::thread::spawn(move || llm::apply(&s));
+    }
     match deliver(app, s, &text, paste, nowhere) {
         Ok(()) => DictationState { state: "done", text: Some(text), copied: !paste, ..Default::default() },
         Err((e, true)) => {
             if s.sounds {
                 platform::play_sound(app, "nopaste");
             }
-            card(s, text, Some(e), None)
+            // Read-only text (a web page): the answer or rewrite is to read and copy, not a failure.
+            let why = if selection.is_some() && platform::accessibility_granted() { READ_ONLY.to_string() } else { e };
+            card(s, text, Some(why), None)
         }
         Err((e, false)) => DictationState { state: "error", text: Some(text), error: Some(e), ..Default::default() },
     }
 }
+
+/// The card's reason when the selection could be read but not replaced.
+const READ_ONLY: &str = "Read-only text, here's the result";
 
 /// The "nowhere to paste" card. Home offers the Accessibility fix when that is why.
 fn card(s: &Settings, text: String, warning: Option<String>, chip: Option<&'static str>) -> DictationState {
@@ -888,6 +1146,28 @@ fn paste_last(app: &AppHandle, paste: bool) {
     });
 }
 
+/// Undo the AI edit: the last dictation's words as heard, before cleanup, onto the clipboard, so
+/// ⌘Z then ⌘V in the app swaps them in.
+// ponytail: copies, never replaces in place: ⌘Z undoes a different amount in each app (typing
+// since the paste, nothing in a terminal), so doing it for the user could lose their text. To do it
+// in place, select back over the paste (AXSelectedTextRange) and check AXSelectedText first.
+fn undo_edit(app: &AppHandle) {
+    let st = state(app);
+    let (raw, text) = (lock(&st.last_raw).clone(), lock(&st.last_output).clone());
+    let undo = if cfg!(target_os = "macos") { "⌘Z" } else { "Ctrl+Z" };
+    let ev = match (raw, text) {
+        (Some(raw), Some(text)) if raw.trim() != text.trim() => match platform::copy(&raw) {
+            Ok(()) => hint(format!("Your text before the change is copied: {undo}, then {}", platform::PASTE_KEYS), None),
+            Err(e) => DictationState { state: "error", error: Some(e), ..Default::default() },
+        },
+        (Some(_), Some(_)) => hint("Cleanup didn't change your last dictation", None),
+        _ => hint("Nothing to undo yet", None),
+    };
+    if !st.recording.load(Ordering::SeqCst) {
+        emit_state(app, ev);
+    }
+}
+
 /// Counts one result in the local usage stats (words and speed, never text) when they are on.
 /// Before record_history, so the one-time history import can't count it twice.
 pub(crate) fn record_stats(app: &AppHandle, s: &Settings, source: stats::Source, text: &str, speaking_ms: u64) {
@@ -919,6 +1199,7 @@ fn record_history(s: &Settings, out: &cleanup::Output, rerun_of: Option<u64>) ->
         no_cleanup: out.no_cleanup,
         cleaned: out.cleaned.clone(),
         original: None,
+        recovered: false,
     };
     let res = if rerun_of.is_some() { settings::rerun_history(&entry) } else { settings::append_history(&entry) };
     res.map(|()| entry.ts).inspect_err(|e| eprintln!("echotype: could not write history: {e}")).ok()
@@ -988,17 +1269,27 @@ fn swap_hotkey(app: &AppHandle, old: &str, new: &str) -> Result<(), String> {
     })
 }
 
-const SHORTCUT_NAMES: [&str; 4] = ["dictation", "paste last", "copy last", "Command Mode"];
+const SHORTCUT_NAMES: [&str; 5] = ["dictation", "paste last", "copy last", "Command Mode", "undo edit"];
+const SHORTCUT_FIELDS: [&str; 5] = ["hotkey", "paste_last_hotkey", "copy_last_hotkey", "command_hotkey", "undo_edit_hotkey"];
 
-fn shortcuts(s: &Settings) -> [String; 4] {
-    [s.hotkey.clone(), s.paste_last_hotkey.clone(), s.copy_last_hotkey.clone(), s.command_hotkey.clone()]
+/// Every shortcut slot as (field, key): the five settings fields, then each transform's as
+/// "transform:<name>" (names are unique, settings.rs migrate).
+fn shortcuts(s: &Settings) -> Vec<(String, String)> {
+    let fixed = [&s.hotkey, &s.paste_last_hotkey, &s.copy_last_hotkey, &s.command_hotkey, &s.undo_edit_hotkey];
+    let mut all: Vec<(String, String)> = SHORTCUT_FIELDS.iter().zip(fixed).map(|(f, k)| (f.to_string(), k.clone())).collect();
+    all.extend(s.transforms.iter().map(|t| (format!("transform:{}", t.name), t.shortcut.clone())));
+    all
 }
 
-/// The settings fields whose shortcut is set but not registered right now: taken by another app
-/// at launch, and fixed by picking another key. Asked live, so a fixed one stops being reported.
-fn unregistered_shortcuts(s: &Settings, registered: impl Fn(&str) -> bool) -> Vec<&'static str> {
-    let fields = ["hotkey", "paste_last_hotkey", "copy_last_hotkey", "command_hotkey"];
-    shortcuts(s).iter().zip(fields).filter(|(k, _)| !k.is_empty() && !registered(k)).map(|(_, f)| f).collect()
+/// How a clash names a slot: "the Polish shortcut", "the dictation shortcut".
+fn shortcut_name(field: &str) -> &str {
+    SHORTCUT_FIELDS.iter().position(|f| *f == field).map_or_else(|| field.trim_start_matches("transform:"), |i| SHORTCUT_NAMES[i])
+}
+
+/// The slots whose shortcut is set but not registered right now: taken by another app at
+/// launch, and fixed by picking another key. Asked live, so a fixed one stops being reported.
+fn unregistered_shortcuts(s: &Settings, registered: impl Fn(&str) -> bool) -> Vec<String> {
+    shortcuts(s).into_iter().filter(|(_, k)| !k.is_empty() && !registered(k)).map(|(f, _)| f).collect()
 }
 
 fn same_shortcut(a: &str, b: &str) -> bool {
@@ -1079,6 +1370,22 @@ pub(crate) fn apply_theme(app: &AppHandle, s: &Settings) {
     }
 }
 
+/// Tray → New note by voice: Notes on a new note (notes.js), and a hands-free dictation into it.
+fn new_note(app: &AppHandle) {
+    open_page(app, "notes");
+    let _ = app.emit_to("main", "note-new", ());
+    if !state(app).recording.load(Ordering::SeqCst) {
+        send(app, Cmd::Key(Ev::Toggle));
+    }
+}
+
+/// notes.js: the note editor got or lost focus, or its selection changed.
+#[tauri::command]
+async fn notes_target(app: AppHandle, selection: Option<String>) -> R<()> {
+    *lock(&state(&app).note) = selection;
+    Ok(())
+}
+
 /// Opens the settings window on `page` (pill menu, notice actions).
 fn open_page(app: &AppHandle, page: &str) {
     show_main(app);
@@ -1100,22 +1407,27 @@ async fn get_settings(app: AppHandle) -> R<Settings> {
 /// warning; the same for launch at login. A failed save undoes every swap, so the registrations,
 /// the file and memory never disagree. The dictation shortcut can't be unbound; the others can ("").
 fn commit(old: &Settings, mut new: Settings, swap: impl Fn(&str, &str) -> R<()>, autostart: impl Fn(bool) -> R<()>, save: impl Fn(&Settings) -> R<()>) -> R<(Settings, Option<String>)> {
-    let olds = shortcuts(old);
-    let mut keys = shortcuts(&new);
+    // Slots by field: a transform added, removed or renamed has "" on the side without it.
+    let (was, now) = (shortcuts(old), shortcuts(&new));
+    let mut fields: Vec<String> = now.iter().map(|(f, _)| f.clone()).collect();
+    fields.extend(was.iter().map(|(f, _)| f.clone()).filter(|f| !now.iter().any(|(g, _)| g == f)));
+    let key = |v: &[(String, String)], f: &str| v.iter().find(|(g, _)| g == f).map_or(String::new(), |(_, k)| k.clone());
+    let olds: Vec<String> = fields.iter().map(|f| key(&was, f)).collect();
+    let mut keys: Vec<String> = fields.iter().map(|f| key(&now, f)).collect();
     if keys[0].trim().is_empty() {
         keys[0] = olds[0].clone();
     }
     let (mut warnings, mut swapped) = (vec![], vec![]);
     // Slots moving onto a key another slot is leaving go last, after that key is unregistered.
-    let mut order = [0, 1, 2, 3];
+    let mut order: Vec<usize> = (0..fields.len()).collect();
     order.sort_by_key(|&i| olds.iter().any(|o| same_shortcut(&keys[i], o)));
     for i in order {
         if keys[i] == olds[i] {
             continue;
         }
-        let clash = (0..4).find(|&j| j != i && same_shortcut(&keys[i], &keys[j]));
+        let clash = (0..fields.len()).find(|&j| j != i && same_shortcut(&keys[i], &keys[j]));
         let res = match clash {
-            Some(j) => Err(format!("{} is already the {} shortcut", keys[i], SHORTCUT_NAMES[j])),
+            Some(j) => Err(format!("{} is already the {} shortcut", keys[i], shortcut_name(&fields[j]))),
             None => swap(&olds[i], &keys[i]),
         };
         match res {
@@ -1126,7 +1438,11 @@ fn commit(old: &Settings, mut new: Settings, swap: impl Fn(&str, &str) -> R<()>,
             }
         }
     }
-    [new.hotkey, new.paste_last_hotkey, new.copy_last_hotkey, new.command_hotkey] = keys.clone();
+    [new.hotkey, new.paste_last_hotkey, new.copy_last_hotkey, new.command_hotkey, new.undo_edit_hotkey] = std::array::from_fn(|i| keys[i].clone());
+    let kept: Vec<(String, String)> = fields.into_iter().zip(keys.iter().cloned()).collect();
+    for t in &mut new.transforms {
+        t.shortcut = key(&kept, &format!("transform:{}", t.name));
+    }
     let autostart_changed = new.autostart != old.autostart
         && match autostart(new.autostart) {
             Ok(()) => true,
@@ -1176,7 +1492,14 @@ fn commit_settings(app: &AppHandle, change: impl FnOnce(&Settings) -> Settings) 
     if old.history_enabled && !new.history_enabled {
         *lock(&state(app).last_output) = None; // switching history off also forgets the in-memory copy
         *lock(&state(app).last_cleaned) = None;
+        *lock(&state(app).last_raw) = None;
         settings::clear_clips();
+    }
+    if new.clip_days != old.clip_days {
+        settings::prune_clips(new.clip_days);
+    }
+    if new.history_enabled && new.history_24h && !(old.history_enabled && old.history_24h) {
+        settings::prune_history(); // "Delete after 24 hours" applies to what is there now
     }
     if new.talk_key != old.talk_key {
         apply_talk_key(app, &new);
@@ -1267,11 +1590,44 @@ async fn list_input_devices() -> R<Vec<audio::InputDevice>> {
 }
 
 #[tauri::command]
-async fn get_history(limit: Option<usize>) -> R<Vec<HistoryEntry>> {
-    Ok(settings::get_history(limit.unwrap_or(100)))
+async fn get_history(app: AppHandle, limit: Option<usize>) -> R<Vec<HistoryEntry>> {
+    let s = current_settings(&app);
+    blocking(move || {
+        if s.history_enabled && s.history_24h {
+            settings::prune_history(); // exact to the minute, not to the last hourly prune
+        }
+        Ok(settings::get_history(limit.unwrap_or(100)))
+    })
+    .await
+}
+
+/// The History page's search box (settings::search_history); "" lists them all.
+#[tauri::command]
+async fn history_search(app: AppHandle, query: String, limit: Option<usize>) -> R<settings::HistorySearch> {
+    let s = current_settings(&app);
+    blocking(move || {
+        if s.history_enabled && s.history_24h {
+            settings::prune_history(); // as get_history
+        }
+        Ok(settings::search_history(&query, limit.unwrap_or(100)))
+    })
+    .await
 }
 
 /// What Echotype would bring over from Wispr Flow on this machine (None: not installed).
+/// The entries whose audio is still kept (History's play buttons).
+#[tauri::command]
+async fn history_clips() -> R<Vec<u64>> {
+    blocking(|| Ok(settings::kept_clips())).await
+}
+
+/// Entry `ts`'s audio as WAV bytes for History's player. Only Echotype's own clips can be read:
+/// the path is built from the number.
+#[tauri::command]
+async fn history_audio(ts: u64) -> R<tauri::ipc::Response> {
+    blocking(move || std::fs::read(settings::clip_path(ts)).map(tauri::ipc::Response::new).map_err(|_| "That recording is no longer kept".to_string())).await
+}
+
 #[tauri::command]
 async fn wispr_import_preview() -> Option<wispr::Found> {
     tauri::async_runtime::spawn_blocking(wispr::detect).await.ok().flatten().filter(|f| !f.is_empty())
@@ -1290,6 +1646,54 @@ async fn wispr_import(app: AppHandle) -> R<Vec<String>> {
     Ok(done)
 }
 
+/// Dictionary → Import: what a .txt or .csv file's text would add, for the preview.
+#[tauri::command]
+async fn dictionary_import_preview(app: AppHandle, text: String, csv: bool) -> wordlist::Import {
+    wordlist::plan(&current_settings(&app), &text, csv)
+}
+
+/// Adds it, planned again against the settings as they are now. Returns what was added.
+#[tauri::command]
+async fn dictionary_import(app: AppHandle, text: String, csv: bool) -> R<wordlist::Import> {
+    let mut done = wordlist::Import::default();
+    commit_settings(&app, |old| {
+        let mut s = old.clone();
+        done = wordlist::plan(&s, &text, csv);
+        wordlist::apply(&mut s, &done);
+        s
+    })?;
+    Ok(done)
+}
+
+/// Dictionary → Export: the words and snippets as a CSV in Downloads. Returns its path.
+#[tauri::command]
+async fn dictionary_export(app: AppHandle) -> R<String> {
+    let csv = wordlist::to_csv(&current_settings(&app));
+    blocking(move || save_download(&app, "Echotype Dictionary.csv", csv.as_bytes())).await
+}
+
+/// Stats → Share: the card stats.js drew (a base64 PNG, numbers only) into Downloads.
+#[tauri::command]
+async fn save_stats_card(app: AppHandle, png: String) -> R<String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(png).map_err(|e| e.to_string())?;
+    if !bytes.starts_with(b"\x89PNG") {
+        return Err("That is not a PNG image".into());
+    }
+    let name = format!("Echotype Stats {}.png", chrono::Local::now().format("%Y-%m-%d"));
+    blocking(move || save_download(&app, &name, &bytes)).await
+}
+
+/// Writes a file to Downloads and shows it in Finder, as meeting notes are saved. Replaces one of the same name.
+// ponytail: Downloads, not a save dialog (no dialog plugin in the app); add tauri-plugin-dialog if people ask where.
+fn save_download(app: &AppHandle, name: &str, bytes: &[u8]) -> R<String> {
+    use tauri_plugin_opener::OpenerExt;
+    let path = dirs::download_dir().ok_or("No Downloads folder")?.join(name);
+    std::fs::write(&path, bytes).map_err(|e| format!("Could not save: {e}"))?;
+    let _ = app.opener().reveal_item_in_dir(&path);
+    Ok(path.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 async fn update_history(app: AppHandle, ts: u64, text: String) -> R<()> {
     let was = settings::update_history(ts, &text)?;
@@ -1306,27 +1710,16 @@ async fn update_history(app: AppHandle, ts: u64, text: String) -> R<()> {
 async fn clear_history(app: AppHandle) -> R<()> {
     *lock(&state(&app).last_output) = None;
     *lock(&state(&app).last_cleaned) = None;
+    *lock(&state(&app).last_raw) = None;
     settings::clear_history()
 }
 
-#[tauri::command]
-async fn transcribe_file(app: AppHandle, path: String) -> R<cleanup::Output> {
-    let s = current_settings(&app);
-    tauri::async_runtime::spawn_blocking(move || {
-        let out = transcribe_path(&s, &path)?;
-        record_stats(&app, &s, stats::Source::File, &out.text, 0);
-        record_history(&s, &out, None);
-        Ok(out)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-fn transcribe_path(s: &Settings, path: &str) -> R<cleanup::Output> {
+/// A file's transcript and its length in seconds (files.rs queue and watched folder, CLI).
+fn transcribe_path(s: &Settings, path: &str) -> R<(cleanup::Output, f32)> {
     let bytes = std::fs::read(path).map_err(|e| format!("Could not read {path}: {e}"))?;
     let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str());
     let pcm = audio::decode(bytes, ext)?;
-    cleanup::run(s, &pcm, false, || {})
+    Ok((cleanup::run(s, &pcm, false, || {})?, pcm.len() as f32 / audio::RATE as f32))
 }
 
 /// The Stats page: totals, speeds, streaks and a grid of `range` weeks (default a year).
@@ -1355,6 +1748,8 @@ struct SystemInfo {
     echotype_model_mb: u64,
     /// The Echotype cleaners with their RAM, for the Cleanup page's picker (advanced settings).
     cleaners: Vec<llm::CleanerStatus>,
+    /// Echotype Writer, for the Models page (Command Mode with the built-in provider).
+    writer: llm::CleanerStatus,
     /// 8 GB or less: Automatic picks the light setup.
     low_ram: bool,
     /// Echotype Cloud is in this build (settings::CLOUD).
@@ -1375,6 +1770,7 @@ async fn get_system_info(app: AppHandle) -> R<SystemInfo> {
         echotype_model_installed,
         echotype_model_mb,
         cleaners: llm::cleaners(total),
+        writer: llm::writer(total),
         low_ram: stt::low_ram(total),
         cloud: settings::CLOUD,
     })
@@ -1448,10 +1844,17 @@ async fn pill_cancel(app: AppHandle) -> R<()> {
 /// A notice with an action: Home shows it with the button that fixes it. Shares the click
 /// debounce, so the second half of a double-click that started dictation and got an error
 /// notice back never opens the settings window.
+/// `page` "mic" is "No sound from your microphone" clicked: that recording is no use, so it is
+/// cancelled and Settings opens on the microphone picker.
 #[tauri::command]
-async fn pill_open(app: AppHandle) -> R<()> {
+async fn pill_open(app: AppHandle, page: Option<String>) -> R<()> {
     if !pill::is_drop(&app, Instant::now()) && lock(&state(&app).clicks).accept(Instant::now()) {
-        open_page(&app, "home");
+        if page.as_deref() == Some("mic") {
+            send(&app, Cmd::Key(Ev::Cancel));
+            open_page(&app, "mic");
+        } else {
+            open_page(&app, "home");
+        }
     }
     Ok(())
 }
@@ -1951,8 +2354,9 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Echotype", true, None::<&str>)?;
     let toggle = MenuItem::with_id(app, "toggle", "Start/Stop dictation", true, None::<&str>)?;
     let meeting = MenuItem::with_id(app, "meeting", meeting::menu_label(), true, None::<&str>)?;
+    let note = MenuItem::with_id(app, "note", "New note by voice", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &toggle, &meeting, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &toggle, &meeting, &note, &quit])?;
     meeting::set_tray_item(meeting);
     // The idle pill is macOS-only, and so is its hide/show item; the pill loop sets its label.
     if cfg!(target_os = "macos") {
@@ -1966,6 +2370,7 @@ fn create_tray(app: &tauri::App) -> tauri::Result<()> {
         "toggle" => send(app, Cmd::Key(Ev::Toggle)),
         "pill" => pill::on_tray(app),
         "meeting" => meeting::toggle(app),
+        "note" => new_note(app),
         "quit" => app.exit(0),
         _ => {}
     });
@@ -2029,12 +2434,23 @@ pub fn run() {
                         paste_last(app, false);
                     } else if is(&s.command_hotkey) {
                         send(app, Cmd::Command(if pressed { Ev::Press } else { Ev::Release }));
+                    } else if is(&s.undo_edit_hotkey) && !pressed {
+                        undo_edit(app);
+                    } else if let Some(t) = s.transforms.iter().find(|t| is(&t.shortcut)) {
+                        // On release, like paste last: its ⌘C waits for the modifiers anyway.
+                        if !pressed {
+                            send(app, Cmd::Transform(t.name.clone()));
+                        }
                     }
                 })
                 .build(),
         )
         .setup(|app| {
             let s = Settings::load();
+            // Before any new recording: one left by a quit or crash becomes a History entry.
+            for ts in settings::recover(s.history_enabled && s.clip_days > 0) {
+                eprintln!("echotype: recovered the recording of {ts}; it is in History");
+            }
             telemetry::install_panic_hook(app.package_info().version.to_string());
             let h = app.handle().clone();
             telemetry::start(app.package_info().version.to_string(), move || current_settings(&h));
@@ -2057,9 +2473,11 @@ pub fn run() {
                 last_clip: Mutex::new(None),
                 last_cleaned: Mutex::new(None),
                 last_output: Mutex::new(None),
+                last_raw: Mutex::new(None),
                 last_app: Mutex::new(None),
                 downloads: Mutex::new(HashMap::new()),
                 recording: AtomicBool::new(false),
+                note: Mutex::new(None),
             });
             create_tray(app)?;
             apply_theme(app.handle(), &s);
@@ -2070,7 +2488,7 @@ pub fn run() {
                 let _ = st.pill_wake.send(());
             });
             pill::run(app.handle().clone(), pill::create(app, &s)?, woken);
-            for key in shortcuts(&s).iter().filter(|k| !k.is_empty()) {
+            for (_, key) in shortcuts(&s).iter().filter(|(_, k)| !k.is_empty()) {
                 if let Err(e) = swap_hotkey(app.handle(), "", key) {
                     eprintln!("echotype: {e}");
                 }
@@ -2106,6 +2524,7 @@ pub fn run() {
                     Err(e) => eprintln!("echotype: could not import history into stats: {e}"),
                 });
             }
+            files::start(app.handle()); // dropped files' queue and the watched folder
             if !s.onboarded {
                 show_main(app.handle());
             }
@@ -2143,8 +2562,19 @@ pub fn run() {
             // ponytail: thread::sleep stops while the Mac sleeps, so "daily" can stretch; launches catch up.
             let h = app.handle().clone();
             std::thread::spawn(move || loop {
-                meeting::prune_audio(current_settings(&h).meeting_audio_days);
+                let s = current_settings(&h);
+                meeting::prune_audio(s.meeting_audio_days);
+                settings::prune_clips(s.clip_days); // dictation audio too (Settings → Keep dictation audio)
                 std::thread::sleep(Duration::from_secs(86_400));
+            });
+            // "Delete after 24 hours" (Settings → Keep history): at start, then hourly.
+            let h = app.handle().clone();
+            std::thread::spawn(move || loop {
+                let s = current_settings(&h);
+                if s.history_enabled && s.history_24h {
+                    settings::prune_history();
+                }
+                std::thread::sleep(Duration::from_secs(3600));
             });
             std::thread::spawn(move || {
                 if s.stt.provider == "local" {
@@ -2182,13 +2612,23 @@ pub fn run() {
             cancel_download,
             list_input_devices,
             get_history,
+            history_search,
+            history_clips,
+            history_audio,
             update_history,
             wispr_import_preview,
             wispr_import,
+            dictionary_import_preview,
+            dictionary_import,
+            dictionary_export,
+            save_stats_card,
             clear_history,
             get_stats,
             clear_stats,
-            transcribe_file,
+            files::transcribe_files,
+            files::cancel_files,
+            files::file_save,
+            files::pick_files,
             get_system_info,
             local_api_status,
             toggle_dictation,
@@ -2244,8 +2684,14 @@ pub fn run() {
             meeting::meeting_export,
             meeting::meeting_save,
             meeting::meeting_summarize,
+            meeting::meeting_summary_cancel,
             meeting::meeting_ask,
             meeting::meeting_window,
+            notes_target,
+            notes::notes_list,
+            notes::notes_save,
+            notes::notes_delete,
+            notes::notes_export,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Echotype");
@@ -2268,6 +2714,9 @@ pub fn cli(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--meeting") {
         return meeting::cli(args);
     }
+    if args.iter().any(|a| a == "--mcp") {
+        return mcp::serve(std::io::stdin().lock(), std::io::stdout().lock());
+    }
     let mut s = Settings::load();
     let mut file = None;
     let mut it = args.iter();
@@ -2282,7 +2731,7 @@ pub fn cli(args: &[String]) -> i32 {
                 }
                 None => file = None,
             },
-            "--translate" => s.translate_to_english = true,
+            "--translate" => s.auto_transform = settings::TRANSLATE.into(),
             other => {
                 eprintln!("echotype: unknown argument '{other}'");
                 file = None;
@@ -2302,7 +2751,7 @@ pub fn cli(args: &[String]) -> i32 {
         eprintln!("echotype: cleanup model {} ({}, {} tokens)", llm::cleaner(&s).id, llm::memory(&s), llm::context(&s));
     }
     let t = std::time::Instant::now();
-    let result = transcribe_path(&s, &file);
+    let result = transcribe_path(&s, &file).map(|(out, _)| out);
     stt::unload();
     llm::stop();
     let (out, err, code) = cli_report(result, t.elapsed().as_millis());
@@ -2333,7 +2782,7 @@ fn cli_report(result: R<cleanup::Output>, total_ms: u128) -> (String, String, i3
 
 #[cfg(test)]
 mod tests {
-    use super::{HistoryEntry, KEEP_SAMPLES, Rerun, Settings, accel_label, as_ran, chip, cli_report, commit, keep, last_words, parse_hotkey, partial_due, stt, unregistered_shortcuts};
+    use super::{HistoryEntry, KEEP_SAMPLES, Rerun, SPOOL_EVERY, Settings, Spool, audio, accel_label, as_ran, chip, cli_report, commit, keep, last_words, parse_hotkey, partial_due, stt, unregistered_shortcuts};
     use crate::audio::Quality;
     use std::cell::RefCell;
     use std::time::Duration;
@@ -2359,6 +2808,25 @@ mod tests {
     /// Under the app manifest a command missing from a capability fails only at runtime, in the
     /// window, so check generate_handler!, build.rs COMMANDS and both capability files agree.
     #[test]
+    fn a_recording_is_on_disk_as_it_goes_and_gone_once_done_with() {
+        let dir = std::env::temp_dir().join(format!("echotype-spool-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("1.part.wav");
+        let tap = audio::Tap::fake(48_000);
+        tap.feed(&vec![0.25; 48_000]);
+        let spool = Spool::start(tap.clone(), path.clone());
+        std::thread::sleep(SPOOL_EVERY + Duration::from_millis(300));
+        tap.feed(&vec![0.25; 24_000]);
+        std::thread::sleep(SPOOL_EVERY);
+        // What a crash right now would leave: a valid WAV of the 1.5 s so far, at 16 kHz.
+        let pcm = audio::decode(std::fs::read(&path).unwrap(), Some("wav")).unwrap();
+        assert!(pcm.len().abs_diff(24_000) < 100, "{} samples", pcm.len());
+        assert!(pcm[8_000..20_000].iter().all(|x| (x - 0.25).abs() < 0.01));
+        drop(spool);
+        assert!(!path.exists(), "done with: no recovery file");
+    }
+
+    #[test]
     fn the_last_clip_is_kept_within_its_cap() {
         let five_min = vec![0.0; KEEP_SAMPLES];
         assert!(keep(five_min, false, None).is_some_and(|k| !k.failed), "a success is kept for Re-run");
@@ -2382,13 +2850,14 @@ mod tests {
         let m = run(Rerun::Model("small".into()));
         assert_eq!((m.stt.provider.as_str(), stt::local_model(&m).as_str(), m.advanced), ("local", "small", false), "the model, without switching on advanced settings");
         assert_eq!(serde_json::to_value(&m).unwrap()["stt"].get("rerun_model"), None, "never saved");
+        assert_eq!((run(Rerun::Same), Rerun::parse("same")), (base.clone(), Some(Rerun::Same)), "a recovered dictation: as set now");
     }
 
     #[test]
     fn a_history_entry_offers_the_pill_choices_that_would_change_it() {
         let mut s = Settings { advanced: true, ..Settings::default() }; // the settings say Large v3 Turbo
         s.cleanup.enabled = true;
-        let entry = |stt: &str, cleanup: Option<&str>| HistoryEntry { ts: 1, raw: "r".into(), text: "t".into(), stt_ms: 1, cleanup_ms: 0, stt_provider: stt.into(), cleanup_provider: cleanup.map(String::from), no_cleanup: false, cleaned: None, original: None };
+        let entry = |stt: &str, cleanup: Option<&str>| HistoryEntry { ts: 1, raw: "r".into(), text: "t".into(), stt_ms: 1, cleanup_ms: 0, stt_provider: stt.into(), cleanup_provider: cleanup.map(String::from), no_cleanup: false, cleaned: None, original: None, recovered: false };
         let ids = |s: &Settings, e: HistoryEntry| crate::pill::rerun_options(&as_ran(s.clone(), &e), |id| ["large-v3-turbo-q5_0", "tiny.en"].contains(&id)).into_iter().map(|(r, _)| r.id()).collect::<Vec<_>>();
         assert_eq!(ids(&s, entry("local:tiny.en", Some("ollama"))), ["model:large-v3-turbo-q5_0", "raw"], "recorded on Tiny: Turbo is the other model");
         assert_eq!(ids(&s, entry("local:large-v3-turbo-q5_0", None)), ["model:tiny.en"], "no cleanup ran, so none to skip");
@@ -2440,6 +2909,20 @@ mod tests {
         s.hotkey = "Alt+KeyD".into();
         assert!(unregistered_shortcuts(&s, |k| k != "Alt+Space").is_empty());
         assert_eq!(unregistered_shortcuts(&s, |_| false), ["hotkey", "paste_last_hotkey", "command_hotkey"]);
+        s.undo_edit_hotkey = "Control+Alt+KeyZ".into();
+        assert_eq!(unregistered_shortcuts(&s, |k| k == "Alt+KeyD"), ["paste_last_hotkey", "command_hotkey", "undo_edit_hotkey"]);
+    }
+
+    #[test]
+    fn the_undo_edit_shortcut_is_set_like_the_others() {
+        let old = Settings::default();
+        let mut new = old.clone();
+        new.undo_edit_hotkey = "Alt+Shift+Space".into(); // Command Mode's key
+        let (kept, warning) = commit(&old, new.clone(), |_, _| panic!("swapped onto a taken key"), |_| Ok(()), |_| Ok(())).unwrap();
+        assert!(kept.undo_edit_hotkey.is_empty() && warning.unwrap().contains("already the Command Mode shortcut"));
+        new.undo_edit_hotkey = "Control+Alt+KeyZ".into();
+        let (kept, _) = commit(&old, new, |_, _| Ok(()), |_| Ok(()), |_| Ok(())).unwrap();
+        assert_eq!(kept.undo_edit_hotkey, "Control+Alt+KeyZ");
     }
 
     #[test]
@@ -2451,7 +2934,7 @@ mod tests {
 
     #[test]
     fn cli_prints_nothing_and_exits_zero_when_no_speech_was_found() {
-        let out = |text: &str| crate::cleanup::Output { raw: text.into(), text: text.into(), stt_ms: 5, cleanup_ms: 0, warning: None, no_cleanup: true, cleaned: None };
+        let out = |text: &str| crate::cleanup::Output { raw: text.into(), text: text.into(), stt_ms: 5, cleanup_ms: 0, warning: None, no_cleanup: true, cleaned: None, send: false };
         let (stdout, stderr, code) = cli_report(Ok(out("")), 9);
         assert_eq!((stdout.as_str(), code), ("", 0));
         assert!(stderr.starts_with("echotype: no speech found\n"), "{stderr}");
@@ -2564,6 +3047,37 @@ mod tests {
     }
 
     #[test]
+    fn transform_shortcuts_are_set_moved_and_freed_like_the_others() {
+        let old = Settings::default();
+        let mut new = old.clone();
+        new.transforms[0].shortcut = "Control+Alt+KeyP".into();
+        new.transforms[1].shortcut = "Alt+Shift+Space".into(); // Command Mode's
+        let swaps = RefCell::new(vec![]);
+        let log = |o: &str, n: &str| {
+            swaps.borrow_mut().push(format!("{o}>{n}"));
+            Ok(())
+        };
+        let (kept, warning) = commit(&old, new, log, |_| Ok(()), |_| Ok(())).unwrap();
+        assert_eq!((kept.transforms[0].shortcut.as_str(), kept.transforms[1].shortcut.as_str()), ("Control+Alt+KeyP", ""));
+        assert!(warning.unwrap().contains("already the Command Mode shortcut"));
+        assert_eq!(swaps.take(), [">Control+Alt+KeyP"]);
+        // Renamed: the key stays with it. Removed: its key is let go. Another taking it: named.
+        let mut renamed = kept.clone();
+        renamed.transforms[0].name = "Tidy".into();
+        let (kept2, _) = commit(&kept, renamed, log, |_| Ok(()), |_| Ok(())).unwrap();
+        assert_eq!((kept2.transforms[0].shortcut.as_str(), swaps.take()), ("Control+Alt+KeyP", vec!["Control+Alt+KeyP>".to_string(), ">Control+Alt+KeyP".to_string()]));
+        let mut taken = kept2.clone();
+        taken.copy_last_hotkey = "Control+Alt+KeyP".into();
+        assert!(commit(&kept2, taken, log, |_| Ok(()), |_| Ok(())).unwrap().1.unwrap().contains("already the Tidy shortcut"));
+        let mut removed = kept2.clone();
+        removed.transforms.remove(0);
+        swaps.take();
+        commit(&kept2, removed, log, |_| Ok(()), |_| Ok(())).unwrap();
+        assert_eq!(swaps.take(), ["Control+Alt+KeyP>"]);
+        assert_eq!(unregistered_shortcuts(&kept2, |_| false), ["hotkey", "command_hotkey", "transform:Tidy"]);
+    }
+
+    #[test]
     fn a_shortcut_can_take_a_key_another_one_is_leaving() {
         let mut old = Settings::default();
         old.paste_last_hotkey = "CommandOrControl+Control+V".into();
@@ -2584,11 +3098,11 @@ mod tests {
     fn onboarding_pastes_only_from_its_real_app_step_and_never_into_echotype() {
         use super::pastes;
         let mut s = Settings::default();
-        assert!(!pastes(&s, false), "steps 1-2: practice lands in onboarding's own field");
-        s.onboard_step = 2;
-        assert!(!pastes(&s, false));
+        assert!(!pastes(&s, false), "steps 1-3: practice lands in onboarding's own field");
         s.onboard_step = 3;
-        assert!(pastes(&s, false), "step 3 tries a real paste in another app");
+        assert!(!pastes(&s, false));
+        s.onboard_step = 4;
+        assert!(pastes(&s, false), "step 4 tries a real paste in another app");
         assert!(!pastes(&s, true), "but never into Echotype's own window");
         let done = Settings { onboarded: true, ..Default::default() };
         assert!(pastes(&done, false) && !pastes(&done, true));
@@ -2599,7 +3113,7 @@ mod tests {
         use super::error_action;
         // The exact messages stt.rs produces; if one is reworded this keeps the window's action.
         for e in ["Choose a speech model", "Not enough free memory for medium: it needs about 1800 MB and 900 MB is free.",
-            "medium could not load: bad magic", "Translate to English needs a multilingual model (medium or small); large-v3-turbo cannot translate. Download one under Models."] {
+            "medium could not load: bad magic"] {
             assert_eq!(error_action(e), Some("model"), "{e}");
         }
         assert_eq!(error_action("Speech-to-text failed (500): boom"), None);

@@ -7,27 +7,40 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
 const now = Date.now();
 
 const settings = {
-  hotkey: 'Alt+Space', mode: 'hold', input_device: null, languages: [], translate_to_english: false,
+  hotkey: 'Alt+Space', mode: 'hold', input_device: null, languages: q.get('langs')?.split(',') ?? [], script: q.get('script') || 'native',
   local_api: { enabled: false, port: 7811 },
   stt: { provider: 'local', local_model: q.has('onboarding') ? '' : 'large-v3-turbo-q5_0', model: '', base_url: '' },
-  cleanup: { enabled: !q.has('nocleanup'), provider: 'ollama', model: 'gemma3:4b', base_url: '', style: 'default', custom_instructions: '',
-    match_app: q.has('apps'), app_styles: q.has('apps') ? [{ id: 'com.apple.Terminal', name: 'Terminal', style: '' }, { id: 'com.google.Chrome', name: 'Google Chrome', style: 'casual' }] : [] },
-  dictionary: ['Echotype', 'Tauri', 'Hinglish', 'Supabase'],
-  replacements: [{ from: 'my email', to: 'aditya@example.com' }],
-  restore_clipboard: true, history_enabled: true, voice_commands: true,
+  cleanup: { enabled: !q.has('nocleanup'), provider: q.get('cleanup') || 'ollama', model: 'gemma3:4b', base_url: '', style: 'default', level: q.get('level') || 'medium', custom_instructions: '',
+    match_app: q.has('apps'), app_styles: q.has('apps') ? [{ id: 'com.apple.Terminal', name: 'Terminal', style: '', cleanup: false, languages: [] }, { id: 'com.google.Chrome', name: 'Google Chrome', style: 'casual', cleanup: null, languages: ['hi', 'en'], instructions: 'No full stop at the end of a message.' }] : [] },
+  dictionary: ['Echotype', 'Tauri', 'Hinglish', 'Supabase'], screen_context: !q.has('noscreen'), screen_context_cloud: false,
+  replacements: [{ from: 'my email', to: 'aditya@example.com' }, { from: 'our nav', to: 'Arnav' }],
+  // ?learned previews the notice for words picked up from corrections (learn.rs).
+  learn_words: true, learned: q.has('learned') ? ['Midhun', 'Xoxoday'] : [], ignored_words: [],
+  restore_clipboard: true, history_enabled: !q.has('nohistory'), history_24h: q.has('history24h'), voice_commands: true, send_it: true,
   usage_stats: !q.has('statsoff'), share_telemetry: q.has('telemetry'), display_name: q.get('name') || '',
   onboarded: !q.has('onboarding'), onboard_step: 0,
   talk_key: q.get('talk') || 'accelerator',
   paste_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+V',
   copy_last_hotkey: q.has('upgrade') ? '' : 'CommandOrControl+Control+C',
-  command_hotkey: 'Alt+Shift+Space',
+  command_hotkey: 'Alt+Shift+Space', undo_edit_hotkey: '',
+  // The same built-ins as settings.rs TRANSFORMS; ?translate turns on "Type in English".
+  transforms: [
+    { name: 'Polish', instruction: "Fix grammar, spelling and flow. Keep the meaning, the tone and the writer's voice, and change as little as needed.", shortcut: 'Control+Alt+P' },
+    { name: 'Make it formal', instruction: 'Rewrite this in a formal, professional tone. Keep the meaning and every detail.', shortcut: '' },
+    { name: 'Make it shorter', instruction: "Make this shorter and tighter. Keep every key point and the writer's voice.", shortcut: '' },
+    { name: 'Translate to English', instruction: 'Translate this into natural English. If it is already English, return it unchanged.', shortcut: '' },
+    { name: 'Prompt engineer', instruction: 'Rewrite these rough notes as a clear prompt for an AI assistant: the goal, the context, any constraints and the output wanted, using only what the notes say. Output only the prompt.', shortcut: '' },
+  ],
+  auto_transform: q.has('translate') ? 'Translate to English' : '',
   autostart: !q.has('upgrade'), sounds: true, sound_pack: 'classic', pill_fade: true, orb_listen: 'listening', orb_think: 'working', orb_detail: 1, orb_color: '#eef1ff', pill_size: 1.5, ball_size: 1,
-  advanced: q.has('advanced'), cleaner_memory: 'ready', cleaner_idle_unload: false, cleaner_idle_minutes: 10, cleaner_context: 1024, greetings: true, detect_meetings: true, prefer_builtin_mic: true, pause_music: false, meeting_auto_stop: true, meeting_audio_days: 30,
+  advanced: q.has('advanced'), cleaner_memory: 'ready', cleaner_idle_unload: false, cleaner_idle_minutes: 10, cleaner_context: 1024, greetings: true, detect_meetings: true, prefer_builtin_mic: true, pause_music: false, meeting_auto_stop: true, meeting_audio_days: 30, clip_days: 14,
+  watch_folder: q.has('watch') ? '/Users/you/Recordings' : '', watch_format: 'txt', watch_subfolder: false,
   call_start: { meet: 'ask', teams: 'ask', zoom: 'ask', slack: 'ask', facetime: 'ask', webex: 'ask', discord: 'ask', other: 'ask' }, cloud_moved: q.has('moved'),
   look: 'system',
   pill_idle: !q.has('pilloff'), pill_hidden_until: q.has('pillhidden') ? now + 42 * 60000 : 0, pill_in_recordings: false, live_text: true,
   pill_positions: {}, pill_screen: null, pill_follow_cursor: true, show_in: q.has('menubar') ? 'menubar' : 'pill',
   dismissed: q.has('upgrade') || q.has('onboarding') ? [] : ['upgrade_offer'],
+  language_offer: q.get('offer') || '', // ?offer=hi: the detector heard Hindi (stt.rs language_to_offer)
 };
 if (q.has('bt')) settings.input_device = 'AirPods Pro';
 const presets = [
@@ -43,7 +56,7 @@ const presets = [
 // The same catalog, sizes and notes as stt.rs MODELS.
 const cancelled = new Set(); // cancel_download: download_model stops at its next step
 const models = [
-  { id: 'large-v3-turbo-q5_0', label: 'Large v3 Turbo (Q5)', size_mb: 547, ram_mb: 761, downloaded: !q.has('onboarding') || q.get('model') === 'ready', note: 'Best default: near-large accuracy, fast, 99 languages. Cannot translate.' },
+  { id: 'large-v3-turbo-q5_0', label: 'Large v3 Turbo (Q5)', size_mb: 547, ram_mb: 761, downloaded: !q.has('onboarding') || q.get('model') === 'ready', note: 'Best default: near-large accuracy, fast, 99 languages.' },
   { id: 'tiny.en', label: 'Tiny (English)', size_mb: 78, ram_mb: 224, downloaded: q.get('model') === 'tiny', note: 'English only. Fastest, least accurate.' },
 ];
 // ?ram=8 previews an 8 GB Mac (Automatic's light setup and its warnings); ?cloud shows Echotype Cloud.
@@ -51,8 +64,10 @@ const low = q.get('ram') === '8';
 const sys = { total_ram_gb: low ? 8 : 24, available_ram_gb: low ? 3.2 : 5.1, os: 'macos', arch: 'aarch64', can_autostart: q.get('appdir') !== '0', low_ram: low, cloud: q.has('cloud'),
   echotype_model_installed: true, echotype_model_mb: 401,
   cleaners: [{ id: 'echotype-tiny', label: 'Echotype Tiny', note: '0.5B. Light and quick; best for English.', downloadable: q.has('dl-cleaners'), size_mb: 401, ram_mb: 552, installed: true, automatic: true, recommended: true, warning: null },
-    { id: 'echotype-medium', label: 'Echotype Medium', note: '1.5B. Catches more; uses about twice the memory.', downloadable: q.has('dl-cleaners'), size_mb: 940, ram_mb: 1099, installed: false, automatic: false, recommended: false, warning: low ? 'Uses about 1.1 GB while dictating. On an 8 GB Mac this can slow other apps.' : null }] };
-for (const m of models) Object.assign(m, { english_only: m.id.endsWith('.en'), translates: false, fits: m.ram_mb + 2048 <= sys.available_ram_gb * 1024 });
+    { id: 'echotype-medium', label: 'Echotype Medium', note: '1.5B. Catches more; uses about twice the memory.', downloadable: q.has('dl-cleaners'), size_mb: 940, ram_mb: 1099, installed: false, automatic: false, recommended: false, warning: low ? 'Uses about 1.1 GB while dictating. On an 8 GB Mac this can slow other apps.' : null }],
+  // ?writer: Echotype Writer installed (lib.rs SystemInfo.writer).
+  writer: { id: 'echotype-writer', label: 'Echotype Writer', note: '1.5B. Edits selected text when you ask: Command Mode and Transforms.', downloadable: true, size_mb: 860, ram_mb: 1012, installed: q.has('writer'), automatic: false, recommended: false, warning: null } };
+for (const m of models) Object.assign(m, { english_only: m.id.endsWith('.en'), fits: m.ram_mb + 2048 <= sys.available_ram_gb * 1024 });
 const rec = models.find(m => m.id === 'large-v3-turbo-q5_0');
 rec.recommended = true;
 // Automatic: the recommendation once downloaded, else the downloaded model closest in RAM (stt.rs auto_model).
@@ -73,7 +88,18 @@ let history = [
   // noclip: recorded before Echotype kept audio, so it has no Re-run (only the newest 20 do).
   { ts: ago(60 * 26), raw: 'ship it after the tauri build passes on ci', text: 'ship it after the tauri build passes on ci', stt_ms: 350, cleanup_ms: 0, stt_provider: 'local', cleanup_provider: null, no_cleanup: true, noclip: true },
 ];
+// ?recovered: a dictation the app quit during (settings.rs recover), not transcribed yet.
+if (q.has('recovered')) history.unshift({ ts: ago(0.5), raw: '', text: '', stt_ms: 0, cleanup_ms: 0, stt_provider: '', cleanup_provider: null, recovered: true });
 const secrets = new Set(['llm:groq']);
+// A second of silence as a 16 kHz 16-bit WAV: the preview's stand-in for every kept recording.
+const silentWav = () => {
+  const n = 16000, b = new DataView(new ArrayBuffer(44 + n * 2));
+  [...'RIFF'].forEach((c, i) => b.setUint8(i, c.charCodeAt(0))); b.setUint32(4, 36 + n * 2, true);
+  [...'WAVEfmt '].forEach((c, i) => b.setUint8(8 + i, c.charCodeAt(0)));
+  b.setUint32(16, 16, true); b.setUint16(20, 1, true); b.setUint16(22, 1, true); b.setUint32(24, 16000, true); b.setUint32(28, 32000, true); b.setUint16(32, 2, true); b.setUint16(34, 16, true);
+  [...'data'].forEach((c, i) => b.setUint8(36 + i, c.charCodeAt(0))); b.setUint32(40, n * 2, true);
+  return b.buffer;
+};
 
 // Echotype Cloud: ?cloud=free or ?cloud=pro starts signed in; any 6 digits except 000000 sign in.
 // Sample numbers only (the preview says so in the sidebar).
@@ -104,7 +130,7 @@ const commands = {
   list_models: () => { automatic(); return structuredClone(models); },
   // ?dl=slow takes five times as long; ?dl=stuck never finishes (onboarding's "getting ready").
   download_model: async ({ id }) => {
-    const m = models.find(x => x.id === id), total = m.size_mb * 1048576;
+    const m = [...models, ...sys.cleaners, sys.writer].find(x => x.id === id), total = m.size_mb * 1048576; // cleaners and the Writer too
     const steps = id === 'tiny.en' ? 16 : 40, ms = (id === 'tiny.en' ? 60 : 110) * (q.get('dl') === 'slow' ? 5 : 1);
     for (let i = 1; i <= steps; i++) {
       await wait(ms);
@@ -112,12 +138,12 @@ const commands = {
       if (cancelled.delete(id)) { emit('model-download', { id, downloaded: 0, total, done: true, error: 'Download cancelled' }); throw 'Download cancelled'; }
       emit('model-download', { id, downloaded: (total * i) / steps, total, done: false });
     }
-    m.downloaded = true;
+    m.downloaded = m.installed = true;
     emit('model-download', { id, downloaded: total, total, done: true });
     return null;
   },
   cancel_download: ({ id }) => { cancelled.add(id); return null; },
-  delete_model: ({ id }) => { models.find(x => x.id === id).downloaded = false; return null; },
+  delete_model: ({ id }) => { const m = [...models, ...sys.cleaners, sys.writer].find(x => x.id === id); m.downloaded = m.installed = false; return null; },
   list_input_devices: () => [
     { name: 'MacBook Pro Microphone', bluetooth: false, default: true, builtin: true },
     { name: 'AirPods Pro', bluetooth: true, default: false, builtin: false },
@@ -128,7 +154,7 @@ const commands = {
     const talk = settings.talk_key !== 'accelerator', globe = q.get('globe') !== '0', im = q.get('im') !== '0', relaunch = q.has('relaunch');
     const active = talk && (settings.talk_key !== 'fn' || globe) && im && !relaunch;
     return { talk_key_active: active, talk_key_error: talk && !active ? 'not active' : null, input_monitoring: im, globe_does_nothing: globe,
-      needs_relaunch: talk && im && relaunch, unregistered_shortcuts: q.has('shortcutfail') && settings.hotkey === 'Alt+Space' ? ['hotkey'] : [], key_label: '⌥ Space' };
+      needs_relaunch: talk && im && relaunch, unregistered_shortcuts: q.has('shortcutfail') ? [settings.hotkey === 'Alt+Space' && 'hotkey', ...settings.transforms.filter(t => t.shortcut === 'Control+Alt+P').map(t => `transform:${t.name}`)].filter(Boolean) : [], key_label: '⌥ Space' };
   },
   relaunch: () => null,
   // ?apps turns on "Match the app you're typing in", with a last dictation into Slack.
@@ -137,7 +163,14 @@ const commands = {
   check_update: () => ({ current: '0.1.0', version: q.has('update') ? '0.2.0' : null, notes: null }),
   install_update: () => { throw 'Browser preview: updates install in the app.'; },
   last_app: () => (q.has('apps') ? { id: 'com.tinyspeck.slackmacgap', name: 'Slack', style: 'casual' } : null),
-  get_history: ({ limit }) => (settings.history_enabled ? history.slice(0, limit) : []),
+  get_history: ({ limit }) => (settings.history_enabled ? history.filter(e => !settings.history_24h || Date.now() - e.ts <= 864e5).slice(0, limit) : []),
+  // As settings.rs search_history: every word in any of an entry's texts, any case or accent.
+  history_search: ({ query, limit }) => {
+    const fold = t => t.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase(), words = fold(query).split(/\s+/).filter(Boolean);
+    const all = commands.get_history({ limit: Infinity });
+    const hits = all.filter(e => words.every(w => fold([e.text, e.raw, e.original ?? '', e.cleaned ?? ''].join('\n')).includes(w)));
+    return { total: all.length, matched: hits.length, items: hits.slice(0, limit) };
+  },
   wispr_import_preview: () => (q.has('nowispr') ? null : {
     words: ['Aditya Rohilla', 'Wispr Flow', 'ZopMop', 'Anshi', 'xoxoday'], replacements: [{ from: 'my email address', to: 'me@example.com' }],
     languages: ['en'], app_styles: [{ id: 'com.tinyspeck.slackmacgap', name: 'Slack', style: 'casual' }, { id: 'net.whatsapp.WhatsApp', name: 'WhatsApp', style: 'casual' }],
@@ -147,6 +180,31 @@ const commands = {
     settings.display_name ||= 'Aditya';
     return ['5 dictionary words', '1 snippet', 'your languages', 'styles for Slack, WhatsApp', 'your talk key (Left ⌃)'];
   },
+  // Dictionary import (wordlist.rs): a rough stand-in for its parser, one row a line, "from,to" a snippet.
+  dictionary_import_preview: ({ text }) => {
+    const words = new Set(settings.dictionary.map(w => w.toLowerCase())), from = new Set(settings.replacements.map(r => r.from.toLowerCase()));
+    const out = { words: [], snippets: [], duplicates: 0, over: 0 };
+    for (const line of text.replace(/^\uFEFF/, '').split(/\r?\n/).map(l => l.trim()).filter(Boolean)) {
+      const [a, b] = line.split(',').map(x => x.trim()), seen = b ? from : words;
+      if (seen.has(a.toLowerCase())) out.duplicates++;
+      else if (out.words.length + out.snippets.length >= 1000) out.over++;
+      else { seen.add(a.toLowerCase()); b ? out.snippets.push({ from: a, to: b }) : out.words.push(a); }
+    }
+    return out;
+  },
+  dictionary_import: args => {
+    const p = commands.dictionary_import_preview(args);
+    settings.dictionary.push(...p.words); settings.replacements.push(...p.snippets);
+    setTimeout(() => emit('settings-changed', structuredClone(settings)), 0);
+    return p;
+  },
+  dictionary_export: () => '/Users/you/Downloads/Echotype Dictionary.csv',
+  // ?sharefail: saving the stats card fails. The last card saved is window.__statsCard (base64 PNG), for checks.
+  save_stats_card: ({ png }) => {
+    if (q.has('sharefail')) throw 'Could not save: Permission denied';
+    window.__statsCard = png;
+    return `/Users/you/Downloads/Echotype Stats ${new Date().toISOString().slice(0, 10)}.png`;
+  },
   update_history: ({ ts, text }) => {
     const e = history.find(x => x.ts === ts);
     if (!e) throw 'That entry is no longer in history.';
@@ -154,15 +212,16 @@ const commands = {
     return null;
   },
   clear_history: () => { history = []; return null; },
-  transcribe_file: async ({ path }) => {
-    await wait(1400);
-    if (/\.(txt|pdf|png)$/i.test(path)) throw `Not an audio file: ${path.split('/').pop()}`;
-    return {
-      raw: 'bhai woh client wala deck um kal subah tak bhej dena aur haan pricing slide pe naya number daal dena fifteen ki jagah twelve',
-      text: 'Please send the client deck by tomorrow morning, and update the pricing slide to 12 instead of 15.',
-      stt_ms: 1180, cleanup_ms: 640,
-    };
+  // files.rs: one file at a time, each reported on file-job; ?files queues a batch on load.
+  transcribe_files: ({ paths }) => {
+    const jobs = paths.filter(p => !fileQueue.some(j => j.path === p)).map(path => ({ id: nextFile++, path }));
+    fileQueue.push(...jobs);
+    runFiles();
+    return jobs;
   },
+  cancel_files: () => { const ids = fileQueue.filter(j => !j.watched).map(j => j.id); fileQueue = fileQueue.filter(j => j.watched); return ids; },
+  file_save: ({ path, format }) => `/Users/you/Downloads/${path.split('/').pop().replace(/\.[^.]+$/, '')}.${format}`,
+  pick_files: ({ folder }) => folder ? ['/Users/you/Recordings'] : ['/Users/you/Desktop/interview.m4a', '/Users/you/Desktop/lecture.mp4'],
   get_system_info: () => sys,
   local_api_status: () => ({ enabled: settings.local_api.enabled, port: settings.local_api.port, token: 'et_7f3c9a2e5b1d4f86a0c2e91b' }),
   toggle_dictation: async () => {
@@ -171,7 +230,7 @@ const commands = {
     emit('dictation-state', { state: 'recording' });
     for (let i = 0; i < 60; i++) {
       await wait(50);
-      emit('audio-level', { meter: Math.abs(Math.sin(i / 4)) * 0.6 + Math.random() * 0.2, muted: false });
+      emit('audio-level', q.has('muted') ? { meter: 0, muted: i >= 40 } : { meter: Math.abs(Math.sin(i / 4)) * 0.6 + Math.random() * 0.2, muted: false });
       if (i >= 30 && i % 10 === 0) partialOf('Let’s move the standup to 10:30 tomorrow.', (i - 20) / 40);
     }
     emit('dictation-state', { state: 'transcribing' }); await wait(700);
@@ -191,6 +250,9 @@ const commands = {
   pill_copy: () => null,
   pill_copy_cleaned: () => null,
   // Re-run last or History entry `ts` (lib.rs rerun_options / rerun): ?norerun = no clip kept.
+  // Kept audio (lib.rs history_clips / history_audio): ?norerun = none kept.
+  history_clips: () => (q.has('norerun') ? [] : history.filter((e, i) => !e.noclip && i < 20).map(e => e.ts)),
+  history_audio: () => silentWav(),
   rerun_options: ({ ts }) => {
     const e = ts == null ? history[0] : history.find(x => x.ts === ts);
     if (q.has('norerun') || !e || e.noclip || history.indexOf(e) >= 20) return [];
@@ -200,8 +262,9 @@ const commands = {
     const e = ts == null ? history[0] : history.find(x => x.ts === ts);
     if (!e) throw 'There is no recording to re-run';
     emit('dictation-state', { state: 'transcribing' }); await wait(500);
+    if (e.recovered) e.raw = 'so the plan is we ship the beta on friday and send the invite list monday';
     const text = id === 'raw' ? e.raw : e.raw[0].toUpperCase() + e.raw.slice(1) + '.';
-    Object.assign(e, { original: e.original ?? e.text, text, stt_ms: 610, cleanup_ms: id === 'raw' ? 0 : 450, stt_provider: id.startsWith('model:') ? `local:${id.slice(6)}` : e.stt_provider, cleanup_provider: id === 'raw' ? null : e.cleanup_provider, no_cleanup: id === 'raw', cleaned: undefined });
+    Object.assign(e, { recovered: false, original: e.original ?? e.text, text, stt_ms: 610, cleanup_ms: id === 'raw' ? 0 : 450, stt_provider: id.startsWith('model:') ? `local:${id.slice(6)}` : e.stt_provider, cleanup_provider: id === 'raw' ? null : e.cleanup_provider, no_cleanup: id === 'raw', cleaned: undefined });
     emit('dictation-state', { state: 'done', text, copied: true, card: true, warning: 'Re-run copied, ⌘V to paste' });
     return null;
   },
@@ -288,21 +351,28 @@ let meetingList = mq === 'empty' ? [] : mq === 'live' ? [liveMeeting, doneMeetin
     segments: [{ start: 4, end: 9, speaker: 's1', text: 'The candidate was strong on system design but the onboarding exercise ran long.' }, { start: 12, end: 15, speaker: 'you', text: 'Let’s ship the offer by Friday.' }],
     notices: ['The audio was deleted 30 days after the meeting to save space (Settings → Meetings). The transcript stays, but speakers can’t be re-checked without the audio.'] },
   { id: '2026-10-10-100000-meeting', title: 'Meeting', started_ms: now - 5 * 86400000, duration_s: 312, state: 'interrupted', speakers: {}, segments: [], notices: [], summary: null }];
+let stopSummary = false;
 Object.assign(commands, {
-  meeting_status: () => ({ live: mq === 'live' ? { id: liveMeeting.id, started_ms: liveMeeting.started_ms, recording: true } : null, computer_audio: !q.has('miconly'), speakers: !q.has('miconly'), screen_recording: !q.has('noscreen'), download_mb: mq === 'empty' ? 36 : 0, summaries: q.has('cloud') }),
+  meeting_status: () => ({ live: mq === 'live' ? { id: liveMeeting.id, started_ms: liveMeeting.started_ms, recording: true } : null, computer_audio: !q.has('miconly'), speakers: !q.has('miconly'), screen_recording: !q.has('noscreen'), download_mb: mq === 'empty' ? 36 : 0, summaries: true,
+    summary_with: q.has('openai') ? 'OpenAI' : 'Echotype Writer (on this Mac)', summary_blocked: q.has('nowriter') ? 'Meeting summaries need Echotype Writer: download it on the Models page' : null }),
   meeting_window: () => null,
   meeting_ask: async ({ question }) => {
-    if (!q.has('cloud')) throw 'Asking about a meeting is coming with Echotype Pro.';
     await new Promise(r => setTimeout(r, 400));
     return `Sample answer to "${question}" from the preview.`;
   },
+  // ?slowsum: parts long enough to screenshot the progress and try Cancel.
   meeting_summarize: async ({ id }) => {
-    if (!q.has('cloud')) throw 'Meeting summaries are coming with Echotype Pro.';
-    await new Promise(r => setTimeout(r, 600));
+    stopSummary = false;
+    for (const [i, of] of [[1, 3], [2, 3], [3, 3], [0, 0]]) {
+      if (stopSummary) throw 'Summary stopped.';
+      emit('meeting-summary', { id, progress: of ? `Summarizing part ${i} of ${of}…` : 'Writing the summary…' });
+      await new Promise(r => setTimeout(r, q.has('slowsum') ? 4000 : 300));
+    }
     const m = meetingList.find(x => x.id === id);
-    m.summary = '## Summary\nSample notes from the preview.\n## Decisions\nNone recorded.\n## Action items\nNone recorded.';
+    m.summary = '## Summary\nSample notes from the preview.\n\n## Key points\n- Ship on Friday.\n- Priya: send the deck by Thursday.';
     return structuredClone(m);
   },
+  meeting_summary_cancel: () => { stopSummary = true; },
   meeting_list: () => meetingList.map(m => ({ ...m, segments: [], summary: null })),
   meeting_get: ({ id }) => structuredClone(meetingList.find(m => m.id === id)),
   // meeting.rs search: every word somewhere, up to 3 lines with the most words, in time order.
@@ -320,7 +390,56 @@ Object.assign(commands, {
   preview_sounds: () => null,
   show_pill_demo: () => null,
   meeting_save: () => '/Users/you/Downloads/launch-review.md',
+  // Notes (notes.rs), in memory: ?notes=empty starts with none. Versions as notes.rs keeps them,
+  // simplified: every save with keep, or one that cuts more than half, keeps the text before.
+  notes_list: () => structuredClone(noteList.sort((a, b) => b.updated_ms - a.updated_ms)),
+  notes_save: ({ id, text, keep }) => {
+    let n = noteList.find(x => x.id === id);
+    if (!n) noteList.push(n = { id: Math.max(Date.now(), ...noteList.map(x => x.id + 1)), text: '', updated_ms: 0, versions: [] });
+    if (n.text.trim() && (keep || text.length * 2 < n.text.length)) n.versions = [...n.versions, { ms: Date.now(), text: n.text }].slice(-20);
+    Object.assign(n, { text, updated_ms: Date.now() });
+    return structuredClone(n);
+  },
+  notes_delete: ({ id }) => { noteList = noteList.filter(n => n.id !== id); return null; },
+  notes_export: () => '/Users/you/Downloads/launch-plan.md',
+  notes_target: ({ selection }) => { noteTarget = selection; return null; },
 });
+
+// Notes: sample data, and __mock.dictate(text) for what lib.rs does with a finished dictation:
+// into the focused note editor (note-insert), otherwise copied as from Echotype's own window.
+let noteTarget = null;
+let noteList = q.get('notes') === 'empty' ? [] : [
+  { id: now - 86_400_000, text: 'Launch plan\n\n- Record the demo video\n- Write the release notes\n- Ask Midhun for the App Store screenshots', updated_ms: now - 3_600_000,
+    versions: [{ ms: now - 7_200_000, text: 'Launch plan\n\n- Record the demo video' }, { ms: now - 5_400_000, text: 'Launch plan\n\n- Record the demo video\n- Write the release notes' }] },
+  { id: now - 172_800_000, text: 'Ideas for the onboarding film\nThe dots fall into the pill.', updated_ms: now - 90_000_000, versions: [] },
+  { id: now - 259_200_000, text: 'Groceries: oat milk, eggs, coffee', updated_ms: now - 200_000_000, versions: [] },
+];
+const dictate = text => noteTarget != null ? (emit('note-insert', text), emit('dictation-state', { state: 'done', text }))
+  : emit('dictation-state', { state: 'done', text, copied: true });
+
+let fileQueue = [], nextFile = 1, filesBusy = false;
+async function runFiles() {
+  if (filesBusy) return;
+  filesBusy = true;
+  await wait(50); // as in Rust, the queued reply reaches the page before the worker's first event
+  while (fileQueue.length) {
+    const { id, path, watched } = fileQueue.shift();
+    emit('file-job', { id, path, watched: !!watched, state: 'working' });
+    await wait(1400);
+    if (/\.(txt|pdf|png)$/i.test(path)) { emit('file-job', { id, path, state: 'error', error: `Not an audio file: ${path.split('/').pop()}` }); continue; }
+    emit('file-job', {
+      id, path, watched: !!watched, state: 'done', secs: 9.5,
+      raw: 'bhai woh client wala deck um kal subah tak bhej dena aur haan pricing slide pe naya number daal dena fifteen ki jagah twelve',
+      text: 'Please send the client deck by tomorrow morning, and update the pricing slide to 12 instead of 15.',
+      stt_ms: 1180, cleanup_ms: 640, saved: watched ? path.replace(/\.[^.]+$/, `.${settings.watch_format}`) : null,
+    });
+  }
+  filesBusy = false;
+}
+if (q.has('files')) setTimeout(() => {
+  commands.transcribe_files({ paths: ['/Users/you/Desktop/standup.m4a', '/Users/you/Desktop/notes.txt', '/Users/you/Desktop/interview.mp3', '/Users/you/Desktop/lecture.mp4'] }).forEach(j => emit('file-job', { ...j, state: 'queued' }));
+  fileQueue.push({ id: nextFile++, path: '/Users/you/Recordings/call.wav', watched: true });
+}, 300);
 
 const api = {
   core: {
@@ -338,7 +457,7 @@ const api = {
   },
 };
 window.__TAURI__ = api;
-window.__mock = { emit, commands };
+window.__mock = { emit, commands, dictate };
 
 // Say so on screen: everything in this preview is sample data.
 const sidebar = document.querySelector('.sidebar');
@@ -396,7 +515,7 @@ if (q.has('state')) {
 
 // The dictation shortcut in the preview: hold ⌥ Space (or call __mock.hold(ms)) for what hotkey.rs
 // and lib.rs send: hotkey-state with the keys, then a dictation of "Echotype, meet my Mac." A tap is
-// a hint. From onboarding's step 3 on it counts as pasted into another app.
+// a hint. From onboarding's step 4 on it counts as pasted into another app.
 let held = 0, live = false;
 async function release() {
   const ms = performance.now() - held;
@@ -407,7 +526,7 @@ async function release() {
   live = false;
   if (ms < 300) { emit('dictation-state', { state: 'hint', message: 'Hold ⌥ Space to dictate' }); return; }
   emit('dictation-state', { state: 'transcribing' }); await wait(650);
-  emit('dictation-state', { state: 'done', text: 'Echotype, meet my Mac.', copied: settings.onboard_step < 3 && !settings.onboarded });
+  emit('dictation-state', { state: 'done', text: 'Echotype, meet my Mac.', copied: settings.onboard_step < 4 && !settings.onboarded });
   await wait(400);
   emit('dictation-state', { state: 'idle' });
 }

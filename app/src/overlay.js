@@ -23,6 +23,8 @@ let hush = null;
 // The guard's card (cur.cleaned): Copy cleaned was pressed, so the card says what is on the clipboard.
 let cleanedCopied = false;
 const PASTE = /Mac/.test(navigator.platform) ? '⌘V' : 'Ctrl+V';
+// pill.rs NO_SOUND sizes the capsule for these words.
+const NO_SOUND = 'No sound from your microphone';
 
 // One primary line from the state; the chip (already ranked in Rust) is the only extra.
 // pill.rs `line()` sizes the hit area from the same words.
@@ -65,8 +67,11 @@ function render() {
   creason.classList.toggle('fixable', fixable);
   fixBtn.hidden = !fixable;
   ckey.textContent = card && cleanedCopied ? `${PASTE} to paste` : card && cur.paste_key ? `Paste last: ${cur.paste_key}` : '';
-  const text = !active ? (view?.expand ? view.hint : '') : muted ? 'Is your mic muted?' : primary(cur);
+  const text = !active ? (view?.expand ? view.hint : '') : muted ? NO_SOUND : primary(cur);
   label.textContent = text;
+  // Muted, the words are a button: they open the microphone picker (lib.rs pill_open "mic").
+  if (active && muted) label.dataset.act = 'mic'; else delete label.dataset.act;
+  label.title = active && muted ? 'Choose another microphone' : '';
   chipEl.hidden = !active || !cur.chip;
   chipEl.dataset.chip = cur.chip || '';
   chipEl.textContent = CHIP[cur.chip] || '';
@@ -332,6 +337,7 @@ addEventListener('mouseup', e => {
   if (act === 'offer') return invoke('pill_offer');
   if (act === 'close') return invoke('pill_dismiss');
   if (act === 'fix') return invoke('pill_open'); // Home, with the Accessibility fix
+  if (act === 'mic') return invoke('pill_open', { page: 'mic' });
   if (pill.classList.contains('card')) return; // the card's text is to read; even a double-click there leaves the pill where it is
   if (target === pill && e.detail === 2) return invoke('pill_reset');
   const active = pill.classList.contains('active');

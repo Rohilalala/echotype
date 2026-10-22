@@ -31,9 +31,9 @@ const HF_COMMIT: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
 // ponytail: small, medium, large-v3 (full and Q5), full turbo and base.en were offered until
 // 2026-10-16; the app says more are coming. Their rows (and RAM_MB numbers) are in git history.
 // Small (488 MB) was the 8 GB pick but saved 44 MB of RAM over Turbo Q5; it only earned its place
-// by translating, which comes back with a translating model.
+// by translating, which the cleanup provider now does (cleanup::auto_transform).
 pub const MODELS: &[Model] = &[
-    Model { id: "large-v3-turbo-q5_0", label: "Large v3 Turbo (Q5)", size_mb: 547, note: "Best default: near-large accuracy, fast, 99 languages. Cannot translate.", sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2" },
+    Model { id: "large-v3-turbo-q5_0", label: "Large v3 Turbo (Q5)", size_mb: 547, note: "Best default: near-large accuracy, fast, 99 languages.", sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2" },
     Model { id: "tiny.en", label: "Tiny (English)", size_mb: 78, note: "English only. Fastest, least accurate.", sha256: "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f" },
 ];
 
@@ -50,6 +50,8 @@ pub const RAM_MB: &[(&str, u64)] = &[
     // 2026-10-16, llama-server -c 1024 -ngl 99, one cleanup, max RSS.
     ("echotype-tiny", 552),
     ("echotype-medium", 1099),
+    // 2026-10-22, llama-server -c 2048 -ctk q8_0 -ctv q8_0, one edit of a long selection, RSS.
+    ("echotype-writer", 1012),
 ];
 
 /// RAM_MB for a catalog id; anything unknown is assumed to be as large as the largest model.
@@ -105,10 +107,6 @@ pub fn ram_warning(ram_mb: u64, auto_ram_mb: u64, total_mb: u64) -> Option<Strin
 /// "800 MB", "1.8 GB".
 pub fn fmt_mb(mb: u64) -> String {
     if mb < 1000 { format!("{mb} MB") } else { format!("{:.1} GB", mb as f64 / 1024.0).replace(".0 GB", " GB") }
-}
-
-pub fn translates(id: &str) -> bool {
-    !id.contains("turbo") && !id.ends_with(".en")
 }
 
 pub fn models_dir() -> PathBuf {
@@ -190,7 +188,6 @@ pub struct ModelStatus {
     pub size_mb: u64,
     pub ram_mb: u64,
     pub english_only: bool,
-    pub translates: bool,
     pub downloaded: bool,
     /// Fits in the memory free right now, with HEADROOM_MB to spare.
     pub fits: bool,
@@ -217,7 +214,6 @@ fn list_models_with(total_mb: u64, available_mb: u64, downloaded: impl Fn(&str) 
             size_mb: m.size_mb,
             ram_mb: ram_of(m.id),
             english_only: m.id.ends_with(".en"),
-            translates: translates(m.id),
             downloaded: downloaded(m.id),
             fits: fits(ram_of(m.id), available_mb),
             recommended: m.id == recommended(total_mb),
@@ -228,35 +224,21 @@ fn list_models_with(total_mb: u64, available_mb: u64, downloaded: impl Fn(&str) 
         .collect()
 }
 
-/// Picks the local model for these settings. When translation is on and the chosen model
-/// cannot translate, falls back to the best downloaded translating model that fits in RAM,
-/// returning a warning that says so.
-pub fn pick_local_model(s: &Settings) -> Result<(PathBuf, Option<String>), String> {
-    let chosen = &local_model(s);
-    if !s.translate_to_english || translates(&model_id(chosen)) {
-        return Ok((resolve(chosen)?, None));
-    }
-    let (_, avail) = ram_mb();
-    for m in MODELS.iter().filter(|m| translates(m.id) && fits(ram_of(m.id), avail)) {
-        if let Some(p) = model_file(m.id) {
-            let w = format!("{} cannot translate, so {} was used for this translation.", model_id(chosen), m.id);
-            return Ok((p, Some(w)));
-        }
-    }
-    // No offered model translates yet: type it as spoken rather than fail the dictation.
-    Ok((resolve(chosen)?, Some("Translate to English is coming soon, so this was typed as spoken.".into())))
+/// The local model file for these settings. Translate to English no longer needs a model that
+/// translates: the cleanup provider translates the text (cleanup::auto_transform).
+pub fn pick_local_model(s: &Settings) -> Result<PathBuf, String> {
+    resolve(&local_model(s))
 }
 
 /// Whether a dictation can start right now, checked before the microphone opens: a local model
-/// on disk (and a translating one when translation is on), or a key for a remote provider that needs one.
+/// on disk, or a key for a remote provider that needs one.
 pub fn ready(s: &Settings) -> Result<(), String> {
     ready_with(s, |stage, provider| settings::provider_key(stage, provider).is_some())
 }
 
 fn ready_with(s: &Settings, has_key: impl Fn(&str, &str) -> bool) -> Result<(), String> {
     if s.stt.provider == "local" {
-        resolve(&local_model(s)).map_err(|_| "Choose a speech model".to_string())?;
-        return pick_local_model(s).map(|_| ());
+        return pick_local_model(s).map(|_| ()).map_err(|_| "Choose a speech model".to_string());
     }
     match settings::preset(&s.stt.provider) {
         Some(p) if p.id == "cloud" && !has_key("stt", "cloud") => Err("Sign in to Echotype Cloud to dictate".into()),
@@ -432,7 +414,7 @@ pub fn delete(id: &str) -> Result<(), String> {
 // ---------- local whisper ----------
 
 // One loaded model + state, reused across calls (state creation costs ~0.5 s with Metal).
-// ponytail: one model resident at a time; a translate run swaps turbo for medium and back. Keep two slots if users flip often.
+// ponytail: one model resident at a time; a Re-run with another model swaps it out. Keep two slots if users flip often.
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
 
 /// Silero on its own, loaded on first use (1 MB, CPU): whisper.cpp's built-in VAD still
@@ -539,20 +521,78 @@ fn not_internal(path: &Path) -> Option<&'static str> {
 
 /// Frees the loaded model. Must run before process exit: ggml-metal asserts at exit
 /// if a context still holds GPU residency sets.
+/// Frees every whisper context, the voice detector and language ID too: one still alive at exit
+/// trips ggml-metal's teardown assert, so each quit ended in an abort and a crash report.
 pub fn unload() {
     *ENGINE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *SILERO.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *LID.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 pub fn quiet_whisper_logs() {
     whisper_rs::install_logging_hooks();
 }
 
-/// Whisper prompt from the dictionary: biases spelling of names at no latency cost. Whisper
+/// A few sentences of each language as people type it in English letters. Whisper writes in the
+/// script of its prompt, so one of these first gets that language back in English letters
+/// (Settings `script` "latin"): Hindi comes out as "Namaste, aap kaise hai?", not "नमस्ते". Only
+/// languages checked with large-v3-turbo are here: their speech comes back in English letters (the
+/// romanised_prompts test) and English clips decoded as them under their prompt stay English.
+/// Telugu and Kannada romanised well but turned English into Dutch or mangled numbers; Tamil
+/// looped; Arabic, Russian, Ukrainian, Greek and Japanese kept their own script. Indian languages
+/// whisper still writes in their own script are converted after it instead (translit.rs).
+pub const ROMANISED: &[(&str, &str)] = &[
+    ("hi", "Namaste, aap kaise hain? Main theek hoon, shukriya. Kal milte hain."),
+    ("mr", "Namaskar, tumhi kase aahat? Mi thik aahe, dhanyavaad. Udya bhetu."),
+    ("ur", "Assalam alaikum, aap kaise hain? Main theek hoon, shukriya. Kal milte hain."),
+    ("bn", "Nomoskar, apni kemon achhen? Ami bhalo achhi, dhonnobad. Kal dekha hobe."),
+];
+
+/// The user's ROMANISED languages when they want them in English letters ("latin").
+fn romanised(s: &Settings) -> Vec<&'static (&'static str, &'static str)> {
+    let latin = s.script == "latin";
+    ROMANISED.iter().filter(|(l, _)| latin && s.languages.iter().any(|x| x == l)).collect()
+}
+
+/// Dictations come back in English letters for one of the user's languages.
+pub fn romanising(s: &Settings) -> bool {
+    !romanised(s).is_empty()
+}
+
+/// Whisper prompt: the romanised sentences of the user's languages when they want English
+/// letters, then the dictionary, which biases spelling of names at no latency cost. Whisper
 /// copies the prompt's style, so it ends like a sentence: a bare comma list made it drop full
-/// stops, which ran a meeting's sentences (and so its speakers) together.
-pub fn prompt(dictionary: &[String]) -> String {
-    let words: Vec<String> = dictionary.iter().map(|w| w.trim().replace('\0', "")).filter(|w| !w.is_empty()).collect();
-    if words.is_empty() { String::new() } else { format!("{}.", words.join(", ")) }
+/// stops, which ran a meeting's sentences (and so its speakers) together. The names read off the
+/// screen for this dictation (Settings::screen) follow the dictionary's.
+pub fn prompt(s: &Settings) -> String {
+    let mut parts: Vec<String> = romanised(s).iter().map(|(_, p)| p.to_string()).collect();
+    let mut words: Vec<String> = s.dictionary.iter().map(|w| w.trim().replace('\0', "")).filter(|w| !w.is_empty()).collect();
+    // Only into this Mac's own speech model: the words may be read for a cleanup provider too.
+    for w in s.screen.words.iter().filter(|_| s.stt.provider == "local") {
+        if !words.iter().any(|d| d.eq_ignore_ascii_case(w)) {
+            words.push(w.clone());
+        }
+    }
+    if !words.is_empty() {
+        parts.push(format!("{}.", words.join(", ")));
+    }
+    parts.join(" ")
+}
+
+/// The languages whisper picks among: in English letters, only the romanised ones, so English and
+/// mixed speech are decoded as Hindi (say) under its romanised prompt instead of being detected.
+/// With [en, hi], detection called the owner's mixed "Hello aap kaise hai" English (0.37 to 0.13)
+/// and whisper translated it to "Hello, how are you?"; as Hindi with the prompt it came back as
+/// said, and his English clips stayed English word for word.
+/// The user's other Indian languages (Tamil with Hindi, say) stay in the running: whisper tells
+/// those apart well, and translit.rs writes them in English letters afterwards.
+pub fn languages(s: &Settings) -> Vec<String> {
+    let mine: Vec<String> = romanised(s).iter().map(|(l, _)| l.to_string()).collect();
+    if mine.is_empty() {
+        return s.languages.clone();
+    }
+    let converted = s.languages.iter().filter(|l| crate::translit::LANGS.contains(&l.as_str()) && !mine.contains(l)).cloned();
+    mine.iter().cloned().chain(converted).collect()
 }
 
 pub fn norm(w: &str) -> String {
@@ -623,19 +663,19 @@ pub fn clean_text(s: &str) -> String {
 /// `vad`: the Silero speech detector. With it, a clip with no speech in it (taps, a snap, the
 /// room) comes back empty instead of whisper's "Thank you." or "I'm going to go to the next one."
 /// Segments wholly outside Silero's speech are dropped (heard).
-pub fn transcribe_local(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, vad: Option<&Path>) -> Result<String, String> {
-    transcribe(model, pcm, languages, translate, prompt, vad, None)
+pub fn transcribe_local(model: &Path, pcm: &[f32], languages: &[String], prompt: &str, vad: Option<&Path>) -> Result<String, String> {
+    transcribe(model, pcm, languages, prompt, vad, None)
 }
 
 /// The words so far while still recording (lib.rs partials): like transcribe_local, but it never
 /// moves LAST_LANG, and whisper gives up as soon as `stop` is set, so the final run on release
 /// gets the model at once instead of waiting for this one.
-pub fn transcribe_partial(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, vad: Option<&Path>, stop: &AtomicBool) -> Result<String, String> {
-    transcribe(model, pcm, languages, translate, prompt, vad, Some(stop))
+pub fn transcribe_partial(model: &Path, pcm: &[f32], languages: &[String], prompt: &str, vad: Option<&Path>, stop: &AtomicBool) -> Result<String, String> {
+    transcribe(model, pcm, languages, prompt, vad, Some(stop))
 }
 
 /// `stop`: None for a dictation (sticky language, never aborted), Some for a partial.
-fn transcribe(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, vad: Option<&Path>, stop: Option<&AtomicBool>) -> Result<String, String> {
+fn transcribe(model: &Path, pcm: &[f32], languages: &[String], prompt: &str, vad: Option<&Path>, stop: Option<&AtomicBool>) -> Result<String, String> {
     if pcm.is_empty() {
         return Ok(String::new());
     }
@@ -643,7 +683,7 @@ fn transcribe(model: &Path, pcm: &[f32], languages: &[String], translate: bool, 
     if spans.as_ref().is_some_and(Vec::is_empty) {
         return Ok(String::new());
     }
-    run_local(model, pcm, languages, translate, prompt, false, stop.is_none(), vad, stop, |state| {
+    run_local(model, pcm, languages, prompt, false, stop.is_none(), vad, stop, |state| {
         let mut text = String::new();
         for i in 0..state.full_n_segments() {
             let Some(seg) = state.get_segment(i) else { continue };
@@ -686,7 +726,7 @@ pub fn transcribe_words(model: &Path, pcm: &[f32], languages: &[String], prompt:
 }
 
 fn words_of(model: &Path, pcm: &[f32], languages: &[String], prompt: &str, vad: Option<&Path>, spans: Option<&[(f32, f32)]>) -> Result<Vec<Word>, String> {
-    run_local(model, pcm, languages, false, prompt, true, false, vad, None, |state| {
+    run_local(model, pcm, languages, prompt, true, false, vad, None, |state| {
         let mut tokens: Vec<(Vec<u8>, f32, f32)> = vec![];
         for i in 0..state.full_n_segments() {
             let Some(seg) = state.get_segment(i) else { continue };
@@ -773,6 +813,26 @@ fn lid_probs(pcm: &[f32]) -> Option<Vec<f32>> {
 /// (de/es/fr, 90 clips) every full-length clip clears 0.8, and 50 of 90 of their first 3 s do.
 const OTHER_LANGUAGE_P: f32 = 0.8;
 
+/// A language to offer the user (Settings.language_offer) after a dictation of 3 s or more: one
+/// the tiny model is OTHER_LANGUAGE_P sure of, not in their languages and not offered before.
+/// Never with auto-detect, which already types every language, or with 3 picked (the most).
+// ponytail: runs the tiny model (32 MB, kept loaded) for one-language users too, after the paste;
+// sample every few dictations if its memory or 13 ms matter.
+pub fn language_to_offer(s: &Settings, pcm: &[f32]) -> Option<String> {
+    let rate = crate::audio::RATE as usize;
+    if s.languages.is_empty() || s.languages.len() >= 3 || pcm.len() < 3 * rate || !lid_path().is_file() {
+        return None;
+    }
+    offer(&lid_probs(&pcm[..pcm.len().min(30 * rate)])?, &s.languages, &s.dismissed)
+}
+
+fn offer(probs: &[f32], languages: &[String], dismissed: &[String]) -> Option<String> {
+    let top = (0..probs.len()).max_by(|&a, &b| probs[a].total_cmp(&probs[b]))?;
+    let code = whisper_rs::get_lang_str(top as i32)?;
+    let new = probs[top] >= OTHER_LANGUAGE_P && !languages.iter().any(|l| l == code) && !dismissed.contains(&format!("lang_offer:{code}"));
+    new.then(|| code.to_string())
+}
+
 /// "Detect any language": the likeliest of `likely` (and the last language, `last`), unless another
 /// language scores OTHER_LANGUAGE_P or more.
 fn auto_pick(probs: &[f32], likely: &[String], last: Option<&str>) -> Option<String> {
@@ -842,7 +902,7 @@ unsafe extern "C" fn stop_set(data: *mut std::ffi::c_void) -> bool {
 /// `sticky`: lean to, and remember, the language of the last such run (LAST_LANG); dictation only.
 /// `stop`: whisper aborts (an Err) once it is set.
 #[allow(clippy::too_many_arguments)]
-fn run_local<T>(model: &Path, pcm: &[f32], languages: &[String], translate: bool, prompt: &str, timestamps: bool, sticky: bool, vad: Option<&Path>, stop: Option<&AtomicBool>, read: impl FnOnce(&WhisperState) -> Result<T, String>) -> Result<T, String> {
+fn run_local<T>(model: &Path, pcm: &[f32], languages: &[String], prompt: &str, timestamps: bool, sticky: bool, vad: Option<&Path>, stop: Option<&AtomicBool>, read: impl FnOnce(&WhisperState) -> Result<T, String>) -> Result<T, String> {
     let mut g = ENGINE.lock().unwrap_or_else(|e| e.into_inner());
     if g.as_ref().is_none_or(|e| e.path != model) {
         *g = None; // free the old model before loading the next one
@@ -907,7 +967,6 @@ fn run_local<T>(model: &Path, pcm: &[f32], languages: &[String], translate: bool
         }
     };
     p.set_language(lang.as_deref());
-    p.set_translate(translate);
     p.set_print_progress(false);
     p.set_print_realtime(false);
     p.set_print_special(false);
@@ -945,13 +1004,13 @@ pub fn warm_up(s: &Settings) {
     if s.stt.provider != "local" {
         return;
     }
-    let Ok((path, _)) = pick_local_model(s) else { return };
+    let Ok(path) = pick_local_model(s) else { return };
     if !fits(ram_need(&path), ram_mb().1) {
         eprintln!("echotype: not warming up {}: not enough free RAM", path.display());
         return;
     }
     let t = Instant::now();
-    match transcribe_local(&path, &vec![0.0; 16_000], &["en".into()], false, "", None) {
+    match transcribe_local(&path, &vec![0.0; 16_000], &["en".into()], "", None) {
         Ok(_) => eprintln!("echotype: warmed up {} in {} ms", path.display(), t.elapsed().as_millis()),
         Err(e) => eprintln!("echotype: warm-up failed: {e}"),
     }
@@ -966,19 +1025,17 @@ pub fn transcribe_remote(s: &Settings, pcm: &[f32], prompt: &str) -> Result<Stri
     }
     let base = settings::base_url(provider, &s.stt.base_url)?;
     let model = if s.stt.model.trim().is_empty() { settings::preset(provider).map(|p| p.default_stt_model).unwrap_or_default().to_string() } else { s.stt.model.trim().to_string() };
-    // OpenAI's translation endpoint returns English; it takes no language.
-    let endpoint = if s.translate_to_english { "audio/translations" } else { "audio/transcriptions" };
     let file = reqwest::blocking::multipart::Part::bytes(crate::audio::wav_bytes(pcm)).file_name("audio.wav").mime_str("audio/wav").map_err(|e| e.to_string())?;
     let mut form = reqwest::blocking::multipart::Form::new().part("file", file).text("model", model).text("response_format", "json");
     // An upload names at most one language: with two or three the provider detects among all.
-    if let (false, [one]) = (s.translate_to_english, s.languages.as_slice()) {
+    if let [one] = languages(s).as_slice() {
         form = form.text("language", one.clone());
     }
     if !prompt.is_empty() {
         form = form.text("prompt", prompt.to_string());
     }
     let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(120)).build().map_err(|e| e.to_string())?;
-    let mut req = client.post(format!("{base}/{endpoint}")).multipart(form);
+    let mut req = client.post(format!("{base}/audio/transcriptions")).multipart(form);
     if let Some(key) = settings::provider_key("stt", provider) {
         req = req.bearer_auth(key);
     }
@@ -999,6 +1056,32 @@ pub fn transcribe_remote(s: &Settings, pcm: &[f32], prompt: &str) -> Result<Stri
 mod tests {
     use super::*;
 
+    /// Each ROMANISED language spoken, in both scripts: native comes back in its own script, English
+    /// letters with no other. ECHOTYPE_TEST_MODEL=<large-v3-turbo> ECHOTYPE_TEST_CLIPS=<folder of
+    /// <code>.wav, e.g. `say -v Lekha -o hi.aiff "…"` then 16 kHz mono>
+    /// `cargo test --release romanised_prompts -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn romanised_prompts() {
+        let (Ok(model), Ok(dir)) = (std::env::var("ECHOTYPE_TEST_MODEL"), std::env::var("ECHOTYPE_TEST_CLIPS")) else { return eprintln!("skipped") };
+        for (code, _) in ROMANISED {
+            let Ok(wav) = std::fs::read(Path::new(&dir).join(format!("{code}.wav"))) else { eprintln!("{code}: no clip"); continue };
+            let pcm = crate::audio::decode(wav, Some("wav")).unwrap();
+            let mut s = Settings { languages: vec![code.to_string()], ..Default::default() };
+            let run = |s: &Settings| transcribe_local(Path::new(&model), &pcm, &languages(s), &prompt(s), None).unwrap();
+            let native = run(&s);
+            s.script = "latin".into();
+            let latin = run(&s);
+            s.languages.insert(0, "en".into());
+            let mixed = run(&s);
+            eprintln!("{code} native: {native}\n{code} latin: {latin}\n{code} en+{code} latin: {mixed}");
+            assert!(native.chars().any(|c| c.is_alphabetic() && !c.is_ascii()), "{code} in its own script: {native:?}");
+            for t in [&latin, &mixed] {
+                assert!(t.chars().all(|c| !c.is_alphabetic() || c.is_ascii()) && t.chars().any(char::is_alphabetic), "{code} in English letters: {t:?}");
+            }
+        }
+    }
+
     /// A quiet room with a knock every 600 ms (owner report: tapping the laptop typed "Thank you.",
     /// a finger snap "I'm going to go to the next one."), through the real model: with Silero,
     /// nothing comes back; speech still does.
@@ -1011,8 +1094,8 @@ mod tests {
         let pcm = knocks(8);
         // Text with no letter or digit ("." or "...") is no speech to the app (cleanup::has_speech).
         let nothing = |pcm: &[f32], what: &str| {
-            eprintln!("{what} without Silero: {:?}", transcribe_local(model, pcm, &[], false, "", None));
-            let t = transcribe_local(model, pcm, &[], false, "", Some(&vad)).unwrap();
+            eprintln!("{what} without Silero: {:?}", transcribe_local(model, pcm, &[], "", None));
+            let t = transcribe_local(model, pcm, &[], "", Some(&vad)).unwrap();
             assert!(!crate::cleanup::has_speech(&t), "{what} is not speech: {t:?}");
         };
         nothing(&pcm, "knocks");
@@ -1026,7 +1109,7 @@ mod tests {
             let t = Instant::now();
             assert!(super::speech(&vad, &speech).is_some_and(|s| !s.is_empty()));
             eprintln!("Silero on {:.1} s of speech: {} ms", speech.len() as f32 / 16_000.0, t.elapsed().as_millis());
-            let text = transcribe_local(model, &speech, &[], false, "", Some(&vad)).unwrap();
+            let text = transcribe_local(model, &speech, &[], "", Some(&vad)).unwrap();
             eprintln!("speech with Silero: {text}");
             assert!(text.split_whitespace().count() >= 3, "speech still comes through: {text:?}");
         }
@@ -1043,17 +1126,17 @@ mod tests {
         let speech = crate::audio::decode(std::fs::read(&wav).unwrap(), Some("wav")).unwrap();
         let clip = |secs: usize| speech.iter().copied().cycle().take(16_000 * secs).collect::<Vec<f32>>();
         let (go, en) = (AtomicBool::new(false), ["en".to_string()]);
-        transcribe_partial(model, &clip(1), &en, false, "", vad.as_deref(), &go).unwrap(); // load + Metal warm-up
+        transcribe_partial(model, &clip(1), &en, "", vad.as_deref(), &go).unwrap(); // load + Metal warm-up
         for secs in [5, 10, 20] {
             let pcm = clip(secs);
             let runs: Vec<u128> = (0..3)
                 .map(|_| {
                     let t = Instant::now();
-                    transcribe_partial(model, &pcm, &en, false, "", vad.as_deref(), &go).unwrap();
+                    transcribe_partial(model, &pcm, &en, "", vad.as_deref(), &go).unwrap();
                     t.elapsed().as_millis()
                 })
                 .collect();
-            eprintln!("partial on {secs} s: {runs:?} ms; {:?}", transcribe_partial(model, &pcm, &en, false, "", vad.as_deref(), &go).unwrap());
+            eprintln!("partial on {secs} s: {runs:?} ms; {:?}", transcribe_partial(model, &pcm, &en, "", vad.as_deref(), &go).unwrap());
         }
         // Released mid-partial: the final run waits only for the abort.
         let pcm = clip(crate::PARTIAL_TAIL.as_secs() as usize);
@@ -1061,7 +1144,7 @@ mod tests {
             let stop = std::sync::Arc::new(AtomicBool::new(false));
             let (m, p, s, v, en) = (model.to_path_buf(), pcm.clone(), stop.clone(), vad.clone(), en.clone());
             let partial = std::thread::spawn(move || {
-                let r = transcribe_partial(&m, &p, &en, false, "", v.as_deref(), &s);
+                let r = transcribe_partial(&m, &p, &en, "", v.as_deref(), &s);
                 (r.is_err(), Instant::now())
             });
             std::thread::sleep(Duration::from_millis(after));
@@ -1070,7 +1153,7 @@ mod tests {
             let (aborted, done) = partial.join().unwrap();
             eprintln!("stopped {after} ms into a partial on {} s: model free {} ms later (aborted: {aborted})", pcm.len() / 16_000, done.saturating_duration_since(t).as_millis());
         }
-        let final_text = transcribe_local(model, &clip(20), &["en".into()], false, "", vad.as_deref()).unwrap();
+        let final_text = transcribe_local(model, &clip(20), &["en".into()], "", vad.as_deref()).unwrap();
         unload(); // ggml-metal asserts at exit while a model is resident
         assert!(final_text.contains("country"), "the final run is unharmed by the aborted one: {final_text}");
     }
@@ -1105,10 +1188,10 @@ mod tests {
         let (model, vad) = (Path::new(&model), crate::speakers::vad().expect("Silero downloaded (speakers::ensure_vad)"));
         let mut pcm = knocks(1)[..8_000].to_vec();
         pcm.extend(crate::audio::decode(std::fs::read(&wav).unwrap(), Some("wav")).unwrap());
-        let alone = transcribe_local(model, &pcm, &[], false, "", Some(&vad)).unwrap();
+        let alone = transcribe_local(model, &pcm, &[], "", Some(&vad)).unwrap();
         pcm.extend(knocks(40));
-        let all = transcribe_local(model, &pcm, &[], false, "", None).unwrap();
-        let kept = transcribe_local(model, &pcm, &[], false, "", Some(&vad)).unwrap();
+        let all = transcribe_local(model, &pcm, &[], "", None).unwrap();
+        let kept = transcribe_local(model, &pcm, &[], "", Some(&vad)).unwrap();
         eprintln!("speech alone: {alone}\nuntrimmed:    {all}\ntrimmed:      {kept}");
         assert!(alone.split_whitespace().count() >= 3, "speech comes through: {alone:?}");
         // Whisper words the same speech a little differently in a longer clip ("5" / "5:00"), so
@@ -1187,7 +1270,7 @@ mod tests {
         let (Ok(model), Ok(wav)) = (std::env::var("ECHOTYPE_TEST_MODEL"), std::env::var("ECHOTYPE_TEST_HINDI")) else { return eprintln!("skipped") };
         let pcm = crate::audio::decode(std::fs::read(&wav).unwrap(), Some("wav")).unwrap();
         let mine = ["en".to_string(), "hi".to_string()];
-        let text = transcribe_local(Path::new(&model), &pcm, &mine, false, "", None).unwrap();
+        let text = transcribe_local(Path::new(&model), &pcm, &mine, "", None).unwrap();
         eprintln!("en+hi: {text}");
         assert!(text.chars().any(|c| ('\u{0900}'..='\u{097F}').contains(&c)), "Devanagari expected: {text:?}");
     }
@@ -1300,6 +1383,23 @@ mod tests {
     }
 
     #[test]
+    fn a_clear_language_the_user_has_not_picked_is_offered_once() {
+        let mut probs = vec![0.0f32; whisper_rs::get_lang_max_id() as usize + 1];
+        let id = |c: &str| whisper_rs::get_lang_id(c).unwrap() as usize;
+        let (en, none) = (vec!["en".to_string()], Vec::<String>::new());
+        probs[id("hi")] = 0.9;
+        assert_eq!(offer(&probs, &en, &none).as_deref(), Some("hi"));
+        assert_eq!(offer(&probs, &en, &["lang_offer:hi".to_string()]), None, "never twice");
+        assert_eq!(offer(&probs, &["en".into(), "hi".into()], &none), None, "already theirs");
+        probs[id("hi")] = 0.6; // a short Hinglish clip: not sure enough
+        assert_eq!(offer(&probs, &en, &none), None);
+        let mut s = Settings::default();
+        assert_eq!(language_to_offer(&s, &vec![0.0; 16_000 * 5]), None, "auto-detect types every language");
+        s.languages = en;
+        assert_eq!(language_to_offer(&s, &vec![0.0; 16_000]), None, "under 3 s");
+    }
+
+    #[test]
     fn the_likeliest_of_the_users_languages_wins() {
         let mut probs = vec![0.0f32; whisper_rs::get_lang_max_id() as usize + 1];
         let id = |c: &str| whisper_rs::get_lang_id(c).unwrap() as usize;
@@ -1333,12 +1433,7 @@ mod tests {
     }
 
     #[test]
-    fn translate_capability_by_id() {
-        assert!(!translates("large-v3-turbo-q5_0"));
-        assert!(!translates("large-v3-turbo"));
-        assert!(!translates("base.en"));
-        assert!(translates("medium"));
-        assert!(translates("small"));
+    fn model_ids_from_paths() {
         assert_eq!(model_id("/Users/x/.cache/whisper/ggml-medium.bin"), "medium");
         assert_eq!(model_id("large-v3-turbo-q5_0"), "large-v3-turbo-q5_0");
     }
@@ -1415,8 +1510,60 @@ mod tests {
     fn whisper_text_cleanup_and_prompt() {
         assert_eq!(clean_text(" [BLANK_AUDIO] "), "");
         assert_eq!(clean_text(" Hello [Music] world. "), "Hello world.");
-        assert_eq!(prompt(&["Arnav".into(), " ".into(), "Xoxoday".into()]), "Arnav, Xoxoday.");
-        assert_eq!(prompt(&[" ".into()]), "");
+        let mut s = Settings { dictionary: vec!["Arnav".into(), " ".into(), "Xoxoday".into()], ..Default::default() };
+        assert_eq!(prompt(&s), "Arnav, Xoxoday.");
+        assert_eq!(prompt(&Settings { dictionary: vec![" ".into()], ..Default::default() }), "");
+        let hi = ROMANISED.iter().find(|(l, _)| *l == "hi").unwrap().1;
+        s.languages = vec!["en".into(), "hi".into()];
+        assert_eq!(prompt(&s), "Arnav, Xoxoday.", "native script: the dictionary only");
+        s.script = "latin".into();
+        assert_eq!(prompt(&s), format!("{hi} Arnav, Xoxoday."), "English letters: Hindi's romanised sentence first");
+        s.dictionary.clear();
+        assert_eq!(prompt(&s), hi);
+        s.languages = vec!["en".into(), "fr".into()];
+        assert_eq!(prompt(&s), "", "no romanised sentence for a Latin-script language");
+        s.languages.clear();
+        assert_eq!(prompt(&s), "", "auto-detect: no language to romanise");
+    }
+
+    #[test]
+    fn screen_words_follow_the_dictionary_once() {
+        let mut s = Settings { dictionary: vec!["Arnav".into()], ..Default::default() };
+        s.screen.words = vec!["arnav".into(), "Kumustahan".into(), "user_service.ts".into()];
+        assert_eq!(prompt(&s), "Arnav, Kumustahan, user_service.ts.");
+        s.dictionary.clear();
+        assert_eq!(prompt(&s), "arnav, Kumustahan, user_service.ts.");
+    }
+
+    /// The same clip with and without screen words in the prompt.
+    /// ECHOTYPE_TEST_MODEL=<large-v3-turbo> ECHOTYPE_TEST_CLIP=<16 kHz mono wav of "ask Xoxoday about
+    /// the Kumustahan rollout"> `cargo test --release screen_words_spell_names -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn screen_words_spell_names() {
+        let (Ok(model), Ok(clip)) = (std::env::var("ECHOTYPE_TEST_MODEL"), std::env::var("ECHOTYPE_TEST_CLIP")) else { return eprintln!("skipped") };
+        let pcm = crate::audio::decode(std::fs::read(clip).unwrap(), Some("wav")).unwrap();
+        let mut s = Settings { languages: vec!["en".into()], ..Default::default() };
+        let run = |s: &Settings| transcribe_local(Path::new(&model), &pcm, &languages(s), &prompt(s), None).unwrap();
+        let without = run(&s);
+        s.screen.words = crate::context::tokens("Hi Arnav, the Xoxoday store opens with the Kumustahan rollout next week. Can you", "");
+        let with = run(&s);
+        eprintln!("prompt: {}\nwithout: {without}\nwith:    {with}", prompt(&s));
+        assert!(with.contains("Xoxoday") && with.contains("Kumustahan"), "{with:?}");
+    }
+
+    #[test]
+    fn english_letters_decode_as_the_romanised_language() {
+        let mut s = Settings { languages: vec!["en".into(), "hi".into()], ..Default::default() };
+        assert_eq!(languages(&s), ["en", "hi"], "native script: each clip goes to the likeliest");
+        s.script = "latin".into();
+        assert_eq!(languages(&s), ["hi"], "English letters: no detection, English and mixed speech decode as Hindi under its prompt");
+        s.languages = vec!["en".into(), "hi".into(), "ta".into()];
+        assert_eq!(languages(&s), ["hi", "ta"], "Tamil is still told apart from Hindi, then converted");
+        s.languages = vec!["en".into(), "fr".into()];
+        assert_eq!(languages(&s), ["en", "fr"], "nothing to romanise: unchanged");
+        s.languages.clear();
+        assert!(languages(&s).is_empty(), "auto-detect stays auto-detect");
     }
 
     /// Live words against the final text on the same audio: the start of real speech, 2, 4 and 6 s.
@@ -1432,9 +1579,9 @@ mod tests {
         for secs in [2usize, 4, 6] {
             let clip = &pcm[..(secs * 16_000).min(pcm.len())];
             let t = std::time::Instant::now();
-            let partial = transcribe_partial(model, clip, &en, false, "", None, &stop).unwrap();
+            let partial = transcribe_partial(model, clip, &en, "", None, &stop).unwrap();
             let ms = t.elapsed().as_millis();
-            let full = transcribe_local(model, clip, &en, false, "", None).unwrap();
+            let full = transcribe_local(model, clip, &en, "", None).unwrap();
             eprintln!("{secs} s ({ms} ms)\n  live:  {partial}\n  final: {full}");
         }
     }

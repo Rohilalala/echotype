@@ -409,7 +409,7 @@ mod tests {
         s.cleanup.model = "acme-internal-model".into();
         s.cleanup.base_url = "https://llm.acme.internal/v1".into();
         s.cleanup.custom_instructions = "Sign off as Aditya".into();
-        s.cleanup.app_styles = vec![settings::AppStyle { id: "com.acme.SecretApp".into(), name: "Secret App".into(), style: "casual".into() }];
+        s.cleanup.app_styles = vec![settings::AppStyle { id: "com.acme.SecretApp".into(), name: "Secret App".into(), style: "casual".into(), ..Default::default() }];
         s
     }
 

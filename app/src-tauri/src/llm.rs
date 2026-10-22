@@ -11,7 +11,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 pub struct Cleaner {
@@ -39,8 +39,38 @@ pub const CLEANERS: &[Cleaner] = &[
 /// stays on only for builds that still fetch notices from it).
 pub const DOWNLOAD_URL: Option<&str> = Some("https://models.tryechotype.tech");
 
+/// Echotype Writer: a Qwen2.5-1.5B-Instruct (Apache-2.0) distilled on 2,489 Command Mode edits by
+/// Qwen3-4B-Instruct-2507 (LoRA, IQ4_XS: judged 4.58/5 against 4.17 for the plain 1.5B), for the
+/// edits the cleaners can't do (Command Mode, Transforms) with the built-in provider. It shares the
+/// one llama-server with the cleaner: an edit swaps it in, the next dictation swaps the cleaner back,
+/// so memory never holds both.
+pub const WRITER: Cleaner = Cleaner { id: "echotype-writer", label: "Echotype Writer", file: "echotype-writer-iq4_xs.gguf", size_mb: 860, sha256: "223d1f0457e5326b9781c4355ebd90355b54fdc7364481866620d4035f1922f7", note: "1.5B. Edits selected text when you ask: Command Mode and Transforms." };
+
+/// Context the writer is served with: a selection and its rewrite, kept in an 8-bit KV cache.
+pub const WRITER_CONTEXT: u32 = 2048;
+
 pub fn find(id: &str) -> Option<&'static Cleaner> {
-    CLEANERS.iter().find(|c| c.id == id)
+    CLEANERS.iter().chain(std::iter::once(&WRITER)).find(|c| c.id == id)
+}
+
+pub fn writer_installed() -> bool {
+    installed(&WRITER)
+}
+
+/// The writer's row for the Models page.
+pub fn writer(total_mb: u64) -> CleanerStatus {
+    CleanerStatus {
+        id: WRITER.id,
+        label: WRITER.label,
+        note: WRITER.note,
+        downloadable: DOWNLOAD_URL.is_some() && !WRITER.sha256.is_empty(),
+        size_mb: model_path(&WRITER).metadata().ok().filter(|m| m.is_file()).map_or(WRITER.size_mb, |m| m.len() / 1_048_576),
+        ram_mb: stt::ram_of(WRITER.id),
+        installed: writer_installed(),
+        automatic: false,
+        recommended: false,
+        warning: stt::ram_warning(stt::ram_of(WRITER.id), 0, total_mb),
+    }
 }
 
 /// Downloads cleaner `id`, kept only if its SHA-256 matches.
@@ -190,6 +220,8 @@ struct Opts {
     ctx: u32,
     /// "ready": keep the weights locked in RAM.
     lock: bool,
+    /// 8-bit KV cache (the writer's longer context in less memory).
+    kv8: bool,
 }
 
 /// mlock failed once in this run, so "ready" loads the weights unmapped instead (--load-mode none).
@@ -210,17 +242,52 @@ static SERVER: Mutex<Option<Server>> = Mutex::new(None);
 /// Base URL and bearer key of the running server, starting it first if it is not running or was
 /// started with other settings (a memory, context or model change applies on the next cleanup).
 pub fn ensure(settings: &Settings) -> Result<(String, String), String> {
-    let c = cleaner(settings);
-    let opts = Opts { model: model_path(c), ctx: context(settings), lock: memory(settings) == "ready" };
-    IDLE_SECS.store(idle(settings).map_or(0, |d| d.as_secs()), Ordering::Relaxed);
-    let mut g = SERVER.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(s) = g.as_mut()
-        && matches!(s.child.try_wait(), Ok(None))
-        && s.opts == opts
-    {
-        s.last_used = Instant::now();
-        return Ok((url(s.port), s.key.clone()));
+    ensure_for(settings, false)
+}
+
+/// ensure, for the cleaner or (`writer`) for Echotype Writer: the other one is stopped first.
+pub fn ensure_for(settings: &Settings, writer: bool) -> Result<(String, String), String> {
+    use_for(settings, writer).map(|(url, key, _)| (url, key))
+}
+
+/// Requests running on the server now. A swap to the other model waits for them, so a file
+/// job's cleanup isn't killed by a Command Mode edit and the other way round.
+static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+/// Held for the length of one request on the server `use_for` returned.
+pub struct InUse;
+
+impl Drop for InUse {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+/// `ensure_for`, plus a lease that keeps this server from being swapped out until it drops.
+pub fn use_for(settings: &Settings, writer: bool) -> Result<(String, String, InUse), String> {
+    let c = if writer { &WRITER } else { cleaner(settings) };
+    let opts = if writer {
+        Opts { model: model_path(c), ctx: WRITER_CONTEXT, lock: memory(settings) == "ready", kv8: true }
+    } else {
+        Opts { model: model_path(c), ctx: context(settings), lock: memory(settings) == "ready", kv8: false }
+    };
+    IDLE_SECS.store(idle(settings).map_or(0, |d| d.as_secs()), Ordering::Relaxed);
+    let asked = Instant::now();
+    let mut g = loop {
+        let mut g = SERVER.lock().unwrap_or_else(|e| e.into_inner());
+        let alive = g.as_mut().is_some_and(|s| matches!(s.child.try_wait(), Ok(None)));
+        if let Some(s) = g.as_mut().filter(|s| alive && s.opts == opts) {
+            s.last_used = Instant::now();
+            IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+            return Ok((url(s.port), s.key.clone(), InUse));
+        }
+        // ponytail: polls every 50 ms; a Condvar if the wait ever shows up in timings.
+        if !alive || IN_FLIGHT.load(Ordering::SeqCst) == 0 || asked.elapsed() > Duration::from_secs(90) {
+            break g;
+        }
+        drop(g);
+        std::thread::sleep(Duration::from_millis(50));
+    };
     *g = None; // died, never started or other settings: stop it before starting another
     let bin = sidecar();
     preflight(bin.as_deref(), &opts.model, stt::ram_of(c.id), stt::ram_mb().1)?;
@@ -235,7 +302,8 @@ pub fn ensure(settings: &Settings) -> Result<(String, String), String> {
         drop(s);
         s = start(&bin.expect("checked by preflight"), &opts, &log)?;
     }
-    let out = (url(s.port), s.key.clone());
+    let out = (url(s.port), s.key.clone(), InUse);
+    IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
     *g = Some(s);
     reap_when_idle();
     Ok(out)
@@ -270,7 +338,7 @@ fn reap_when_idle() {
 /// weights and GPU go cold. Called when a recording starts: if the cleaner has been idle for 20 s
 /// or is not running, it answers one short request with the same system prompt (llama-server
 /// keeps that prefix cached), so it is warm by the time the speech is transcribed.
-pub fn prewarm(s: &Settings) {
+pub fn prewarm(s: &Settings, command: bool) {
     if !s.cleanup.enabled {
         return;
     }
@@ -281,7 +349,12 @@ pub fn prewarm(s: &Settings) {
     if cold {
         let s = s.clone();
         std::thread::spawn(move || {
-            let _ = crate::cleanup::chat(&s, &crate::cleanup::system_prompt(&s), "Okay.", Duration::from_secs(20));
+            // Command Mode runs on Echotype Writer: loading the cleaner first would only be thrown away.
+            if command {
+                let _ = ensure_for(&s, true);
+            } else {
+                let _ = crate::cleanup::chat(&s, &crate::cleanup::system_prompt(&s), "Okay.", Duration::from_secs(20));
+            }
         });
     }
 }
@@ -355,6 +428,9 @@ fn args(o: &Opts, port: u16, mlock_failed: bool) -> Vec<OsString> {
     }
     if o.lock {
         a.extend(["--load-mode".into(), if mlock_failed { "none" } else { "mmap+mlock" }.into()]);
+    }
+    if o.kv8 {
+        a.extend(["-ctk", "q8_0", "-ctv", "q8_0"].map(OsString::from));
     }
     a
 }
@@ -435,7 +511,7 @@ mod tests {
 
     #[test]
     fn server_args_bind_localhost_on_the_given_port() {
-        let o = Opts { model: "/m/echotype-clean-q4_k_m.gguf".into(), ctx: CONTEXT, lock: false };
+        let o = Opts { model: "/m/echotype-clean-q4_k_m.gguf".into(), ctx: CONTEXT, lock: false, kv8: false };
         let a = args(&o, 4321, false);
         let want = ["-m", "/m/echotype-clean-q4_k_m.gguf", "--host", "127.0.0.1", "--port", "4321", "-c", "1024", "-ngl", "99", "-np", "1", "--no-webui", "--offline"];
         assert_eq!(a, want.map(OsString::from));
@@ -444,8 +520,18 @@ mod tests {
     }
 
     #[test]
+    fn the_writer_runs_with_an_8bit_cache_and_the_cleaner_without() {
+        let w = Opts { model: "/m/w.gguf".into(), ctx: WRITER_CONTEXT, lock: false, kv8: true };
+        let a: Vec<String> = args(&w, 1, false).into_iter().map(|a| a.into_string().unwrap()).collect();
+        assert!(a.windows(2).any(|p| p == ["-ctk", "q8_0"]) && a.windows(2).any(|p| p == ["-ctv", "q8_0"]) && a.windows(2).any(|p| p == ["-c", "2048"]));
+        let c = Opts { kv8: false, ..w };
+        assert!(!args(&c, 1, false).iter().any(|a| a == "-ctk"));
+        assert_eq!(find("echotype-writer").map(|c| c.file), Some(WRITER.file), "download and delete find the writer");
+    }
+
+    #[test]
     fn memory_modes_become_load_flags() {
-        let mut o = Opts { model: "/m/x.gguf".into(), ctx: 2048, lock: false };
+        let mut o = Opts { model: "/m/x.gguf".into(), ctx: 2048, lock: false, kv8: false };
         let tail = |o: &Opts, failed| args(o, 1, failed).into_iter().skip(14).map(|a| a.into_string().unwrap()).collect::<Vec<_>>();
         assert!(tail(&o, false).is_empty(), "save: llama.cpp's default mmap");
         assert!(args(&o, 1, false).contains(&"2048".into()));

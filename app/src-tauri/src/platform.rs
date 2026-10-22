@@ -77,6 +77,19 @@ pub fn copy_selection(app: &AppHandle) -> Result<Option<String>, String> {
     sent.map(|()| got)
 }
 
+/// Presses Return in the app in front ("send it"), after a paste: on the main thread, as paste's ⌘V.
+pub fn press_return(app: &AppHandle) -> Result<(), String> {
+    // The app reads the pasteboard in its own time: let the paste land before the message is sent.
+    std::thread::sleep(Duration::from_millis(100));
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+        let _ = tx.send(Enigo::new(&Settings::default()).map_err(|e| e.to_string()).and_then(|mut e| e.key(Key::Return, Direction::Click).map_err(|e| e.to_string())));
+    })
+    .map_err(|e| e.to_string())?;
+    rx.recv().map_err(|e| e.to_string())?
+}
+
 /// Waits (up to `max`) until Control, Option and Shift are up, so a ⌘V sent now is not ⌘⌃V.
 /// False when they are still down after `max`.
 pub fn wait_for_modifiers_up(max: Duration) -> bool {
@@ -241,6 +254,21 @@ pub fn wake_accessibility() {
     mac::wake_accessibility();
 }
 
+/// The text either side of the caret in the focused element of the app in front, at most `before`
+/// and `after` characters (UTF-16 units) of it: only that window is read, never a whole document.
+/// Comes back as (before, selected, after): the selection, if any, apart. None for a password
+/// field, while secure input is on (a password being typed anywhere), no text element,
+/// Accessibility off, or no answer within 250 ms.
+pub fn caret_text(before: usize, after: usize) -> Option<(String, String, String)> {
+    #[cfg(target_os = "macos")]
+    return if mac::secure_input() { None } else { mac::caret_text(before, after) };
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (before, after);
+        None
+    }
+}
+
 /// The paste decision. `focus`: Ok(None) when nothing has focus, Err(AXError) when the API
 /// could not tell, in which case Echotype pastes as it always has. Without Accessibility there
 /// is no ⌘V at all, so that is the card too.
@@ -275,6 +303,26 @@ fn mac_paste_target() -> Target {
     match mac::focused() {
         Ok(Some(f)) if unsure(&f) => Target::Card, // still a page: nothing takes text
         again => target(trusted, again),
+    }
+}
+
+/// The app in front (macOS), so learn.rs reads back only the app it pasted into.
+pub fn front_pid() -> Option<i32> {
+    #[cfg(target_os = "macos")]
+    return mac::front_pid();
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
+/// The text of app `pid`'s focused field while that app is still in front (learn.rs). None for a
+/// password field, a field over `max` characters, or focus that isn't text.
+pub fn focused_text(pid: i32, max: usize) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    return (mac::front_pid() == Some(pid)).then(|| mac::focused_text(pid, max)).flatten();
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (pid, max);
+        None
     }
 }
 
@@ -424,6 +472,7 @@ pub fn request(kind: &str) {
 mod mac {
     use core_foundation::base::{CFType, CFTypeRef, TCFType};
     use core_foundation::boolean::CFBoolean;
+    use core_foundation::number::CFNumber;
     use core_foundation::string::CFString;
     use std::ffi::{c_char, c_void};
 
@@ -452,7 +501,15 @@ mod mac {
         fn AXUIElementCopyAttributeValue(el: CFTypeRef, attr: CFTypeRef, out: *mut CFTypeRef) -> i32;
         fn AXUIElementIsAttributeSettable(el: CFTypeRef, attr: CFTypeRef, out: *mut u8) -> i32;
         fn AXUIElementSetAttributeValue(el: CFTypeRef, attr: CFTypeRef, value: CFTypeRef) -> i32;
+        fn AXUIElementCopyParameterizedAttributeValue(el: CFTypeRef, attr: CFTypeRef, param: CFTypeRef, out: *mut CFTypeRef) -> i32;
+        fn AXValueCreate(kind: u32, value: *const c_void) -> CFTypeRef;
+        fn AXValueGetValue(value: CFTypeRef, kind: u32, out: *mut c_void) -> bool;
     }
+
+    /// kAXValueCFRangeType.
+    const AX_RANGE: u32 = 4;
+    /// A text whose length Accessibility can't give is read whole only up to this; past it, not at all.
+    const WHOLE_VALUE_MAX: isize = 20_000;
 
     /// kAXErrorNoValue: nothing is focused.
     const AX_NO_VALUE: i32 = -25212;
@@ -473,7 +530,7 @@ mod mac {
     }
 
     /// [[NSWorkspace sharedWorkspace] frontmostApplication].processIdentifier, None without AppKit.
-    fn front_pid() -> Option<i32> {
+    pub fn front_pid() -> Option<i32> {
         // SAFETY: objc_msgSend cast to each signature: two methods returning objects, one returning
         // pid_t; a nil receiver answers nil/0, and a missing class is checked.
         unsafe {
@@ -506,9 +563,9 @@ mod mac {
         }
     }
 
-    /// The focused element system-wide, or the AXError that stopped the question. A hung app
+    /// The focused element system-wide, owned, or the AXError that stopped the question. A hung app
     /// answers within 250 ms or counts as "can't tell".
-    pub fn focused() -> Result<Option<super::Focused>, i32> {
+    fn focused_element() -> Result<Option<CFType>, i32> {
         let attr = |name: &'static str| CFString::from_static_string(name);
         // SAFETY: every Copy/Create result is owned and wrapped under the create rule (released
         // on drop); out-pointers are valid locals; attribute names are CFStrings kept alive meanwhile.
@@ -536,6 +593,16 @@ mod mac {
                 }
                 e => return Err(e),
             };
+            Ok(Some(el))
+        }
+    }
+
+    /// What Accessibility says about the focused element (focused_element).
+    pub fn focused() -> Result<Option<super::Focused>, i32> {
+        let attr = |name: &'static str| CFString::from_static_string(name);
+        let Some(el) = focused_element()? else { return Ok(None) };
+        // SAFETY: as in focused_element().
+        unsafe {
             let copy = |name: &'static str| {
                 let mut v: CFTypeRef = std::ptr::null();
                 (AXUIElementCopyAttributeValue(el.as_CFTypeRef(), attr(name).as_CFTypeRef(), &mut v) == 0 && !v.is_null()).then(|| CFType::wrap_under_create_rule(v))
@@ -557,6 +624,92 @@ mod mac {
                     && copy("AXValue").is_some_and(|v| v.instance_of::<CFString>());
             }
             Ok(Some(f))
+        }
+    }
+
+    /// See super::focused_text.
+    pub fn focused_text(pid: i32, max: usize) -> Option<String> {
+        let attr = |name: &'static str| CFString::from_static_string(name);
+        // SAFETY: as in focused(): owned results under the create rule, valid out-pointers.
+        unsafe {
+            let app = CFType::wrap_under_create_rule(AXUIElementCreateApplication(pid));
+            AXUIElementSetMessagingTimeout(app.as_CFTypeRef(), 0.25);
+            let copy = |el: &CFType, name: &'static str| {
+                let mut v: CFTypeRef = std::ptr::null();
+                (AXUIElementCopyAttributeValue(el.as_CFTypeRef(), attr(name).as_CFTypeRef(), &mut v) == 0 && !v.is_null()).then(|| CFType::wrap_under_create_rule(v))
+            };
+            let el = copy(&app, "AXFocusedUIElement")?;
+            let text = |name: &'static str| copy(&el, name).and_then(|v| v.downcast::<CFString>()).map(|s| s.to_string()).unwrap_or_default();
+            if text("AXRole") == "AXSecureTextField" || text("AXSubrole") == "AXSecureTextField" {
+                return None; // a password field is never read
+            }
+            // The length first, so a long document's text is never copied.
+            let len = copy(&el, "AXNumberOfCharacters").and_then(|n| n.downcast::<CFNumber>()).and_then(|n| n.to_i64());
+            if len.is_some_and(|n| n as usize > max) {
+                return None;
+            }
+            let v = copy(&el, "AXValue")?.downcast::<CFString>()?.to_string();
+            (v.chars().count() <= max).then_some(v)
+        }
+    }
+
+    #[link(name = "Carbon", kind = "framework")]
+    unsafe extern "C" {
+        fn IsSecureEventInputEnabled() -> bool;
+    }
+
+    /// A password field somewhere has secure input on (Terminal's sudo prompt, a browser's
+    /// password box): nothing on screen is read meanwhile.
+    pub fn secure_input() -> bool {
+        // SAFETY: no arguments; reads a process-wide flag.
+        unsafe { IsSecureEventInputEnabled() }
+    }
+
+    /// super::caret_text: the window around the caret through AXStringForRange, or out of AXValue
+    /// when the app has no AXStringForRange and the text is short.
+    pub fn caret_text(before: usize, after: usize) -> Option<(String, String, String)> {
+        use core_foundation::base::CFRange;
+        use core_foundation::number::CFNumber;
+        let attr = |name: &'static str| CFString::from_static_string(name);
+        let el = focused_element().ok()??;
+        // SAFETY: as in focused_element(); AXValueGetValue writes one CFRange into a local CFRange,
+        // AXValueCreate copies one from a local.
+        unsafe {
+            let copy = |name: &'static str| {
+                let mut v: CFTypeRef = std::ptr::null();
+                (AXUIElementCopyAttributeValue(el.as_CFTypeRef(), attr(name).as_CFTypeRef(), &mut v) == 0 && !v.is_null()).then(|| CFType::wrap_under_create_rule(v))
+            };
+            let text = |v: CFType| v.downcast::<CFString>().map(|s| s.to_string());
+            if [copy("AXRole"), copy("AXSubrole")].into_iter().flatten().filter_map(text).any(|r| r == "AXSecureTextField") {
+                return None; // a password
+            }
+            let mut sel = CFRange::init(0, 0);
+            if !AXValueGetValue(copy("AXSelectedTextRange")?.as_CFTypeRef(), AX_RANGE, &mut sel as *mut CFRange as *mut c_void) {
+                return None;
+            }
+            let n = copy("AXNumberOfCharacters").and_then(|v| v.downcast::<CFNumber>()).and_then(|n| n.to_i64()).map(|n| n as isize);
+            let start = (sel.location - before as isize).max(0);
+            let end = n.map(|n| (sel.location + sel.length + after as isize).min(n));
+            let ranged = end.filter(|e| *e > start).and_then(|end| {
+                let range = CFType::wrap_under_create_rule(AXValueCreate(AX_RANGE, &CFRange::init(start, end - start) as *const CFRange as *const c_void));
+                let mut v: CFTypeRef = std::ptr::null();
+                (AXUIElementCopyParameterizedAttributeValue(el.as_CFTypeRef(), attr("AXStringForRange").as_CFTypeRef(), range.as_CFTypeRef(), &mut v) == 0 && !v.is_null())
+                    .then(|| CFType::wrap_under_create_rule(v))
+                    .and_then(text)
+            });
+            let (window, from) = match ranged {
+                Some(w) => (w.encode_utf16().collect::<Vec<u16>>(), start),
+                None if n.is_some_and(|n| n <= WHOLE_VALUE_MAX) => {
+                    let all: Vec<u16> = text(copy("AXValue")?)?.encode_utf16().collect();
+                    let end = ((sel.location + sel.length) as usize + after).min(all.len());
+                    (all[(start as usize).min(end)..end].to_vec(), start)
+                }
+                None => return None,
+            };
+            let cut = ((sel.location - from).max(0) as usize).min(window.len());
+            let end = (cut + sel.length.max(0) as usize).min(window.len());
+            let part = |r: std::ops::Range<usize>| String::from_utf16_lossy(&window[r]);
+            Some((part(0..cut), part(cut..end), part(end..window.len())))
         }
     }
 
