@@ -512,12 +512,12 @@ pub struct Output {
 }
 
 /// `verbatim` keeps the recognizer's words and skips the LLM entirely, and so does the built-in
-/// model for words typed in English letters (stt::ROMANISED): trained on English, it dropped
+/// model for words typed in English letters (stt::ROMANISED, translit): trained on English, it dropped
 /// what was said in 2 of 12 Hinglish lines ("Arnav ko bolo ki woh mujhe call kare, wait, message
 /// kare" became "Arnav ko message kare", "push karenge Thursday tak" lost "Thursday tak").
 // ponytail: also skips that user's English dictations; lift it with a cleaner trained on Hinglish.
 pub fn wants_cleanup(s: &Settings, text: &str) -> bool {
-    s.cleanup.enabled && s.cleanup.style != "verbatim" && s.cleanup.level != "none" && !text.trim().is_empty() && !(s.cleanup.provider == "echotype" && stt::romanising(s))
+    s.cleanup.enabled && s.cleanup.style != "verbatim" && s.cleanup.level != "none" && !text.trim().is_empty() && !(s.cleanup.provider == "echotype" && (stt::romanising(s) || crate::translit::active(s)))
 }
 
 /// True when the transcript holds at least one letter or digit in any script. Whisper turns
@@ -1119,7 +1119,8 @@ fn after_stt(s: &Settings, raw: String, stt_ms: u64, mut warning: Option<String>
     if !has_speech(&raw) {
         return Output { raw: String::new(), text: String::new(), stt_ms, cleanup_ms: 0, warning, no_cleanup: false, cleaned: None, send: false };
     }
-    let raw = stt::collapse_loops(&raw);
+    // Native script to English letters first, so snippets and voice commands match what is typed.
+    let raw = stt::collapse_loops(&crate::translit::apply(s, &raw));
     let replaced = apply_replacements(&raw, &s.replacements);
     // "Send it" first, so neither the commands nor the model ever see it.
     let (replaced, send) = match send_command(&replaced).filter(|_| dictated && s.send_it) {
@@ -2124,6 +2125,20 @@ mod tests {
         assert!(silence.text.is_empty(), "nothing said, nothing to transform");
         s.auto_transform.clear();
         assert_eq!(auto_transform(&s, cleaned(&s), None, |_| unreachable!()).text, "«um kal meeting nahi hogi»", "off by default");
+    }
+
+    #[test]
+    fn tamil_in_english_letters_is_typed_after_speech_to_text_and_skips_the_built_in_cleaner() {
+        let mut s = Settings { languages: vec!["en".into(), "ta".into()], script: "latin".into(), ..Default::default() };
+        s.cleanup.enabled = true;
+        s.cleanup.provider = "echotype".into();
+        let o = after_stt(&s, "வணக்கம், எப்படி இருக்கீங்க? meeting 5 மணிக்கு.".into(), 1, None, false, true, || panic!("called the LLM"), |_, _| panic!("called the LLM"));
+        assert_eq!(o.text, "Vanakkam, eppadi irukkeenga? meeting 5 manikku.");
+        s.cleanup.provider = "groq".into();
+        let o = after_stt(&s, "நன்றி".into(), 1, None, false, true, || {}, |_, t| Ok(format!("«{t}»")));
+        assert_eq!(o.text, "«Nandri»", "other cleaners get the English letters");
+        s.script = "native".into();
+        assert_eq!(after_stt(&s, "நன்றி".into(), 1, None, false, true, || {}, |_, t| Ok(t.into())).text, "நன்றி");
     }
 
     #[test]

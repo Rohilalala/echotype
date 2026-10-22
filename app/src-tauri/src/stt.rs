@@ -535,7 +535,8 @@ pub fn quiet_whisper_logs() {
 /// languages checked with large-v3-turbo are here: their speech comes back in English letters (the
 /// romanised_prompts test) and English clips decoded as them under their prompt stay English.
 /// Telugu and Kannada romanised well but turned English into Dutch or mangled numbers; Tamil
-/// looped; Arabic, Russian, Ukrainian, Greek and Japanese kept their own script.
+/// looped; Arabic, Russian, Ukrainian, Greek and Japanese kept their own script. Indian languages
+/// whisper still writes in their own script are converted after it instead (translit.rs).
 pub const ROMANISED: &[(&str, &str)] = &[
     ("hi", "Namaste, aap kaise hain? Main theek hoon, shukriya. Kal milte hain."),
     ("mr", "Namaskar, tumhi kase aahat? Mi thik aahe, dhanyavaad. Udya bhetu."),

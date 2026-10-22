@@ -1144,10 +1144,23 @@ fn transcriber(s: &Settings) -> Result<Transcribe, String> {
     if s.stt.provider == "local" {
         let model = stt::pick_local_model(&s)?;
         let langs = stt::languages(&s);
-        Ok(Box::new(move |pcm| stt::transcribe_words(&model, pcm, &langs, &prompt, speakers::vad().as_deref())))
+        Ok(Box::new(move |pcm| Ok(latin(&s, stt::transcribe_words(&model, pcm, &langs, &prompt, speakers::vad().as_deref())?))))
     } else {
-        Ok(Box::new(move |pcm| Ok(spread(&stt::transcribe_remote(&s, pcm, &prompt)?, pcm.len() as f32 / RATE as f32))))
+        Ok(Box::new(move |pcm| Ok(latin(&s, spread(&stt::transcribe_remote(&s, pcm, &prompt)?, pcm.len() as f32 / RATE as f32)))))
     }
+}
+
+/// Each word in English letters when the user wants them (translit), a capital after . ? !
+// ponytail: a chunk starts with a capital even mid-sentence; carry the last word across chunks if it shows.
+fn latin(s: &Settings, mut words: Vec<Word>) -> Vec<Word> {
+    if crate::translit::active(s) {
+        let mut cap = true;
+        for w in &mut words {
+            w.text = crate::translit::convert(&w.text, cap);
+            cap = w.text.ends_with(['.', '?', '!']);
+        }
+    }
+    words
 }
 
 /// Loads the fingerprint model, downloading both speaker models first when missing.
