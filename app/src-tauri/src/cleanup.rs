@@ -591,7 +591,10 @@ fn negations(text: &str) -> usize {
     const NEG: [&str; 21] = ["not", "no", "never", "nor", "none", "nothing", "nobody", "nowhere", "neither", "cannot", "non", "nahi", "nahin", "nai", "mat", "na", "नहीं", "नही", "मत", "ना", "न"];
     const CORRECTION: [&str; 8] = ["wait", "sorry", "actually", "i", "scratch", "hold", "make", "no"];
     let w = words(text);
-    (0..w.len()).filter(|&i| NEG.contains(&w[i].as_str()) && !(w[i] == "no" && w.get(i + 1).is_some_and(|n| CORRECTION.contains(&n.as_str())))).count()
+    let counted = (0..w.len()).filter(|&i| NEG.contains(&w[i].as_str()) && !(w[i] == "no" && w.get(i + 1).is_some_and(|n| CORRECTION.contains(&n.as_str())))).count();
+    // "Tuesday at 3, no, Wednesday": a "no" set off by commas corrects what came before it.
+    let low = text.to_lowercase();
+    counted.saturating_sub(low.matches(", no,").count())
 }
 
 /// Spoken numbers, which cleanup may write as digits: English, then Hinglish and Hindi.
@@ -1565,6 +1568,16 @@ mod tests {
         for tidy in ["So can we schedule a meeting for 10 pm tomorrow? No, actually 11 pm.", "For the trip I need my charger, passport and headphones."] {
             assert!(cleanup(&s, tidy).is_err(), "{tidy} was not sent to the model");
         }
+    }
+
+    #[test]
+    fn a_spoken_correction_is_not_a_dropped_number_or_not() {
+        let s = Settings::default();
+        let said = "Book the room for Tuesday at 3, no, Wednesday, actually make it Thursday at 4:30 and invite Priya, sorry Priyanka.";
+        assert_eq!(rejected(&s, said, "Book the room for Thursday at 4:30 and invite Priyanka."), None);
+        assert!(rejected(&s, "Don't forget to not include the tax.", "Don't forget to include the tax.").is_some(), "a real not still counts");
+        assert!(rejected(&s, "No, I don't want the upgrade.", "I want the upgrade.").is_some());
+        assert!(rejected(&s, "The invoice is 500 dollars.", "The invoice is due.").is_some(), "a number lost outside a correction still counts");
     }
 
     #[test]
