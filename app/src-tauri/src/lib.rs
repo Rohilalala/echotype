@@ -21,6 +21,7 @@ mod stats;
 mod speakers;
 mod stt;
 mod telemetry;
+mod translit;
 mod tray;
 mod wispr;
 mod wordlist;
@@ -646,7 +647,7 @@ fn spawn_partials(app: &AppHandle, s: &Settings, tap: audio::Tap, stop: Arc<Atom
             if stop.load(Ordering::SeqCst) || !cleanup::has_speech(&text) {
                 continue;
             }
-            let text = last_words(&stt::collapse_loops(&text), PARTIAL_CHARS);
+            let text = last_words(&stt::collapse_loops(&translit::apply(&s, &text)), PARTIAL_CHARS);
             lock(&state(&app).pill).set_partial(text.chars().count());
             let _ = app.emit_to("overlay", "dictation-partial", &text);
             let _ = state(&app).pill_wake.send(());

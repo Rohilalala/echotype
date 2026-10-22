@@ -1166,13 +1166,19 @@ function langDesc() {
     : S.languages.length ? 'Each dictation is typed in whichever of these you spoke.'
     : `Up to ${LANG_MAX}. Picking yours stops short clips coming out in another language.`;
 }
-// How should your words look: a line in each script for the languages stt.rs ROMANISED can type
-// in English letters. The others are always typed in their own script.
+// How should your words look: a line in each script for the languages stt.rs ROMANISED or
+// translit.rs can type in English letters. The others are always typed in their own script.
 const SCRIPT_SAMPLE = {
   hi: ['Namaste, aap kaise hain?', 'नमस्ते, आप कैसे हैं?'],
   mr: ['Namaskar, tumhi kase aahat?', 'नमस्कार, तुम्ही कसे आहात?'],
   ur: ['Assalam alaikum, aap kaise hain?', 'السلام علیکم، آپ کیسے ہیں؟'],
   bn: ['Nomoskar, apni kemon achhen?', 'নমস্কার, আপনি কেমন আছেন?'],
+  gu: ['Namaste, kem cho?', 'નમસ્તે, કેમ છો?'],
+  pa: ['Sat sri akaal, kiven ho?', 'ਸਤ ਸ੍ਰੀ ਅਕਾਲ, ਕਿਵੇਂ ਹੋ?'],
+  ta: ['Vanakkam, eppadi irukkeenga?', 'வணக்கம், எப்படி இருக்கீங்க?'],
+  te: ['Namaskaaram, ela unnaaru?', 'నమస్కారం, ఎలా ఉన్నారు?'],
+  kn: ['Namaskaara, hegiddeera?', 'ನಮಸ್ಕಾರ, ಹೇಗಿದ್ದೀರಾ?'],
+  ml: ['Namaskaaram, sukhamaano?', 'നമസ്കാരം, സുഖമാണോ?'],
 };
 const scriptLang = () => S.languages.find(c => SCRIPT_SAMPLE[c]);
 function renderLanguages() {
