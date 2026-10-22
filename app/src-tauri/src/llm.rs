@@ -30,7 +30,7 @@ pub struct Cleaner {
 /// Medium's cleanup rows and Echotype Writer's edits together, plus dictations that hold an
 /// instruction to type rather than follow, and replaces both: one download, and no swap between a
 /// cleaner and a writer. Numbers in echotype-models/merged-eval/REPORT.md.
-pub const ONE: Cleaner = Cleaner { id: "echotype-one", label: "Echotype One", file: "echotype-one-iq4_xs.gguf", size_mb: 860, sha256: "", note: "1.5B. Cleans up dictation and edits selected text when you ask." };
+pub const ONE: Cleaner = Cleaner { id: "echotype-one", label: "Echotype One", file: "echotype-one-iq4_xs.gguf", size_mb: 860, sha256: "c474b4b05d0013d66f14552cb8da0baa124839419f83f4fc7c7221f128f5a66a", note: "1.5B. Cleans up dictation and edits selected text when you ask." };
 
 /// The built-in cleanup models: Echotype One, and Echotype Tiny (0.5B, from the 2026-10-16
 /// distillation: 0.31 points of WER over raw whisper on 12,198 real clips) for Macs short of memory,

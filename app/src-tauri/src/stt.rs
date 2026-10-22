@@ -51,7 +51,7 @@ pub const RAM_MB: &[(&str, u64)] = &[
     ("echotype-tiny", 552),
     // 2026-10-22, llama-server -c 2048 -ctk q8_0 -ctv q8_0 (how llm.rs serves it for both jobs), one
     // edit of a long selection, RSS.
-    ("echotype-one", 1012),
+    ("echotype-one", 1003),
 ];
 
 /// RAM_MB for a catalog id; anything unknown is assumed to be as large as the largest model.
