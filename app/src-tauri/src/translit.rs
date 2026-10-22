@@ -200,7 +200,7 @@ fn word(sc: Script, chars: &[char]) -> String {
     if north(sc) {
         // The final "a" goes (kamal, sampark), unless the word is one letter (na) or ends in a
         // cluster into r, y or v (mitra, satya).
-        let cluster = matches!(us[n.saturating_sub(2)], U::C { v: V::Dead, .. }) && matches!(us[n - 1], U::C { off: 0x2F | 0x30 | 0x35, .. });
+        let cluster = n >= 2 && matches!(us[n - 2], U::C { v: V::Dead, .. }) && matches!(us[n - 1], U::C { off: 0x2F | 0x30 | 0x35, .. });
         if n > 1 && !cluster {
             if let U::C { v: v @ V::Inherent, .. } = &mut us[n - 1] {
                 *v = V::Dropped;
@@ -485,5 +485,14 @@ mod tests {
         assert_eq!(apply(&s, "வணக்கம்"), "Vanakkam");
         s.languages = vec!["en".into(), "ur".into()];
         assert_eq!(apply(&s, "सब"), "सब", "Urdu is not converted, so nothing is");
+    }
+
+    #[test]
+    fn stray_signs_from_whisper_never_panic() {
+        // A lone virama or avagraha made a word with no letters in it.
+        for t in ["्", "ऽ", "\u{200D}", "\u{0BCD}", "ं", "क्", "्र", "ऽऽ ्"] {
+            let _ = convert(t, true);
+        }
+        assert_eq!(convert("ॐ", false), "om");
     }
 }

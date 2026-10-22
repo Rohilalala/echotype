@@ -580,9 +580,15 @@ pub fn prompt(s: &Settings) -> String {
 /// With [en, hi], detection called the owner's mixed "Hello aap kaise hai" English (0.37 to 0.13)
 /// and whisper translated it to "Hello, how are you?"; as Hindi with the prompt it came back as
 /// said, and his English clips stayed English word for word.
+/// The user's other Indian languages (Tamil with Hindi, say) stay in the running: whisper tells
+/// those apart well, and translit.rs writes them in English letters afterwards.
 pub fn languages(s: &Settings) -> Vec<String> {
     let mine: Vec<String> = romanised(s).iter().map(|(l, _)| l.to_string()).collect();
-    if mine.is_empty() { s.languages.clone() } else { mine }
+    if mine.is_empty() {
+        return s.languages.clone();
+    }
+    let converted = s.languages.iter().filter(|l| crate::translit::LANGS.contains(&l.as_str()) && !mine.contains(l)).cloned();
+    mine.iter().cloned().chain(converted).collect()
 }
 
 pub fn norm(w: &str) -> String {
@@ -1548,6 +1554,8 @@ mod tests {
         assert_eq!(languages(&s), ["en", "hi"], "native script: each clip goes to the likeliest");
         s.script = "latin".into();
         assert_eq!(languages(&s), ["hi"], "English letters: no detection, English and mixed speech decode as Hindi under its prompt");
+        s.languages = vec!["en".into(), "hi".into(), "ta".into()];
+        assert_eq!(languages(&s), ["hi", "ta"], "Tamil is still told apart from Hindi, then converted");
         s.languages = vec!["en".into(), "fr".into()];
         assert_eq!(languages(&s), ["en", "fr"], "nothing to romanise: unchanged");
         s.languages.clear();
