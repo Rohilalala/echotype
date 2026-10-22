@@ -104,12 +104,9 @@ pub fn parse_reply(v: &Value) -> Option<String> {
     Some(c.trim().to_string())
 }
 
+/// Every dictation goes to the model while cleanup is on: tidy-looking text can still hold a
+/// spoken correction ("10 pm, no, actually 11"), a list or a grammar slip that only it sees.
 pub fn cleanup(s: &Settings, text: &str) -> Result<String, String> {
-    if !needs_cleanup(s, text) {
-        // Nothing for the model to do, and ~200 ms sooner on screen. after_stt restyles the
-        // built-in model's text; another provider would have styled it from its prompt.
-        return Ok(if s.cleanup.provider == "echotype" { text.to_string() } else { restyle(text, &s.cleanup.style) });
-    }
     let system = system_prompt(s);
     if s.cleanup.provider != "echotype" {
         return chat(s, &system, text, Duration::from_secs(30));
@@ -290,31 +287,6 @@ fn replace_word_by(text: &str, from: &str, to: impl Fn(&[char], &[char]) -> Opti
         }
     }
     out
-}
-
-/// Whether the model has anything to do: a filler, a spoken correction, a list or spoken
-/// punctuation, a near miss of a Dictionary word, another script or a long dictation. On 169 of the owner's dictations this skips the model on 56%; there it only touched
-/// grammar on 13, and several of those were its mistakes ("layout. Is pretty horrible").
-// ponytail: English cue words; a language with its own fillers goes to the model (not ASCII).
-pub fn needs_cleanup(s: &Settings, text: &str) -> bool {
-    const CUES: [&str; 33] = [
-        "um", "umm", "uh", "uhh", "erm", "hmm", "ah", "like", "basically", "literally", "wait", "actually", "sorry", "rather",
-        "correction", "first", "firstly", "second", "secondly", "third", "thirdly", "bullet", "comma", "period", "colon", "dash",
-        "fucking", "fuck", "shit", "following", "meant", "scratch", "exclamation",
-    ];
-    const PHRASES: [&str; 12] = ["you know", "i mean", "kind of", "sort of", "no no", "make that", "number one", "point one", "step one", "things to", "list of", "question mark"];
-    if !text.is_ascii() || text.contains(':') || text.split_whitespace().count() > 60 {
-        return true;
-    }
-    let low = text.to_lowercase();
-    let w: Vec<&str> = low.split(|c: char| !c.is_alphanumeric() && c != '\'').filter(|w| !w.is_empty()).collect();
-    if w.iter().any(|x| CUES.contains(x)) || w.windows(2).any(|p| PHRASES.contains(&format!("{} {}", p[0], p[1]).as_str())) {
-        return true;
-    }
-    // A near miss of a Dictionary word ("Xoxoda", "Midan"): the model fixes the spelling.
-    let near = |a: &str, b: &str| a != b && b.chars().count() > 3 && levenshtein(a, b) <= 2;
-    let bigrams: Vec<String> = w.windows(2).map(|p| p.join(" ")).collect();
-    s.dictionary.iter().map(|d| d.trim().to_lowercase()).any(|d| w.iter().copied().chain(bigrams.iter().map(String::as_str)).any(|x| near(x, &d)))
 }
 
 pub(crate) fn levenshtein(a: &str, b: &str) -> usize {
@@ -1358,31 +1330,6 @@ mod tests {
     }
 
     #[test]
-    fn the_model_is_skipped_only_when_there_is_nothing_to_clean() {
-        let mut s = Settings::default();
-        s.dictionary = vec!["Xoxoday".into(), "Midhun".into()];
-        for clean in ["Open a PR for staging and run the tests before you merge.", "I hope you have only changed inspired pages, right?", "Give me the Midhun message again."] {
-            assert!(!needs_cleanup(&s, clean), "{clean}");
-        }
-        for messy in [
-            "So um I was thinking we should ship it.",
-            "Open like my personal cloud.md.",
-            "Meet on Tuesday, no wait, Thursday.",
-            "Things to buy, eggs, milk and bread.",
-            "Ping Arnav about the Xoxoda thing.",
-            "Tell Midan the plan.",
-            "Answer these: one, two.",
-            "कल मीटिंग नहीं होगी",
-        ] {
-            assert!(needs_cleanup(&s, messy), "{messy}");
-        }
-        s.cleanup.style = "casual".into();
-        assert_eq!(cleanup(&s, "We do not ship on Fridays.").unwrap(), "We don't ship on Fridays", "no model call, the style still applies");
-        s.cleanup.provider = "echotype".into();
-        assert_eq!(cleanup(&s, "We do not ship on Fridays.").unwrap(), "We do not ship on Fridays.", "after_stt restyles the built-in model's text");
-    }
-
-    #[test]
     fn styles_swap_contractions_and_the_full_stop_only() {
         assert_eq!(restyle("I do not think I am coming. It is not ready.", "casual"), "I don't think I'm coming. It isn't ready.");
         assert_eq!(restyle("Do not forget the invoice.", "casual"), "Don't forget the invoice", "a short chat line loses its full stop");
@@ -1605,6 +1552,19 @@ mod tests {
         assert_eq!(out.text, "I need:\n- 14 footballs\n- 2 cricket bats\n- 3 tennis rackets");
         s.cleanup.enabled = false;
         assert_eq!(after_stt(&s, said.into(), 0, None, false, true, || {}, |_, t| Ok(t.to_string())).text, said, "cleanup off keeps the words as said");
+    }
+
+    #[test]
+    fn every_dictation_goes_to_the_model_while_cleanup_is_on() {
+        // A dead local server: had cleanup skipped the tidy-looking text, this would be Ok.
+        let mut s = Settings::default();
+        s.cleanup.enabled = true;
+        s.cleanup.provider = "custom".into();
+        s.cleanup.model = "m".into();
+        s.cleanup.base_url = "http://127.0.0.1:9/v1".into();
+        for tidy in ["So can we schedule a meeting for 10 pm tomorrow? No, actually 11 pm.", "For the trip I need my charger, passport and headphones."] {
+            assert!(cleanup(&s, tidy).is_err(), "{tidy} was not sent to the model");
+        }
     }
 
     #[test]
