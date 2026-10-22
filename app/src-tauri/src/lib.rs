@@ -750,9 +750,19 @@ impl Rerun {
 /// Clears the busy flag when dropped, so even a panicking worker can't leave dictation stuck.
 struct Busy(Arc<AtomicBool>);
 
+/// `busy` for code outside the dictation thread: a dictation or edit is being transcribed,
+/// cleaned or pasted.
+static PROCESSING: AtomicBool = AtomicBool::new(false);
+
+/// The mic is open for a dictation or one is being processed: a meeting summary waits between parts.
+pub(crate) fn dictating(app: &AppHandle) -> bool {
+    state(app).recording.load(Ordering::SeqCst) || PROCESSING.load(Ordering::SeqCst)
+}
+
 impl Drop for Busy {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
+        PROCESSING.store(false, Ordering::SeqCst);
     }
 }
 
@@ -784,6 +794,7 @@ fn process(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>, clip: Clip, pa
         return;
     }
     busy.store(true, Ordering::SeqCst);
+    PROCESSING.store(true, Ordering::SeqCst);
     let app = app.clone();
     let speaking_ms = clip.speaking_ms.unwrap_or(pcm.len() as u64 * 1000 / audio::RATE as u64); // a retry has no level stats
     std::thread::spawn(move || {
@@ -953,6 +964,7 @@ fn process_command(app: &AppHandle, pcm: Vec<f32>, busy: Arc<AtomicBool>) {
 /// Command Mode or a transform on a worker thread, busy meanwhile; a panic is an error state.
 fn process_edit(app: &AppHandle, busy: Arc<AtomicBool>, run: impl FnOnce(&AppHandle, &Settings) -> DictationState + Send + 'static) {
     busy.store(true, Ordering::SeqCst);
+    PROCESSING.store(true, Ordering::SeqCst);
     let app = app.clone();
     std::thread::spawn(move || {
         let guard = Busy(busy);
@@ -2638,6 +2650,7 @@ pub fn run() {
             meeting::meeting_export,
             meeting::meeting_save,
             meeting::meeting_summarize,
+            meeting::meeting_summary_cancel,
             meeting::meeting_ask,
             meeting::meeting_window,
             notes_target,

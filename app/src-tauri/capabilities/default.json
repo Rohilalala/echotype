@@ -89,6 +89,7 @@
     "allow-meeting-export",
     "allow-meeting-save",
     "allow-meeting-summarize",
+    "allow-meeting-summary-cancel",
     "allow-meeting-ask",
     "allow-meeting-window",
     "allow-notes-target",

@@ -85,6 +85,7 @@ const COMMANDS: &[&str] = &[
     "meeting_export",
     "meeting_save",
     "meeting_summarize",
+    "meeting_summary_cancel",
     "meeting_ask",
     "meeting_window",
     "notes_target",

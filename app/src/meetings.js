@@ -1,14 +1,14 @@
 // Meetings page: start/stop meeting notes, the list of meetings, and one meeting's live
 // transcript, speakers (renamable), summary, copy/export and delete. main.js passes its helpers.
 let $, h, invoke, copyText;
-let meetings = [], status = { live: null, computer_audio: true, speakers: true, screen_recording: true, download_mb: 0 };
+let meetings = [], status = { live: null, computer_audio: true, speakers: true, screen_recording: true, download_mb: 0, summary_with: 'your cleanup provider', summary_blocked: null };
 let open = null; // the meeting being viewed
 let editing = null; // speaker id being renamed
 let confirmDelete = false, startError = '', timer, starting = false, draftTitle = '';
 let exportsOf = null; // { id, md, txt }, fetched with the meeting so Copy runs inside the click
-let summarizing = null, summaryError = ''; // the meeting whose Pro summary is being written
+let summarizing = null, summaryError = '', progress = ''; // the meeting whose summary is being written, and which part
 let windowMode = false; // the meeting window: this meeting only, no list
-const answers = {}; // Pro Ask: meeting id → [{ q, a }], for this session
+const answers = {}; // Ask: meeting id → [{ q, a }], for this session
 let asking = false, askError = '';
 let query = '', results = null, searchSeq = 0, searchBox = null, searchTimer; // results: meeting_search hits for query
 let hitAt = null; // start of the transcript line a search snippet opened, highlighted
@@ -34,6 +34,11 @@ export function init(helpers) {
     await refresh();
     if (open?.id === payload.id) await load(payload.id).catch(() => {});
     if (editing === null) render(); // a live update must not wipe a rename being typed
+  });
+  helpers.listen('meeting-summary', ({ payload }) => {
+    if (payload.id !== summarizing) return;
+    progress = payload.progress;
+    if (editing === null) render();
   });
 }
 
@@ -185,13 +190,20 @@ export async function openWindow(id) {
 }
 
 async function summarize(id) {
-  summarizing = id; summaryError = '';
+  summarizing = id; summaryError = ''; progress = '';
   render();
   try { await invoke('meeting_summarize', { id }); if (open?.id === id) await load(id); }
-  catch (e) { summaryError = String(e); }
+  catch (e) { summaryError = String(e) === 'Summary stopped.' ? '' : String(e); } // Cancel needs no error
   summarizing = null;
   render();
 }
+
+// Where a summary or an answer comes from: the cleanup provider (meeting.rs assistant). Anything
+// not on this Mac says the transcript goes there.
+const whereNote = () => /on this Mac/.test(status.summary_with || '') ? '' : ` The transcript goes to ${status.summary_with}, your cleanup provider.`;
+// "download it on the Models page": a button to it, in the main window (the meeting window has no pages).
+const blockedNote = () => h('span', { className: 'row-desc warn' }, status.summary_blocked,
+  !windowMode && /Models page/.test(status.summary_blocked) && h('button', { className: 'btn quiet', type: 'button', onclick: () => document.querySelector('nav button[data-page="speech"]')?.click() }, 'Open Models'));
 
 // ---------- one meeting ----------
 const name = (m, id) => m.speakers[id] || id;
@@ -230,25 +242,26 @@ function summary(md) {
   return h('div', { className: 'summary text' }, out);
 }
 
-// Echotype Pro: notes on request once the meeting is written up; free builds say it's coming.
+// Notes on request once the meeting is written up, by the cleanup provider, a part at a time.
 function summaryCard(m) {
   if (m.summary) return summary(m.summary);
   if (m.state !== 'done' || !m.segments.length) return null;
-  const busy = summarizing === m.id;
-  const desc = !status.summaries ? 'A summary, decisions and action items from this meeting. Coming soon with Echotype Pro.'
-    : busy ? 'Writing the summary…' : 'A summary, decisions and action items from this meeting.';
+  const busy = summarizing === m.id, other = summarizing && !busy;
+  const desc = busy ? progress || 'Writing the summary…' : `A short summary and the key points: decisions, numbers and who does what.${whereNote()}`;
   return h('div', { className: 'group summary-card' }, h('div', { className: 'row' },
     h('span', { className: 'row-text' },
-      h('span', { className: 'row-title' }, 'Summary ', h('span', { className: 'tag' }, 'Pro')),
-      h('span', { className: 'row-desc' }, desc),
+      h('span', { className: 'row-title' }, 'Summary'),
+      h('span', { className: 'row-desc', 'aria-live': 'polite' }, desc),
+      status.summary_blocked && !busy && blockedNote(),
       summaryError && !busy && h('span', { className: 'row-desc error', role: 'alert' }, summaryError)),
-    status.summaries && h('button', { className: 'btn', type: 'button', disabled: busy, onclick: () => summarize(m.id) }, busy ? 'Writing…' : 'Summarize')));
+    busy ? h('button', { className: 'btn quiet', type: 'button', onclick: () => invoke('meeting_summary_cancel').catch(() => {}) }, 'Cancel')
+      : !status.summary_blocked && h('button', { className: 'btn', type: 'button', disabled: other, onclick: () => summarize(m.id) }, `Summarize with ${status.summary_with}`)));
 }
 
-// Echotype Pro: ask about the meeting, live or done ("What did I miss?"). Free builds say it's coming.
+// Ask about the meeting, live or done ("What did I miss?"), answered from its transcript only.
 function askCard(m) {
   if (!m.segments.length) return null;
-  if (!status.summaries) return h('p', { className: 'note' }, 'Ask anything about this meeting: coming soon with Echotype Pro.');
+  if (status.summary_blocked) return h('p', { className: 'note' }, blockedNote());
   const list = answers[m.id] ??= [];
   const input = h('input', { type: 'text', placeholder: 'Ask anything about this meeting', 'aria-label': 'Ask about this meeting', maxLength: 500, disabled: asking });
   const ask = async q => {
@@ -263,7 +276,7 @@ function askCard(m) {
     h('form', { onsubmit: e => { e.preventDefault(); ask(input.value); } }, input,
       h('button', { className: 'btn', type: 'submit', disabled: asking }, asking ? 'Asking…' : 'Ask'),
       live()?.id === m.id && h('button', { className: 'btn quiet', type: 'button', disabled: asking, onclick: () => ask('What did I miss in the last few minutes?') }, 'What did I miss?')),
-    h('span', { className: 'tag' }, 'Pro'),
+    h('p', { className: 'note' }, `Answers come from ${status.summary_with}, using only this meeting's transcript.${whereNote()}`),
     askError && h('p', { className: 'note warn', role: 'alert' }, askError),
     list.map(({ q, a }) => h('div', { className: 'qa' }, h('b', {}, q), h('p', {}, a))));
 }

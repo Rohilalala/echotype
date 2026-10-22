@@ -343,21 +343,28 @@ let meetingList = mq === 'empty' ? [] : mq === 'live' ? [liveMeeting, doneMeetin
     segments: [{ start: 4, end: 9, speaker: 's1', text: 'The candidate was strong on system design but the onboarding exercise ran long.' }, { start: 12, end: 15, speaker: 'you', text: 'Let’s ship the offer by Friday.' }],
     notices: ['The audio was deleted 30 days after the meeting to save space (Settings → Meetings). The transcript stays, but speakers can’t be re-checked without the audio.'] },
   { id: '2026-10-10-100000-meeting', title: 'Meeting', started_ms: now - 5 * 86400000, duration_s: 312, state: 'interrupted', speakers: {}, segments: [], notices: [], summary: null }];
+let stopSummary = false;
 Object.assign(commands, {
-  meeting_status: () => ({ live: mq === 'live' ? { id: liveMeeting.id, started_ms: liveMeeting.started_ms, recording: true } : null, computer_audio: !q.has('miconly'), speakers: !q.has('miconly'), screen_recording: !q.has('noscreen'), download_mb: mq === 'empty' ? 36 : 0, summaries: q.has('cloud') }),
+  meeting_status: () => ({ live: mq === 'live' ? { id: liveMeeting.id, started_ms: liveMeeting.started_ms, recording: true } : null, computer_audio: !q.has('miconly'), speakers: !q.has('miconly'), screen_recording: !q.has('noscreen'), download_mb: mq === 'empty' ? 36 : 0, summaries: true,
+    summary_with: q.has('openai') ? 'OpenAI' : 'Echotype Writer (on this Mac)', summary_blocked: q.has('nowriter') ? 'Meeting summaries need Echotype Writer: download it on the Models page' : null }),
   meeting_window: () => null,
   meeting_ask: async ({ question }) => {
-    if (!q.has('cloud')) throw 'Asking about a meeting is coming with Echotype Pro.';
     await new Promise(r => setTimeout(r, 400));
     return `Sample answer to "${question}" from the preview.`;
   },
+  // ?slowsum: parts long enough to screenshot the progress and try Cancel.
   meeting_summarize: async ({ id }) => {
-    if (!q.has('cloud')) throw 'Meeting summaries are coming with Echotype Pro.';
-    await new Promise(r => setTimeout(r, 600));
+    stopSummary = false;
+    for (const [i, of] of [[1, 3], [2, 3], [3, 3], [0, 0]]) {
+      if (stopSummary) throw 'Summary stopped.';
+      emit('meeting-summary', { id, progress: of ? `Summarizing part ${i} of ${of}…` : 'Writing the summary…' });
+      await new Promise(r => setTimeout(r, q.has('slowsum') ? 4000 : 300));
+    }
     const m = meetingList.find(x => x.id === id);
-    m.summary = '## Summary\nSample notes from the preview.\n## Decisions\nNone recorded.\n## Action items\nNone recorded.';
+    m.summary = '## Summary\nSample notes from the preview.\n\n## Key points\n- Ship on Friday.\n- Priya: send the deck by Thursday.';
     return structuredClone(m);
   },
+  meeting_summary_cancel: () => { stopSummary = true; },
   meeting_list: () => meetingList.map(m => ({ ...m, segments: [], summary: null })),
   meeting_get: ({ id }) => structuredClone(meetingList.find(m => m.id === id)),
   // meeting.rs search: every word somewhere, up to 3 lines with the most words, in time order.
